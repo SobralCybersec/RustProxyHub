@@ -1,0 +1,8 @@
+{
+  "name": "rustproxyhub-playwright-bridge",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.60.0"
+  }
+}

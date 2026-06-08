@@ -1,0 +1,20 @@
+[package]
+name = "deepseek-proxy-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-stream.workspace = true
+axum.workspace = true
+browser-bridge = { path = "../browser-bridge" }
+bytes.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+proxy-core = { path = "../proxy-core" }
+reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+uuid.workspace = true
