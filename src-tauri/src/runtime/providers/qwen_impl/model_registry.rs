@@ -1,5 +1,4 @@
 use once_cell::sync::Lazy;
-use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -78,19 +77,6 @@ impl ModelRegistry {
         }
         Self {
             context_windows: Arc::new(Mutex::new(map)),
-        }
-    }
-
-    pub async fn sync_from_models(&self, models: &[Value]) {
-        let mut guard = self.context_windows.lock().await;
-        for model in models {
-            let Some(id) = model.get("id").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(context_window) = model.get("context_window").and_then(Value::as_u64) else {
-                continue;
-            };
-            guard.insert(id.to_owned(), context_window as usize);
         }
     }
 

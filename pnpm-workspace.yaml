@@ -1,9 +1,17 @@
+packages:
+  - frontend
+
 allowBuilds:
+  '@nestjs/core': true
+  '@openapitools/openapi-generator-cli': true
   '@swc/core': true
   electron: true
   esbuild: true
+dangerouslyAllowAllBuilds: true
 minimumReleaseAge: 1440
 onlyBuiltDependencies:
+  - '@nestjs/core'
+  - '@openapitools/openapi-generator-cli'
   - '@swc/core'
   - '@tailwindcss/oxide'
   - electron

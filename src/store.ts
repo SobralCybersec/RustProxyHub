@@ -160,7 +160,6 @@ export const useStore = defineStore('main', {
       this.isRefreshing = true
       try {
         this.overview = await invoke<DashboardOverview>('dashboard_overview')
-        this.syncWorkbenchModel()
       } catch (error) {
         this.error = describeError(error)
       } finally {
@@ -185,10 +184,8 @@ export const useStore = defineStore('main', {
       if (this.isInitialized) return
       this.isInitialized = true
       await this.refreshOverview()
+      this.syncWorkbenchModel()
       await this.loadQwenAccounts()
-      this.refreshTimer = window.setInterval(() => {
-        void this.refreshOverview()
-      }, 4000)
     },
 
     disposeApp() {
@@ -279,6 +276,10 @@ export const useStore = defineStore('main', {
       const prompt = this.workbenchPrompt.trim()
       if (!this.runtimeReady) {
         this.error = this.runtimeIssues[0] ?? 'Runtime preflight is blocking startup.'
+        return
+      }
+      if (this.openLoginCount > 0) {
+        this.error = 'Close active login session before running workbench request.'
         return
       }
       if (!model) {

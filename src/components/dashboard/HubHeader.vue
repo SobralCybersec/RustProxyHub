@@ -1,122 +1,217 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { DashboardOverview } from '@/lib/types'
 import { useStore } from '@/store'
 
-const props = defineProps<{
-  overview: DashboardOverview | null
-}>()
-
+const props = defineProps<{ overview: DashboardOverview | null }>()
 const store = useStore()
 
 const searchValue = computed({
   get: () => store.searchQuery,
   set: (value: string) => store.setSearchQuery(value),
 })
-
 const hub = computed(() => props.overview?.hub ?? null)
+const copied = ref<string | null>(null)
+const isReady = computed(() => props.overview?.runtime.single_runner_ready ?? false)
+const issues = computed(() => props.overview?.runtime.issues ?? [])
+const stats = computed(() => [
+  ['hub.status', hub.value?.health_status ?? 'booting'],
+  ['hub.running', hub.value?.running ? 'true' : 'false'],
+  ['hub.models', hub.value?.model_count ?? 0],
+  ['qwen.accounts', props.overview?.qwen_account_count ?? 0],
+  ['login.windows', store.openLoginCount],
+  ['runner.ready', isReady.value ? 'true' : 'false'],
+])
 
-function copyText(value: string | null | undefined) {
+function copyText(value: string | null | undefined, label: string) {
   if (!value) return
   void navigator.clipboard?.writeText(value)
+  copied.value = label
+  setTimeout(() => (copied.value = null), 1600)
 }
 </script>
 
 <template>
-  <header class="hero panel">
-    <div class="hero-copy">
-      <p class="eyebrow">RustProxy Control Room</p>
-      <h1>One desktop shell. Five browser-backed providers. One hub watching all of them.</h1>
-      <p class="lede">
-        Runtime moved out of Tauri edge work and into one internal engine room. Track status, reopen manual
-        sessions, inspect health, and run live hub probes without leaving this dossier wall.
-      </p>
+  <header class="terminal-panel header-terminal">
+    <div class="terminal-line"><span class="prompt">visitor@rustproxy:~$</span> ./overview.sh --watch --rect</div>
 
-      <label class="field search-field">
-        <span>Trace filter</span>
-        <input v-model="searchValue" type="search" placeholder="providers, models, accounts, states, errors" />
-      </label>
-    </div>
-
-    <div class="hero-rail">
-      <div class="hero-warning">
-        <span class="warning-mark">Runtime status</span>
-        <p v-if="overview?.runtime.single_runner_ready">
-          Single-runner preflight passed. Bundled helper, bundled <code>node.exe</code>, writable data dir, and Edge check all look good.
+    <div class="overview-grid">
+      <section class="terminal-box hero-box">
+        <p class="eyebrow">BOOT BUFFER</p>
+        <h1>RustProxy Terminal Control</h1>
+        <p class="copy">
+          Main page is now the terminal. Each area below behaves like a rectangular shell pane instead of a soft dashboard card.
         </p>
-        <p v-else>
-          Single-runner preflight blocked startup. Fix listed runtime issues before trusting provider status.
-        </p>
-      </div>
 
-      <div class="hero-actions">
-        <button class="primary-button" :disabled="store.isRefreshing" @click="store.refreshOverview()">
-          {{ store.isRefreshing ? 'Refreshing...' : 'Refresh surveillance' }}
-        </button>
-        <button class="ghost-button" :disabled="!hub?.base_url" @click="copyText(hub?.base_url)">
-          Copy hub URL
-        </button>
-        <button class="ghost-button" :disabled="!hub?.openapi_url" @click="copyText(hub?.openapi_url)">
-          Copy OpenAPI
-        </button>
-      </div>
+        <div class="runtime-row" :class="isReady ? 'ok' : 'fail'">
+          <span>{{ isReady ? '[ OK ]' : '[ FAIL ]' }}</span>
+          <strong>{{ isReady ? 'single-runner preflight passed' : 'single-runner preflight blocked' }}</strong>
+        </div>
 
-      <div class="stat-stack">
-        <div class="stat-pill">
-          <span>Hub state</span>
-          <strong>{{ hub?.health_status ?? 'booting' }}</strong>
-        </div>
-        <div class="stat-pill">
-          <span>Hub models</span>
-          <strong>{{ hub?.model_count ?? 0 }}</strong>
-        </div>
-        <div class="stat-pill">
-          <span>Qwen bank</span>
-          <strong>{{ overview?.qwen_account_count ?? 0 }}</strong>
-        </div>
-        <div class="stat-pill">
-          <span>Login windows</span>
-          <strong>{{ store.openLoginCount }}</strong>
-        </div>
-        <div class="stat-pill">
-          <span>Runner</span>
-          <strong>{{ overview?.runtime.single_runner_ready ? 'ready' : 'degraded' }}</strong>
-        </div>
-      </div>
+        <ul v-if="issues.length" class="issue-list">
+          <li v-for="issue in issues" :key="issue">stderr: {{ issue }}</li>
+        </ul>
 
-      <div class="hub-ribbon">
-        <div class="info-card">
-          <p class="info-label">Hub base URL</p>
-          <p class="mono-line">{{ hub?.base_url ?? 'booting embedded hub...' }}</p>
-        </div>
-        <div class="info-card">
-          <p class="info-label">OpenAPI</p>
-          <p class="mono-line">{{ hub?.openapi_url ?? 'waiting for /openapi.json' }}</p>
-        </div>
-        <div class="info-card">
-          <p class="info-label">Helper root</p>
-          <p class="mono-line">{{ overview?.runtime.helper_dir ?? overview?.helper_dir ?? 'resolving helper assets...' }}</p>
-        </div>
-        <div class="info-card">
-          <p class="info-label">Bundled Node</p>
-          <p class="mono-line">{{ overview?.runtime.node_path ?? 'node.exe missing from bundle' }}</p>
-        </div>
-        <div class="info-card">
-          <p class="info-label">Node source</p>
-          <p class="mono-line">{{ overview?.runtime.node_source ?? 'unresolved' }}</p>
-        </div>
-        <div class="info-card">
-          <p class="info-label">Runtime data</p>
-          <p class="mono-line">{{ overview?.app_data_dir ?? 'resolving app data dir...' }}</p>
-        </div>
-      </div>
+        <label class="terminal-field search-field">
+          <span>grep providers</span>
+          <input v-model="searchValue" type="search" placeholder="qwen, models, errors, login state…" />
+        </label>
 
-      <div v-if="overview?.runtime.issues.length" class="hub-ribbon issues-ribbon">
-        <div v-for="issue in overview.runtime.issues" :key="issue" class="info-card issue-card">
-          <p class="info-label">Runtime issue</p>
-          <p>{{ issue }}</p>
+        <div class="actions">
+          <button :disabled="store.isRefreshing" @click.stop="store.refreshOverview()">
+            {{ store.isRefreshing ? 'refreshing…' : './refresh.sh' }}
+          </button>
+          <button :disabled="!hub?.base_url" @click.stop="copyText(hub?.base_url, 'url')">
+            {{ copied === 'url' ? 'copied' : 'copy hub url' }}
+          </button>
+          <button :disabled="!hub?.openapi_url" @click.stop="copyText(hub?.openapi_url, 'api')">
+            {{ copied === 'api' ? 'copied' : 'copy openapi' }}
+          </button>
         </div>
-      </div>
+      </section>
+
+      <aside class="terminal-box stats-box">
+        <div class="file-title">/proc/rustproxy/status</div>
+        <div v-for="([label, value], i) in stats" :key="label" class="stat-row">
+          <span>{{ String(i + 1).padStart(2, '0') }}</span>
+          <strong>{{ label }}</strong>
+          <code>{{ value }}</code>
+        </div>
+        <pre class="mini-log">{{ JSON.stringify({ base_url: hub?.base_url, openapi_url: hub?.openapi_url, running: hub?.running }, null, 2) }}</pre>
+      </aside>
     </div>
   </header>
 </template>
+
+<style scoped>
+/* hard square terminal reset */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+}
+
+:deep(*),
+:deep(*::before),
+:deep(*::after) {
+  border-radius: 0 !important;
+}
+
+input, textarea, select { user-select: text; }
+
+.header-terminal {
+  width: 100%;
+  padding: 1rem;
+  color: lightgreen;
+}
+.terminal-line {
+  margin-bottom: .8rem;
+  font-size: 1.2rem;
+}
+.prompt { color: #7fff9a; margin-right: .45rem; }
+.overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(18rem, .65fr);
+  gap: .8rem;
+}
+.terminal-box {
+  border: 1px solid rgba(144, 238, 144, .42);
+  background: #020702;
+  padding: .85rem;
+}
+.eyebrow {
+  margin: 0 0 .35rem;
+  color: #7fff9a;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+h1 {
+  margin: 0;
+  color: #dfffe4;
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  line-height: .92;
+  font-weight: 400;
+}
+.copy {
+  max-width: 58rem;
+  color: rgba(196, 255, 202, .78);
+  margin: .7rem 0 1rem;
+}
+.runtime-row {
+  display: flex;
+  gap: .6rem;
+  align-items: center;
+  border: 1px solid rgba(144, 238, 144, .32);
+  padding: .5rem .65rem;
+  margin-bottom: .7rem;
+  background: rgba(144, 238, 144, .08);
+}
+.runtime-row.fail {
+  border-color: rgba(255, 91, 91, .45);
+  color: #ffc1c1;
+  background: rgba(80, 0, 0, .22);
+}
+.issue-list {
+  margin: .5rem 0;
+  padding-left: 1.2rem;
+  color: #ffb3b3;
+}
+.terminal-field {
+  display: grid;
+  gap: .35rem;
+  color: #7fff9a;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+}
+input {
+  border: 1px solid rgba(144, 238, 144, .42);
+  background: #000;
+  color: lightgreen;
+  padding: .65rem;
+  font: inherit;
+  outline: none;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .45rem;
+  margin-top: .7rem;
+}
+button {
+  border: 1px solid rgba(144, 238, 144, .42);
+  background: #041004;
+  color: lightgreen;
+  padding: .55rem .75rem;
+  cursor: pointer;
+  font: inherit;
+}
+button:hover { background: rgba(144, 238, 144, .16); }
+button:disabled { opacity: .42; cursor: not-allowed; }
+.file-title {
+  border-bottom: 1px solid rgba(144, 238, 144, .35);
+  padding-bottom: .45rem;
+  margin-bottom: .45rem;
+  color: #dfffe4;
+}
+.stat-row {
+  display: grid;
+  grid-template-columns: 2rem minmax(7rem, 1fr) auto;
+  gap: .65rem;
+  padding: .32rem 0;
+  border-bottom: 1px dashed rgba(144, 238, 144, .18);
+}
+.stat-row span { color: rgba(144, 238, 144, .65); }
+.stat-row code { color: #dfffe4; }
+.mini-log {
+  margin: .8rem 0 0;
+  padding: .65rem;
+  border: 1px solid rgba(144, 238, 144, .24);
+  background: #000;
+  color: rgba(196, 255, 202, .8);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+@media (max-width: 880px) {
+  .overview-grid { grid-template-columns: 1fr; }
+}
+</style>

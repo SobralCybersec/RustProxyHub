@@ -1,3 +1,5 @@
+use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
+use crate::proxy_core::{build_prompt, current_timestamp, usage_from_text, OpenAIRequest};
 use anyhow::Result;
 use async_stream::stream;
 use axum::{
@@ -7,9 +9,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
 use bytes::Bytes;
-use crate::proxy_core::{build_prompt, current_timestamp, usage_from_text, OpenAIRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -99,6 +99,7 @@ pub async fn serve_browser_provider(config: BrowserProviderServerConfig) -> Resu
     let app = Router::new()
         .route("/health", get(health))
         .route("/admin/manual_login", post(admin_manual_login))
+        .route("/admin/close_login", post(admin_close_login))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(CorsLayer::permissive())
@@ -155,43 +156,40 @@ async fn admin_manual_login(
     }
 }
 
+async fn admin_close_login(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    match state.bridge.shutdown().await {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "provider": state.config.kind.as_str(),
+        }))
+        .into_response(),
+        Err(err) => provider_error(&state, err),
+    }
+}
+
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
         return *response;
     }
 
-    if let Err(err) = ensure_headless_ready(&state).await {
-        return provider_error(&state, err);
-    }
-
-    match state
-        .bridge
-        .request::<_, Value>("list_models", json!({}))
-        .await
-    {
-        Ok(payload) => {
-            let data = payload
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            Json(json!({
-                "object": "list",
-                "data": data,
-                "errors": [],
-            }))
-            .into_response()
-        }
-        Err(err) => Json(json!({
-            "object": "list",
-            "data": [],
-            "errors": [{
-                "provider": state.config.kind.as_str(),
-                "message": err.to_string(),
-            }],
-        }))
-        .into_response(),
-    }
+    Json(json!({
+        "object": "list",
+        "data": [{
+            "id": state.config.kind.default_model(),
+            "object": "model",
+            "created": current_timestamp(),
+            "owned_by": state.config.kind.as_str(),
+            "permission": [],
+            "root": state.config.kind.default_model(),
+            "parent": Value::Null,
+        }],
+        "errors": [],
+    }))
+    .into_response()
 }
 
 async fn chat_completions(
@@ -248,16 +246,9 @@ async fn request_browser_chat(
         .await
 }
 
-fn json_browser_chat(
-    state: AppState,
-    body: OpenAIRequest,
-    chat: BridgeChatResponse,
-) -> Response {
+fn json_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatResponse) -> Response {
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
-    let model = chat
-        .model
-        .clone()
-        .unwrap_or_else(|| body.model.clone());
+    let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
     let usage = usage_from_text(&build_prompt(&body), &chat.text, true);
     let provider_warnings = build_provider_warnings(&state.config.kind, &body, &chat);
 
@@ -285,16 +276,9 @@ fn json_browser_chat(
     .into_response()
 }
 
-fn stream_browser_chat(
-    state: AppState,
-    body: OpenAIRequest,
-    chat: BridgeChatResponse,
-) -> Response {
+fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatResponse) -> Response {
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
-    let model = chat
-        .model
-        .clone()
-        .unwrap_or_else(|| body.model.clone());
+    let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
     let prompt = build_prompt(&body);
     let provider_warnings = build_provider_warnings(&state.config.kind, &body, &chat);
     let chunks = split_text_chunks(&chat.text, 320);
@@ -412,7 +396,10 @@ fn split_text_chunks(text: &str, max_chars: usize) -> Vec<String> {
     chunks
 }
 
-fn require_api_key(headers: &HeaderMap, api_key: Option<&str>) -> std::result::Result<(), Box<Response>> {
+fn require_api_key(
+    headers: &HeaderMap,
+    api_key: Option<&str>,
+) -> std::result::Result<(), Box<Response>> {
     let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) else {
         return Ok(());
     };
@@ -444,11 +431,7 @@ fn provider_error(state: &AppState, err: anyhow::Error) -> Response {
 
     json_error(
         status,
-        format!(
-            "{} request failed: {}",
-            state.config.kind.as_str(),
-            message
-        ),
+        format!("{} request failed: {}", state.config.kind.as_str(), message),
     )
 }
 

@@ -1,3 +1,10 @@
+use crate::browser_bridge::{
+    BrowserBridge, CaptureHeadersParams, InitParams, ManualLoginParams, PlaywrightBridge,
+};
+use crate::proxy_core::{
+    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
+    StreamingToolParser, ToolCallFunction,
+};
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use axum::{
@@ -8,15 +15,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use crate::browser_bridge::{
-    BrowserBridge, CaptureHeadersParams, InitParams, ManualLoginParams, PlaywrightBridge,
-};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use crate::proxy_core::{
-    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
-    StreamingToolParser, ToolCallFunction,
-};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -138,6 +138,7 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
     let app = Router::new()
         .route("/health", get(health))
         .route("/admin/manual_login", post(admin_manual_login))
+        .route("/admin/close_login", post(admin_close_login))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(CorsLayer::permissive())
@@ -201,12 +202,8 @@ fn load_config() -> AppConfig {
 pub async fn serve_embedded(config: DeepseekServiceConfig) -> Result<()> {
     tokio::fs::create_dir_all(&config.runtime_dir).await?;
     let bridge = Arc::new(
-        PlaywrightBridge::new_with_node(
-            &config.helper_dir,
-            config.node_path.clone(),
-            "deepseek",
-        )
-        .await?,
+        PlaywrightBridge::new_with_node(&config.helper_dir, config.node_path.clone(), "deepseek")
+            .await?,
     );
     run_server(
         bridge,
@@ -244,6 +241,17 @@ async fn admin_manual_login(
         })
         .await
     {
+        Ok(()) => Json(json!({ "ok": true, "provider": "deepseek" })).into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+async fn admin_close_login(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref(), true) {
+        return *response;
+    }
+
+    match state.bridge.shutdown().await {
         Ok(()) => Json(json!({ "ok": true, "provider": "deepseek" })).into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }

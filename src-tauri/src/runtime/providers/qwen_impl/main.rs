@@ -8,6 +8,14 @@ mod stream_registry;
 mod upload;
 mod watchdog;
 
+use crate::browser_bridge::{
+    BrowserBridge, CaptureHeadersParams, CloseAccountParams, InitParams, ManualLoginParams,
+    PlaywrightBridge,
+};
+use crate::proxy_core::{
+    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
+    StreamingToolParser, ToolCallFunction,
+};
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use axum::{
@@ -18,16 +26,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use crate::browser_bridge::{
-    BrowserBridge, CaptureHeadersParams, CloseAccountParams, InitParams, ManualLoginParams,
-    PlaywrightBridge,
-};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use crate::proxy_core::{
-    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
-    StreamingToolParser, ToolCallFunction,
-};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -500,12 +500,10 @@ async fn admin_close_login(
     }
 
     let Some(account_id) = body.account_id else {
-        return Json(json!({
-            "ok": true,
-            "provider": "qwen",
-            "note": "Global Qwen browser sessions stay attached to the shared bridge. Close the window manually if needed."
-        }))
-        .into_response();
+        return match state.bridge.shutdown().await {
+            Ok(()) => Json(json!({ "ok": true, "provider": "qwen" })).into_response(),
+            Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        };
     };
 
     match state
@@ -717,109 +715,11 @@ async fn fetch_models(state: &AppState) -> Result<Value> {
         return Ok(cached);
     }
 
-    let (_, headers) = match pick_headers_for_aux_request(state).await {
-        Ok(value) => value,
-        Err(err) => {
-            return Ok(fallback_models_payload(
-                state,
-                format!("Qwen browser session unavailable: {err}"),
-            )
-            .await);
-        }
-    };
-
-    let response = match state
-        .client
-        .get(format!("{}/api/models", state.config.qwen_base_url))
-        .timeout(Duration::from_secs(15))
-        .header("accept", "application/json, text/plain, */*")
-        .header("accept-language", "pt-BR,pt;q=0.9")
-        .header("cookie", headers.get("cookie").cloned().unwrap_or_default())
-        .header("referer", format!("{}/", state.config.qwen_base_url))
-        .header(
-            "user-agent",
-            headers.get("user-agent").cloned().unwrap_or_default(),
-        )
-        .header("x-request-id", Uuid::new_v4().to_string())
-        .header("bx-v", headers.get("bx-v").cloned().unwrap_or_default())
-        .header("timezone", "UTC")
-        .header("source", "web")
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(err) => {
-            return Ok(fallback_models_payload(
-                state,
-                format!("Qwen live model fetch failed: {err}"),
-            )
-            .await);
-        }
-    };
-
-    if !response.status().is_success() {
-        return Ok(fallback_models_payload(
-            state,
-            format!(
-                "Qwen models error: {} {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ),
-        )
-        .await);
-    }
-
-    let raw: Value = match response.json().await {
-        Ok(raw) => raw,
-        Err(err) => {
-            return Ok(fallback_models_payload(
-                state,
-                format!("Qwen model payload parse failed: {err}"),
-            )
-            .await);
-        }
-    };
-    let models = raw
-        .get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-
-    if models.is_empty() {
-        return Ok(fallback_models_payload(
-            state,
-            "Qwen returned no live models; using fallback catalog".to_owned(),
-        )
-        .await);
-    }
-
-    let mut formatted = Vec::new();
-    for model in models {
-        if let Some(id) = model.get("id").and_then(Value::as_str) {
-            let entry = json!({
-                "id": id,
-                "name": model.get("name").and_then(Value::as_str).unwrap_or(id),
-                "object": "model",
-                "owned_by": model.get("owned_by").and_then(Value::as_str).unwrap_or("qwen"),
-                "created": model.get("info").and_then(Value::as_object).and_then(|info| info.get("created_at")).cloned().unwrap_or_else(|| Value::from(current_timestamp())),
-                "context_window": model.get("info").and_then(Value::as_object).and_then(|info| info.get("meta")).and_then(Value::as_object).and_then(|meta| meta.get("max_context_length")).cloned().unwrap_or(Value::Null),
-                "capabilities": model.get("info").and_then(Value::as_object).and_then(|info| info.get("meta")).and_then(Value::as_object).and_then(|meta| meta.get("capabilities")).cloned().unwrap_or(Value::Null),
-            });
-            formatted.push(entry.clone());
-            formatted.push(json!({
-                "id": format!("{id}-no-thinking"),
-                "name": format!("{} (No Thinking)", entry.get("name").and_then(Value::as_str).unwrap_or(id)),
-                "object": "model",
-                "owned_by": entry.get("owned_by").cloned().unwrap_or(Value::String("qwen".to_owned())),
-                "created": entry.get("created").cloned().unwrap_or(Value::from(current_timestamp())),
-                "context_window": entry.get("context_window").cloned().unwrap_or(Value::Null),
-                "capabilities": entry.get("capabilities").cloned().unwrap_or(Value::Null),
-            }));
-        }
-    }
-
-    state.model_registry.sync_from_models(&formatted).await;
-    let payload = json!({ "object": "list", "data": formatted });
+    let payload = fallback_models_payload(
+        state,
+        "Qwen live model catalog deferred until a browser request starts.".to_owned(),
+    )
+    .await;
     state
         .cache
         .set_json(
@@ -1758,23 +1658,6 @@ fn account_id_for_bridge(account: &QwenAccount) -> Option<String> {
     (account.id != "global").then(|| account.id.clone())
 }
 
-async fn pick_headers_for_aux_request(
-    state: &AppState,
-) -> Result<(QwenAccount, HashMap<String, String>)> {
-    let accounts = effective_accounts(&state.accounts)?;
-    let account = state
-        .account_manager
-        .select_next(&accounts, false)
-        .await
-        .unwrap_or_else(global_account);
-    let headers = state
-        .bridge
-        .basic_headers(account_id_for_bridge(&account))
-        .await?
-        .headers;
-    Ok((account, headers))
-}
-
 async fn pick_capture_headers_for_aux_request(
     state: &AppState,
 ) -> Result<(QwenAccount, HashMap<String, String>)> {
@@ -2022,9 +1905,7 @@ pub async fn serve_embedded(
         config.chat_timeout,
     );
 
-    let bridge = Arc::new(
-        PlaywrightBridge::new_with_node(&helper_dir, node_path, "qwen").await?,
-    );
+    let bridge = Arc::new(PlaywrightBridge::new_with_node(&helper_dir, node_path, "qwen").await?);
 
     run_server(
         bridge,

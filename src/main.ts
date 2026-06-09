@@ -3,7 +3,7 @@ import { createApp } from 'vue'
 import App from './App.vue'
 import './assets/main.css'
 
-if (import.meta.env.DEV) {
+if (import.meta.env.VITE_ENABLE_VUE_DEVTOOLS === '1') {
   void import('@vue/devtools').then(({ devtools }) => {
     devtools.connect('http://localhost', 8098)
   })

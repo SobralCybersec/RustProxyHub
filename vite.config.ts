@@ -19,7 +19,7 @@ export default defineConfig({
   plugins: [
     tailwind(),
     vue(),
-    process.env.NODE_ENV !== 'production' ? vueDevTools() : null,
+    process.env.VITE_ENABLE_VUE_DEVTOOLS === '1' ? vueDevTools() : null,
     AutoImport({
       imports: [
         'vue',

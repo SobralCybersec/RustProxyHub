@@ -4,9 +4,7 @@
   "version": "2.11.2",
   "type": "module",
   "scripts": {
-    "dev": "concurrently --kill-others \"pnpm vite:dev\" \"pnpm devtools\"",
-    "vite:dev": "cross-env DEBUG=0 vite",
-    "devtools": "vue-devtools",
+    "dev": "cross-env DEBUG=0 vite",
     "test": "vitest",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
@@ -20,6 +18,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
     "@vue/devtools": "^8.1.1",
+    "chart.js": "^4.5.1",
     "pinia": "^3.0.4",
     "playwright": "^1.60.0",
     "vue": "^3.5.30"
@@ -47,6 +46,7 @@
     "eslint": "^10.4.1",
     "eslint-plugin-security": "^4.0.0",
     "eslint-plugin-vue": "^10.9.2",
+    "jsdom": "^27.2.0",
     "lodash-es": "^4.17.23",
     "prettier": "^3.8.1",
     "tailwindcss": "^4.3.0",
@@ -56,7 +56,6 @@
     "vite": "^8.0.16",
     "vite-plugin-vue-devtools": "^8.1.1",
     "vitest": "^4.1.8",
-    "vue-tsc": "^3.3.4",
-    "jsdom": "^27.2.0"
+    "vue-tsc": "^3.3.4"
   }
 }

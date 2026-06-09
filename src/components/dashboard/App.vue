@@ -237,7 +237,7 @@ onBeforeUnmount(() => {
       </section>
 
       <footer class="rustproxy-bottom-shell" @click="focusShell">
-        <div class="terminal-separator">╾───────────────────────────────────────────────────────────────────── rustproxyshell :: panes ───────────────────────────────────────────────────────────────────────╼</div>
+        <div class="terminal-separator">╾──────────────────────────── rustproxyshell :: panes ────────────────────────────╼</div>
 
         <nav class="terminal-tabs" aria-label="RustProxy terminal panes">
           <button
@@ -280,11 +280,10 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* hard square terminal reset */
-
 
 @import url('https://fonts.googleapis.com/css?family=VT323');
 
+/* hard square terminal reset */
 *,
 *::before,
 *::after {
@@ -296,6 +295,7 @@ onBeforeUnmount(() => {
 :deep(*::after) {
   border-radius: 0 !important;
 }
+
 
 :global(:root) {
   --vt-font-family: 'VT323', 'JetBrains Mono', Consolas, monospace;

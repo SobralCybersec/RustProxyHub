@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    App: typeof import('./src/components/dashboard/App.vue')['default']
     DetailsDrawer: typeof import('./src/components/dashboard/DetailsDrawer.vue')['default']
     HubHeader: typeof import('./src/components/dashboard/HubHeader.vue')['default']
     LoginStudio: typeof import('./src/components/dashboard/LoginStudio.vue')['default']

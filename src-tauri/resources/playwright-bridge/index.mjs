@@ -164,11 +164,20 @@ function ensureSessionText(value, fallback) {
   return typeof value === 'string' && value.trim() ? value : fallback
 }
 
+async function closeContext(context) {
+  if (!context) return
+  const browser = typeof context.browser === 'function' ? context.browser() : null
+  await context.close().catch(() => {})
+  if (browser) {
+    await browser.close().catch(() => {})
+  }
+}
+
 async function initDeepSeek({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
   if (state.deepseek.context && state.deepseek.headless === headless) return
   if (state.deepseek.context) {
-    await state.deepseek.context.close()
+    await closeContext(state.deepseek.context)
     state.deepseek.context = null
     state.deepseek.page = null
   }
@@ -255,7 +264,7 @@ async function initChatGPT({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
   if (state.chatgpt.context && state.chatgpt.headless === headless) return
   if (state.chatgpt.context) {
-    await state.chatgpt.context.close()
+    await closeContext(state.chatgpt.context)
     state.chatgpt.context = null
     state.chatgpt.page = null
     state.chatgpt.cachedHeaders = null
@@ -558,7 +567,7 @@ async function initGemini({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
   if (state.gemini.context && state.gemini.headless === headless) return
   if (state.gemini.context) {
-    await state.gemini.context.close()
+    await closeContext(state.gemini.context)
     state.gemini.context = null
     state.gemini.page = null
     state.gemini.cachedHeaders = null
@@ -757,7 +766,7 @@ async function initKimi({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
   if (state.kimi.context && state.kimi.headless === headless) return
   if (state.kimi.context) {
-    await state.kimi.context.close()
+    await closeContext(state.kimi.context)
     state.kimi.context = null
     state.kimi.page = null
     state.kimi.currentHeaders = {}
@@ -904,7 +913,7 @@ async function initQwen({ runtime_dir, headless, browser, account_id = null }) {
   const slot = getQwenSlot(account_id)
   if (slot.context && slot.headless === headless) return
   if (slot.context) {
-    await slot.context.close()
+    await closeContext(slot.context)
     resetQwenSlot(slot)
   }
   const profileId = account_id || '_default'
@@ -1118,7 +1127,7 @@ async function loginQwenAccount({ account_id, email, password, headless = true, 
 async function closeQwenAccount({ account_id = null }) {
   const slot = getQwenSlot(account_id)
   if (slot.context) {
-    await slot.context.close()
+    await closeContext(slot.context)
   }
   resetQwenSlot(slot)
   if (account_id) {
@@ -1130,7 +1139,7 @@ async function closeQwenAccount({ account_id = null }) {
 async function closeAll() {
   for (const key of ['deepseek', 'chatgpt', 'gemini', 'kimi', 'qwen']) {
     if (state[key].context) {
-      await state[key].context.close()
+      await closeContext(state[key].context)
       if (key === 'qwen') {
         resetQwenSlot(state.qwen)
       } else {
@@ -1144,10 +1153,17 @@ async function closeAll() {
   }
   for (const [accountId, slot] of qwenAccounts.entries()) {
     if (slot.context) {
-      await slot.context.close()
+      await closeContext(slot.context)
     }
     qwenAccounts.delete(accountId)
   }
+}
+
+async function shutdownAndExit(code = 0) {
+  await closeAll().catch((error) => {
+    process.stderr.write(`shutdown cleanup failed: ${error instanceof Error ? error.message : String(error)}\n`)
+  })
+  process.exit(code)
 }
 
 async function handle(method, provider, params) {
@@ -1208,6 +1224,7 @@ async function handle(method, provider, params) {
     case 'kimi:shutdown':
     case 'qwen:shutdown':
       await closeAll()
+      setImmediate(() => process.exit(0))
       return { ok: true }
     default:
       throw new Error(`Unsupported helper call: ${provider}:${method}`)
@@ -1233,4 +1250,16 @@ process.stdin.on('data', async (chunk) => {
     }
     newlineIndex = buffer.indexOf('\n')
   }
+})
+
+process.stdin.on('end', () => {
+  void shutdownAndExit(0)
+})
+
+process.on('SIGTERM', () => {
+  void shutdownAndExit(0)
+})
+
+process.on('SIGINT', () => {
+  void shutdownAndExit(0)
 })

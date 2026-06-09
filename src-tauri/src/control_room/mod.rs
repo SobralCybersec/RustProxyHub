@@ -1,13 +1,12 @@
 mod qwen_accounts;
 mod runtime;
 
-use anyhow::{anyhow, Context, Result};
 use crate::runtime::{
-    build_embedded_config,
-    serve_browser_provider, BrowserProviderKind, BrowserProviderServerConfig,
-    DeepseekServiceConfig, HubServiceConfig, KimiServiceConfig, ProviderConfig,
-    serve_deepseek, serve_hub, serve_kimi, serve_qwen,
+    build_embedded_config, serve_browser_provider, serve_deepseek, serve_hub, serve_kimi,
+    serve_qwen, BrowserProviderKind, BrowserProviderServerConfig, DeepseekServiceConfig,
+    HubServiceConfig, KimiServiceConfig, ProviderConfig,
 };
+use anyhow::{anyhow, Context, Result};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -25,8 +24,7 @@ use tokio::sync::Mutex;
 use self::{
     qwen_accounts::{
         add_qwen_account as add_qwen_account_db, ensure_qwen_db,
-        list_qwen_accounts as list_qwen_accounts_db,
-        remove_qwen_account as remove_qwen_account_db,
+        list_qwen_accounts as list_qwen_accounts_db, remove_qwen_account as remove_qwen_account_db,
         QwenAccountSummary,
     },
     runtime::{
@@ -498,7 +496,11 @@ impl ControlState {
             runtime: self.runtime.clone(),
             hub: self.hub_overview().await,
             providers,
-            qwen_account_count: list_qwen_accounts_db(&self.qwen_runtime_dir(), &self.workspace_root)?.len(),
+            qwen_account_count: list_qwen_accounts_db(
+                &self.qwen_runtime_dir(),
+                &self.workspace_root,
+            )?
+            .len(),
             open_provider_login_sessions: self
                 .open_provider_login_sessions
                 .lock()
@@ -571,7 +573,11 @@ impl ControlState {
             .as_ref()
             .and_then(|(_, payload)| payload.get("status"))
             .and_then(Value::as_str)
-            .unwrap_or(if status.running { "starting" } else { "offline" })
+            .unwrap_or(if status.running {
+                "starting"
+            } else {
+                "offline"
+            })
             .to_owned();
         let provider_statuses = detail
             .as_ref()
@@ -602,8 +608,7 @@ impl ControlState {
         let base_url = provider_base_url(name);
         let health = self.call_json_get(&base_url, "/health", None).await.ok();
         let open_provider_sessions = self.open_provider_login_sessions.lock().await.clone();
-        let open_qwen_account_sessions =
-            self.open_qwen_account_login_sessions.lock().await.clone();
+        let open_qwen_account_sessions = self.open_qwen_account_login_sessions.lock().await.clone();
         let login_open = open_provider_sessions.contains(name);
 
         let models = if login_open {
@@ -629,7 +634,11 @@ impl ControlState {
             .as_ref()
             .and_then(|(_, payload)| payload.get("status"))
             .and_then(Value::as_str)
-            .unwrap_or(if status.running { "starting" } else { "offline" })
+            .unwrap_or(if status.running {
+                "starting"
+            } else {
+                "offline"
+            })
             .to_owned();
 
         let login_state = if login_open {
@@ -667,7 +676,10 @@ impl ControlState {
 
 #[tauri::command]
 async fn dashboard_overview(state: State<'_, ControlState>) -> Result<DashboardOverview, String> {
-    state.build_dashboard_overview().await.map_err(|err| err.to_string())
+    state
+        .build_dashboard_overview()
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -738,7 +750,7 @@ async fn run_workbench_request(
         "web_search": request.web_search,
     });
 
-    let (status, value) = state
+    let (status, mut value) = state
         .call_json_post(
             &hub_base_url(),
             "/v1/chat/completions",
@@ -749,19 +761,40 @@ async fn run_workbench_request(
         .map_err(|err| err.to_string())?;
 
     if status >= 400 {
-        Err(value
+        return Err(value
             .get("error")
             .and_then(|item| item.get("message"))
             .and_then(Value::as_str)
             .unwrap_or("hub request failed")
-            .to_owned())
-    } else {
-        Ok(value)
+            .to_owned());
     }
+
+    // Handle reasoning models: merge reasoning_content into content if content is empty
+    if let Some(choices) = value.get_mut("choices").and_then(Value::as_array_mut) {
+        for choice in choices.iter_mut() {
+            if let Some(message) = choice.get_mut("message").and_then(Value::as_object_mut) {
+                let content_empty = message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true);
+                
+                if content_empty {
+                    if let Some(reasoning) = message.get("reasoning_content").cloned() {
+                        message.insert("content".to_owned(), reasoning);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(value)
 }
 
 #[tauri::command]
-async fn list_qwen_accounts(state: State<'_, ControlState>) -> Result<Vec<QwenAccountSummary>, String> {
+async fn list_qwen_accounts(
+    state: State<'_, ControlState>,
+) -> Result<Vec<QwenAccountSummary>, String> {
     list_qwen_accounts_db(&state.qwen_runtime_dir(), &state.workspace_root)
         .map_err(|err| err.to_string())
 }
@@ -777,8 +810,8 @@ async fn add_qwen_account(
         &request.email,
         &request.password,
     )
-        .and_then(|_| list_qwen_accounts_db(&state.qwen_runtime_dir(), &state.workspace_root))
-        .map_err(|err| err.to_string())
+    .and_then(|_| list_qwen_accounts_db(&state.qwen_runtime_dir(), &state.workspace_root))
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -786,9 +819,13 @@ async fn remove_qwen_account(
     state: State<'_, ControlState>,
     account_id: String,
 ) -> Result<Vec<QwenAccountSummary>, String> {
-    remove_qwen_account_db(&state.qwen_runtime_dir(), &state.workspace_root, &account_id)
-        .and_then(|_| list_qwen_accounts_db(&state.qwen_runtime_dir(), &state.workspace_root))
-        .map_err(|err| err.to_string())
+    remove_qwen_account_db(
+        &state.qwen_runtime_dir(),
+        &state.workspace_root,
+        &account_id,
+    )
+    .and_then(|_| list_qwen_accounts_db(&state.qwen_runtime_dir(), &state.workspace_root))
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -801,17 +838,23 @@ async fn start_provider_login_session(
         "browser": request.browser.unwrap_or_else(|| DEFAULT_BROWSER.to_owned()),
     });
 
-    let (_, response) = state
-        .call_json_post(&provider_base_url(provider), "/admin/manual_login", None, &payload)
+    let (status, response) = state
+        .call_json_post(
+            &provider_base_url(provider),
+            "/admin/manual_login",
+            None,
+            &payload,
+        )
         .await
         .map_err(|err| err.to_string())?;
 
-    if let Some(message) = response
-        .get("error")
-        .and_then(|item| item.get("message"))
-        .and_then(Value::as_str)
-    {
-        return Err(message.to_owned());
+    if status >= 400 {
+        return Err(response
+            .get("error")
+            .and_then(|item| item.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("manual login failed")
+            .to_owned());
     }
 
     let mut guard = state.open_provider_login_sessions.lock().await;
@@ -825,6 +868,15 @@ async fn stop_provider_login_session(
     provider: String,
 ) -> Result<Vec<String>, String> {
     let provider = normalize_provider(&provider).map_err(|err| err.to_string())?;
+    let _ = state
+        .call_json_post(
+            &provider_base_url(provider),
+            "/admin/close_login",
+            None,
+            &json!({}),
+        )
+        .await;
+
     let mut guard = state.open_provider_login_sessions.lock().await;
     guard.remove(provider);
     Ok(guard.iter().cloned().collect())
@@ -839,26 +891,33 @@ async fn start_qwen_account_login_session(
         return Err("account_id is required".to_owned());
     }
 
+    let account_id = request.account_id;
     let payload = json!({
         "browser": request.browser.unwrap_or_else(|| DEFAULT_BROWSER.to_owned()),
-        "account_id": request.account_id,
+        "account_id": account_id.clone(),
     });
 
-    let (_, response) = state
-        .call_json_post(&provider_base_url("qwen"), "/admin/manual_login", None, &payload)
+    let (status, response) = state
+        .call_json_post(
+            &provider_base_url("qwen"),
+            "/admin/manual_login",
+            None,
+            &payload,
+        )
         .await
         .map_err(|err| err.to_string())?;
 
-    if let Some(message) = response
-        .get("error")
-        .and_then(|item| item.get("message"))
-        .and_then(Value::as_str)
-    {
-        return Err(message.to_owned());
+    if status >= 400 {
+        return Err(response
+            .get("error")
+            .and_then(|item| item.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("manual account login failed")
+            .to_owned());
     }
 
     let mut guard = state.open_qwen_account_login_sessions.lock().await;
-    guard.insert(payload["account_id"].as_str().unwrap_or_default().to_owned());
+    guard.insert(account_id);
     Ok(guard.iter().cloned().collect())
 }
 
@@ -876,7 +935,7 @@ async fn stop_qwen_account_login_session(
             &provider_base_url("qwen"),
             "/admin/close_login",
             None,
-            &json!({ "account_id": account_id }),
+            &json!({ "account_id": account_id.clone() }),
         )
         .await;
 
@@ -1051,7 +1110,9 @@ mod tests {
         let statuses = state.statuses.lock().await;
         for name in service_names() {
             assert_eq!(
-                statuses.get(name).and_then(|entry| entry.last_error.as_deref()),
+                statuses
+                    .get(name)
+                    .and_then(|entry| entry.last_error.as_deref()),
                 Some("Bundled node.exe not found in Tauri resources.")
             );
         }
@@ -1064,8 +1125,13 @@ mod tests {
         let qwen_runtime_dir = app_data_dir.join("providers").join("qwen");
 
         ensure_qwen_db(&qwen_runtime_dir, &workspace_root).unwrap();
-        add_qwen_account_db(&qwen_runtime_dir, &workspace_root, "pilot@example.com", "secret")
-            .unwrap();
+        add_qwen_account_db(
+            &qwen_runtime_dir,
+            &workspace_root,
+            "pilot@example.com",
+            "secret",
+        )
+        .unwrap();
 
         let mut statuses = HashMap::new();
         let mut logs = HashMap::new();

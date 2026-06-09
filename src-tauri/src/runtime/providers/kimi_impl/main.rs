@@ -1,3 +1,10 @@
+use crate::browser_bridge::{
+    BrowserBridge, CaptureHeadersParams, InitParams, ManualLoginParams, PlaywrightBridge,
+};
+use crate::proxy_core::{
+    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
+    StreamingToolParser, ToolCallFunction,
+};
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use axum::{
@@ -8,16 +15,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use crate::browser_bridge::{
-    BrowserBridge, CaptureHeadersParams, InitParams, ManualLoginParams, PlaywrightBridge,
-};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use once_cell::sync::Lazy;
-use crate::proxy_core::{
-    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
-    StreamingToolParser, ToolCallFunction,
-};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -180,6 +180,7 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
     let app = Router::new()
         .route("/health", get(health))
         .route("/admin/manual_login", post(admin_manual_login))
+        .route("/admin/close_login", post(admin_close_login))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(CorsLayer::permissive())
@@ -282,6 +283,17 @@ async fn admin_manual_login(
         })
         .await
     {
+        Ok(()) => Json(json!({ "ok": true, "provider": "kimi" })).into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+async fn admin_close_login(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    match state.bridge.shutdown().await {
         Ok(()) => Json(json!({ "ok": true, "provider": "kimi" })).into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }

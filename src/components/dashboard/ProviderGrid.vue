@@ -1,130 +1,149 @@
 <script setup lang="ts">
 import type { ProviderName, ProviderOverview } from '@/lib/types'
+import { useStore } from '@/store'
 
-defineProps<{
-  providers: ProviderOverview[]
-}>()
-
+defineProps<{ providers: ProviderOverview[] }>()
 const store = useStore()
-
 const providerTitles: Record<ProviderName, string> = {
-  qwen: 'Qwen account bank',
-  deepseek: 'DeepSeek bridge',
-  kimi: 'Kimi auto-continue',
-  chatgpt: 'ChatGPT browser session',
-  gemini: 'Gemini browser session',
+  qwen: 'Qwen Account Bank',
+  deepseek: 'DeepSeek Bridge',
+  kimi: 'Kimi Bridge',
+  chatgpt: 'ChatGPT Session',
+  gemini: 'Gemini Session',
 }
-
-const providerNotes: Record<ProviderName, string> = {
-  qwen: 'Rotation, uploads, stop control, and prefixed hub models.',
-  deepseek: 'Reasoning-heavy browser proxy with normalized search flag support.',
-  kimi: 'Pause-aware browser proxy with explicit unsupported-search warnings.',
-  chatgpt: 'Manual Playwright login, live model discovery, and bridged completions.',
-  gemini: 'Manual Playwright login, live model discovery, and bridged completions.',
-}
-
 function loginOpen(provider: ProviderName) {
   return store.overview?.open_provider_login_sessions.includes(provider) ?? false
 }
-
 function statusTone(provider: ProviderOverview) {
   if (!provider.running) return 'idle'
-  if (provider.login_state === 'authenticated') return 'healthy'
-  if (provider.health_status === 'ok') return 'running'
-  if (provider.health_status === 'degraded') return 'degraded'
-  return 'running'
+  if (provider.login_state === 'authenticated') return 'ok'
+  if (provider.health_status === 'degraded') return 'warn'
+  return 'run'
 }
-
 function formatStarted(value: number | null) {
-  if (!value) return 'n/a'
-  return new Date(value * 1000).toLocaleString()
+  return value ? new Date(value * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'n/a'
 }
 </script>
 
 <template>
-  <section class="panel providers-panel">
-    <div class="panel-top">
-      <div>
-        <p class="eyebrow">Provider dossiers</p>
-        <h2>Embedded proxy surfaces</h2>
-        <p class="panel-copy">
-          Each bridge lives inside same runtime spine now. Use cards for fast triage, then open full dossier
-          when you need health payloads or local logs.
-        </p>
+  <section class="terminal-panel providers-terminal">
+    <div class="terminal-line"><span class="prompt">visitor@rustproxy:~$</span> tail -f providers.log --square</div>
+    <div class="table-head"><span>provider</span><span>status</span><span>models</span><span>base url</span><span>actions</span></div>
+
+    <article v-for="provider in providers" :key="provider.name" class="provider-row" :data-state="statusTone(provider)">
+      <div class="provider-name">
+        <strong>{{ provider.name }}</strong>
+        <small>{{ providerTitles[provider.name] }}</small>
       </div>
-      <span class="status-chip" :data-state="providers.length ? 'accent' : 'idle'">
-        {{ providers.length }} visible
-      </span>
-    </div>
+      <div>
+        <code>{{ provider.login_state.replaceAll('_', ' ') }}</code>
+        <small>{{ provider.health_status }} · started {{ formatStarted(provider.started_at) }}</small>
+      </div>
+      <div class="model-count">{{ provider.model_count }}</div>
+      <div class="url-cell">{{ provider.base_url || 'no base url' }}</div>
+      <div class="row-actions">
+        <button :disabled="store.isBusy(`login:start:${provider.name}`)" @click.stop="store.startProviderLogin(provider.name)">
+          {{ loginOpen(provider.name) ? 'reopen' : 'login' }}
+        </button>
+        <button :disabled="!loginOpen(provider.name)" @click.stop="store.stopProviderLogin(provider.name)">done</button>
+        <button @click.stop="store.openProviderDrawer(provider.name)">dossier</button>
+      </div>
+      <div class="model-cloud">
+        <span v-for="model in provider.models.slice(0, 12)" :key="`${provider.name}:${model}`">{{ provider.name }}:{{ model }}</span>
+        <em v-if="!provider.models.length">empty model buffer</em>
+        <em v-if="provider.models.length > 12">+{{ provider.models.length - 12 }} more</em>
+      </div>
+    </article>
 
-    <div class="provider-grid provider-grid-expanded">
-      <article v-for="provider in providers" :key="provider.name" class="provider-panel">
-        <div class="dossier-index">FILE {{ provider.name.toUpperCase() }}</div>
-
-        <div class="panel-top">
-          <div>
-            <p class="eyebrow">{{ provider.name }}</p>
-            <h3>{{ providerTitles[provider.name] }}</h3>
-            <p class="panel-copy">{{ providerNotes[provider.name] }}</p>
-          </div>
-          <span class="status-chip" :data-state="statusTone(provider)">
-            {{ provider.login_state.replaceAll('_', ' ') }}
-          </span>
-        </div>
-
-        <dl class="facts">
-          <div>
-            <dt>Health</dt>
-            <dd>{{ provider.health_status }}</dd>
-          </div>
-          <div>
-            <dt>Models</dt>
-            <dd>{{ provider.model_count }}</dd>
-          </div>
-          <div>
-            <dt>Started</dt>
-            <dd>{{ formatStarted(provider.started_at) }}</dd>
-          </div>
-        </dl>
-
-        <div class="info-card">
-          <p class="info-label">Base URL</p>
-          <p class="mono-line">{{ provider.base_url }}</p>
-        </div>
-
-        <div class="provider-meta-line">
-          <span class="mini-pill" :data-state="provider.web_search_supported ? 'healthy' : 'idle'">
-            {{ provider.web_search_supported ? 'web search mapped' : 'web search warned' }}
-          </span>
-          <span v-if="provider.last_error" class="mini-pill" data-state="degraded">last error captured</span>
-          <span v-if="loginOpen(provider.name)" class="mini-pill" data-state="accent">login window open</span>
-        </div>
-
-        <div class="model-cloud">
-          <span v-for="model in provider.models.slice(0, 8)" :key="`${provider.name}:${model}`" class="model-chip">
-            {{ provider.name }}:{{ model }}
-          </span>
-          <span v-if="!provider.models.length" class="empty-chip">No live models loaded yet.</span>
-        </div>
-
-        <div class="action-row">
-          <button
-            class="ghost-button"
-            :disabled="store.isBusy(`login:start:${provider.name}`)"
-            @click="store.startProviderLogin(provider.name)"
-          >
-            {{ loginOpen(provider.name) ? 'Reopen login' : 'Open login' }}
-          </button>
-          <button
-            class="secondary-button"
-            :disabled="!loginOpen(provider.name)"
-            @click="store.stopProviderLogin(provider.name)"
-          >
-            Mark done
-          </button>
-          <button class="primary-button" @click="store.openProviderDrawer(provider.name)">Open dossier</button>
-        </div>
-      </article>
-    </div>
+    <div v-if="!providers.length" class="empty-terminal">stdout: no providers match the current grep filter.</div>
   </section>
 </template>
+
+<style scoped>
+/* hard square terminal reset */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+}
+
+:deep(*),
+:deep(*::before),
+:deep(*::after) {
+  border-radius: 0 !important;
+}
+
+input, textarea, select { user-select: text; }
+
+.providers-terminal { width: 100%; padding: .9rem; }
+.terminal-line { color: #b9ffd0; font-size: 1.2rem; margin-bottom: .75rem; }
+.prompt { color: #7fff9a; margin-right: .45rem; }
+.table-head,
+.provider-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1.2fr .45fr 1.4fr 1fr;
+  gap: .7rem;
+  align-items: center;
+}
+.table-head {
+  color: #7fff9a;
+  text-transform: uppercase;
+  letter-spacing: .13em;
+  padding: .55rem .65rem;
+  border: 1px solid rgba(144, 238, 144, .35);
+  background: rgba(144, 238, 144, .08);
+}
+.provider-row {
+  position: relative;
+  padding: .75rem .65rem;
+  border-left: 1px solid rgba(144, 238, 144, .35);
+  border-right: 1px solid rgba(144, 238, 144, .35);
+  border-bottom: 1px solid rgba(144, 238, 144, .22);
+  background: #020702;
+}
+.provider-row::before {
+  content: '[RUN]';
+  color: #8affaa;
+}
+.provider-row[data-state='idle']::before { content: '[OFF]'; color: #6f8b76; }
+.provider-row[data-state='warn']::before { content: '[WRN]'; color: #ffd37d; }
+.provider-row[data-state='ok']::before { content: '[ OK]'; color: #b9ffd0; }
+.provider-name strong { display: block; color: #e8fff0; text-transform: uppercase; }
+.provider-name small,
+.provider-row small { display: block; color: rgba(190, 255, 203, .66); margin-top: .18rem; }
+code { color: #a9ffd0; }
+.model-count { color: #effff3; font-size: 1.35rem; }
+.url-cell { color: rgba(196, 255, 202, .76); word-break: break-all; }
+.row-actions { display: flex; flex-wrap: wrap; gap: .35rem; }
+button {
+  border: 1px solid rgba(144, 238, 144, .42);
+  background: #041004;
+  color: lightgreen;
+  padding: .45rem .6rem;
+  cursor: pointer;
+  font: inherit;
+}
+button:hover { background: rgba(144, 238, 144, .16); }
+button:disabled { opacity: .42; cursor: not-allowed; }
+.model-cloud {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem;
+  padding-left: 3.5rem;
+}
+.model-cloud span,
+.model-cloud em {
+  border: 1px solid rgba(144, 238, 144, .24);
+  padding: .18rem .45rem;
+  color: #a5ffc2;
+  background: #000;
+  font-style: normal;
+}
+.empty-terminal { padding: 1rem; color: rgba(196, 255, 202, .75); }
+@media (max-width: 960px) {
+  .table-head { display: none; }
+  .provider-row { grid-template-columns: 1fr; border: 1px solid rgba(144, 238, 144, .35); margin-bottom: .5rem; }
+  .model-cloud { padding-left: 0; }
+}
+</style>
