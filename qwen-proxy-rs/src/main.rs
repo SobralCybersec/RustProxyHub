@@ -1,7 +1,7 @@
 mod account_manager;
-mod accounts;
+pub mod accounts;
 mod cache;
-mod config;
+pub mod config;
 mod metrics;
 mod model_registry;
 mod stream_registry;
@@ -39,7 +39,7 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::{
+use self::{
     account_manager::AccountManager,
     accounts::{global_account, AccountStore, QwenAccount},
     cache::MemoryCache,
@@ -160,6 +160,20 @@ struct StopRequest {
     response_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManualLoginRequest {
+    #[serde(default)]
+    browser: Option<String>,
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloseLoginRequest {
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -246,6 +260,8 @@ async fn run_server(
         .route("/health", get(health))
         .route("/metrics", get(metrics_route))
         .route("/admin/status", get(admin_status))
+        .route("/admin/manual_login", post(admin_manual_login))
+        .route("/admin/close_login", post(admin_close_login))
         .route("/v1/models", get(models))
         .route("/v1/models/{model}", get(model_by_id))
         .route("/v1/chat/completions", post(chat_completions))
@@ -427,6 +443,57 @@ async fn admin_status(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "metrics": state.metrics.snapshot_json().await,
         }))
         .into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+async fn admin_manual_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ManualLoginRequest>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return response;
+    }
+
+    match state
+        .bridge
+        .manual_login(ManualLoginParams {
+            runtime_dir: state.config.runtime_dir.to_string_lossy().to_string(),
+            browser: body.browser.unwrap_or_else(|| state.config.browser.clone()),
+            account_id: body.account_id,
+        })
+        .await
+    {
+        Ok(()) => Json(json!({ "ok": true, "provider": "qwen" })).into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+async fn admin_close_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<CloseLoginRequest>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return response;
+    }
+
+    let Some(account_id) = body.account_id else {
+        return Json(json!({
+            "ok": true,
+            "provider": "qwen",
+            "note": "Global Qwen browser sessions stay attached to the shared bridge. Close the window manually if needed."
+        }))
+        .into_response();
+    };
+
+    match state
+        .bridge
+        .close_account(CloseAccountParams { account_id })
+        .await
+    {
+        Ok(()) => Json(json!({ "ok": true, "provider": "qwen" })).into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
@@ -1336,7 +1403,7 @@ async fn request_qwen_chat(
                 "auto_thinking": false,
                 "thinking_mode": "Thinking",
                 "thinking_format": "summary",
-                "auto_search": false
+                "auto_search": body.web_search.unwrap_or(false)
             },
             "extra": { "meta": { "subChatType": "t2t" } },
             "sub_chat_type": "t2t",
@@ -1870,6 +1937,7 @@ async fn truncate_request(request: &OpenAIRequest, registry: &ModelRegistry) -> 
             model: request.model.clone(),
             messages: candidate_messages,
             stream: request.stream,
+            web_search: request.web_search,
             tools: request.tools.clone(),
             tool_choice: request.tool_choice.clone(),
             stream_options: request.stream_options.clone(),
@@ -1886,6 +1954,7 @@ async fn truncate_request(request: &OpenAIRequest, registry: &ModelRegistry) -> 
         model: request.model.clone(),
         messages,
         stream: request.stream,
+        web_search: request.web_search,
         tools: request.tools.clone(),
         tool_choice: request.tool_choice.clone(),
         stream_options: request.stream_options.clone(),
@@ -1934,4 +2003,46 @@ where
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(stream))
         .expect("valid streaming response")
+}
+
+pub async fn serve_embedded(
+    config: AppConfig,
+    helper_dir: std::path::PathBuf,
+    node_path: Option<std::path::PathBuf>,
+) -> Result<()> {
+    ensure_runtime_layout(&config)?;
+
+    let workspace_root = workspace_root();
+    let accounts = AccountStore::new(
+        config.db_path.clone(),
+        &legacy_db_candidates(&workspace_root),
+        &legacy_accounts_json_candidates(&workspace_root),
+    )?;
+    let metrics = Metrics::new().await;
+    let cache = MemoryCache::new(config.cache.default_ttl, 10_000, metrics.clone());
+    let model_registry = ModelRegistry::new().await;
+    let stream_registry = StreamRegistry::new();
+    let watchdog = Watchdog::start(
+        config.watchdog.clone(),
+        metrics.clone(),
+        stream_registry.clone(),
+        cache.clone(),
+        config.chat_timeout,
+    );
+
+    let bridge = Arc::new(
+        PlaywrightBridge::new_with_node(&helper_dir, node_path, "qwen").await?,
+    );
+
+    run_server(
+        bridge,
+        config,
+        accounts,
+        metrics,
+        cache,
+        model_registry,
+        stream_registry,
+        watchdog,
+    )
+    .await
 }

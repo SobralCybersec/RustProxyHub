@@ -21,6 +21,7 @@ use proxy_core::{
     StreamingToolParser, ToolCallFunction,
 };
 use regex::Regex;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -66,6 +67,18 @@ struct AppConfig {
     headless: bool,
     browser: String,
     runtime_dir: PathBuf,
+}
+
+#[derive(Clone)]
+pub struct KimiServiceConfig {
+    pub host: String,
+    pub port: u16,
+    pub api_key: Option<String>,
+    pub headless: bool,
+    pub browser: String,
+    pub runtime_dir: PathBuf,
+    pub helper_dir: PathBuf,
+    pub node_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -121,6 +134,12 @@ struct ConsumeResult {
     tool_calls: Vec<MessageToolCall>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManualLoginRequest {
+    #[serde(default)]
+    browser: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -154,6 +173,7 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/admin/manual_login", post(admin_manual_login))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(CorsLayer::permissive())
@@ -212,8 +232,51 @@ fn load_config() -> AppConfig {
     }
 }
 
+pub async fn serve_embedded(config: KimiServiceConfig) -> Result<()> {
+    tokio::fs::create_dir_all(&config.runtime_dir).await?;
+    let bridge = Arc::new(
+        PlaywrightBridge::new_with_node(&config.helper_dir, config.node_path.clone(), "kimi")
+            .await?,
+    );
+    run_server(
+        bridge,
+        AppConfig {
+            host: config.host,
+            port: config.port,
+            api_key: config.api_key,
+            headless: config.headless,
+            browser: config.browser,
+            runtime_dir: config.runtime_dir,
+        },
+    )
+    .await
+}
+
 async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
+}
+
+async fn admin_manual_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ManualLoginRequest>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return response;
+    }
+
+    match state
+        .bridge
+        .manual_login(ManualLoginParams {
+            runtime_dir: state.config.runtime_dir.to_string_lossy().to_string(),
+            browser: body.browser.unwrap_or_else(|| state.config.browser.clone()),
+            account_id: None,
+        })
+        .await
+    {
+        Ok(()) => Json(json!({ "ok": true, "provider": "kimi" })).into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -255,6 +318,14 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
         .iter()
         .any(|message| message.role == "assistant");
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
+    let provider_warnings = if body.web_search == Some(true) {
+        vec![Value::String(
+            "Kimi web search toggle is not supported yet. Chat continued without forcing search."
+                .to_owned(),
+        )]
+    } else {
+        Vec::new()
+    };
 
     let (response, ui_session_id) = request_kimi_stream(
         &state,
@@ -324,7 +395,8 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                 "logprobs": Value::Null,
                 "finish_reason": if tool_calls.is_empty() { "stop" } else { "tool_calls" }
             }],
-            "usage": usage
+            "usage": usage,
+            "provider_warnings": provider_warnings,
         }))
         .into_response());
     }
@@ -337,7 +409,8 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
             "object": "chat.completion.chunk",
             "created": current_timestamp(),
             "model": model,
-            "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "" }, "logprobs": Value::Null, "finish_reason": Value::Null }]
+            "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "" }, "logprobs": Value::Null, "finish_reason": Value::Null }],
+            "provider_warnings": provider_warnings,
         })));
 
         let mut current_response = response;

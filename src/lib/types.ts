@@ -1,41 +1,44 @@
-export type ProviderName = 'deepseek' | 'kimi' | 'qwen'
+export type ProviderName = 'qwen' | 'deepseek' | 'kimi' | 'chatgpt' | 'gemini'
 export type ServiceName = 'hub' | ProviderName
 
-export interface ServiceConfig {
+export interface HubConfigResponse {
   port: number
-  apiKey: string
-  browser: string
-  headless: boolean
+  base_url: string
+  openapi_url: string
+  api_key_enabled: boolean
 }
 
-export interface ServiceModelSummary {
-  id: string
-  provider: ProviderName | null
-}
-
-export interface ServiceEndpoints {
-  base_url: string | null
-  health_url: string | null
-  models_url: string | null
-  chat_url: string | null
-  openapi_url: string | null
-  stop_url: string | null
-  upload_url: string | null
-}
-
-export interface ServiceSnapshot {
-  provider: ServiceName
+export interface HubOverview extends HubConfigResponse {
   running: boolean
-  port: number | null
-  pid: number | null
   started_at: number | null
-  launch_preview: string | null
-  logs: string[]
-  health: Record<string, unknown> | null
+  health_status: string
   model_count: number
-  models: ServiceModelSummary[]
-  admin_status: Record<string, unknown> | null
-  endpoints: ServiceEndpoints
+  provider_statuses: Record<string, unknown>[]
+  detail: Record<string, unknown> | null
+}
+
+export interface ProviderOverview {
+  name: ProviderName
+  running: boolean
+  started_at: number | null
+  base_url: string
+  health_status: string
+  login_state: string
+  model_count: number
+  models: string[]
+  web_search_supported: boolean
+  last_error: string | null
+}
+
+export interface DashboardOverview {
+  generated_at: number
+  app_data_dir: string
+  helper_dir: string
+  hub: HubOverview
+  providers: ProviderOverview[]
+  qwen_account_count: number
+  open_provider_login_sessions: ProviderName[]
+  open_qwen_account_login_sessions: string[]
 }
 
 export interface QwenAccountSummary {
@@ -45,11 +48,22 @@ export interface QwenAccountSummary {
   created_at: string | null
 }
 
-export interface DashboardSnapshot {
-  tools_root: string
-  rust_proxy_hub: string
-  services: ServiceSnapshot[]
-  qwen_accounts: QwenAccountSummary[]
-  open_login_sessions: string[]
-  provider_login_sessions: ProviderName[]
+export interface ProviderDetails {
+  overview: ProviderOverview
+  detail: Record<string, unknown> | null
+  logs: string[]
+  qwen_accounts: QwenAccountSummary[] | null
+}
+
+export interface ProviderLogs {
+  provider: ServiceName
+  entries: string[]
+}
+
+export interface BrowserPrefs {
+  qwen: string
+  deepseek: string
+  kimi: string
+  chatgpt: string
+  gemini: string
 }

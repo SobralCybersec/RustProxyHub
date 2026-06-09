@@ -1,4 +1,4 @@
-use crate::{
+use super::{
     cache::MemoryCache, config::WatchdogConfig, metrics::Metrics, stream_registry::StreamRegistry,
 };
 use serde::Serialize;

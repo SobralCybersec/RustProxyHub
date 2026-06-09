@@ -4,11 +4,23 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const localPlaywrightUrl = new URL('./node_modules/playwright/index.mjs', import.meta.url)
-const fallbackPlaywrightUrl = new URL('../../proxy/deepsproxy/node_modules/playwright/index.mjs', import.meta.url)
-const playwright = await import(
-  fs.existsSync(fileURLToPath(localPlaywrightUrl)) ? localPlaywrightUrl : fallbackPlaywrightUrl
-)
+async function importPlaywright() {
+  const candidateUrls = [
+    new URL('./node_modules/playwright/index.mjs', import.meta.url),
+    new URL('../node_modules/playwright/index.mjs', import.meta.url),
+    new URL('../../node_modules/playwright/index.mjs', import.meta.url),
+  ]
+
+  for (const candidate of candidateUrls) {
+    if (fs.existsSync(fileURLToPath(candidate))) {
+      return import(candidate)
+    }
+  }
+
+  return import('playwright')
+}
+
+const playwright = await importPlaywright()
 const { chromium, firefox, webkit } = playwright
 
 function ensureDir(dir) {
@@ -24,6 +36,7 @@ function resolveEngine(browser) {
     case 'chrome':
       return { engine: chromium, channel: 'chrome' }
     case 'edge':
+    case 'msedge':
       return { engine: chromium, channel: 'msedge' }
     case 'chromium':
     default:
@@ -43,10 +56,26 @@ const state = {
   deepseek: {
     context: null,
     page: null,
+    headless: null,
+  },
+  chatgpt: {
+    context: null,
+    page: null,
+    headless: null,
+    cachedHeaders: null,
+    lastHeadersTime: 0,
+  },
+  gemini: {
+    context: null,
+    page: null,
+    headless: null,
+    cachedHeaders: null,
+    lastHeadersTime: 0,
   },
   kimi: {
     context: null,
     page: null,
+    headless: null,
     currentHeaders: {},
     cachedHeaders: null,
     lastHeadersTime: 0,
@@ -54,6 +83,7 @@ const state = {
   qwen: {
     context: null,
     page: null,
+    headless: null,
     currentHeaders: {},
     cachedHeaders: null,
     lastHeadersTime: 0,
@@ -68,6 +98,7 @@ function freshQwenSlot() {
   return {
     context: null,
     page: null,
+    headless: null,
     currentHeaders: {},
     cachedHeaders: null,
     lastHeadersTime: 0,
@@ -89,6 +120,7 @@ function getQwenSlot(accountId = null) {
 function resetQwenSlot(slot) {
   slot.context = null
   slot.page = null
+  slot.headless = null
   slot.currentHeaders = {}
   slot.cachedHeaders = null
   slot.lastHeadersTime = 0
@@ -96,9 +128,18 @@ function resetQwenSlot(slot) {
   slot.userAgent = null
 }
 
+function ensureSessionText(value, fallback) {
+  return typeof value === 'string' && value.trim() ? value : fallback
+}
+
 async function initDeepSeek({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
-  if (state.deepseek.context) return
+  if (state.deepseek.context && state.deepseek.headless === headless) return
+  if (state.deepseek.context) {
+    await state.deepseek.context.close()
+    state.deepseek.context = null
+    state.deepseek.page = null
+  }
   ensureDir(path.resolve('deepseek_profile'))
   const { engine, channel } = resolveEngine(browser)
   state.deepseek.context = await engine.launchPersistentContext(path.resolve('deepseek_profile'), {
@@ -115,6 +156,7 @@ async function initDeepSeek({ runtime_dir, headless, browser }) {
     ],
   })
   state.deepseek.page = await state.deepseek.context.newPage()
+  state.deepseek.headless = headless
 }
 
 async function captureDeepSeekHeaders(forceNew = false) {
@@ -174,9 +216,511 @@ async function openDeepSeekLogin({ runtime_dir, browser }) {
   await state.deepseek.page.goto('https://chat.deepseek.com/', { waitUntil: 'domcontentloaded' })
 }
 
+async function initChatGPT({ runtime_dir, headless, browser }) {
+  process.chdir(runtime_dir)
+  if (state.chatgpt.context && state.chatgpt.headless === headless) return
+  if (state.chatgpt.context) {
+    await state.chatgpt.context.close()
+    state.chatgpt.context = null
+    state.chatgpt.page = null
+    state.chatgpt.cachedHeaders = null
+    state.chatgpt.lastHeadersTime = 0
+  }
+  ensureDir(path.resolve('chatgpt_profile'))
+  const { engine, channel } = resolveEngine(browser)
+  state.chatgpt.context = await engine.launchPersistentContext(path.resolve('chatgpt_profile'), {
+    headless,
+    channel,
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: ['--disable-blink-features=AutomationControlled'],
+  })
+  await state.chatgpt.context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+  })
+  state.chatgpt.page = await state.chatgpt.context.newPage()
+  state.chatgpt.headless = headless
+}
+
+async function captureChatGPTTemplate(forceNew = false) {
+  const page = state.chatgpt.page
+  if (!page) throw new Error('ChatGPT Playwright not initialized')
+
+  if (!forceNew && state.chatgpt.cachedHeaders && Date.now() - state.chatgpt.lastHeadersTime < 5 * 60 * 1000) {
+    return state.chatgpt.cachedHeaders
+  }
+
+  if (!page.url().includes('chatgpt.com') || forceNew) {
+    await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
+  }
+
+  const inputSelector = 'textarea:visible, #prompt-textarea:visible, div[contenteditable="true"]:visible'
+  await page.waitForSelector(inputSelector, { timeout: 30000 }).catch(() => {
+    throw new Error('Timeout waiting for ChatGPT input. Are you logged in?')
+  })
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timeout waiting for ChatGPT request template')), 60000)
+    const routeHandler = async (route, request) => {
+      clearTimeout(timeout)
+      const reqHeaders = request.headers()
+      const postData = request.postData() || ''
+      let payloadModel = 'chatgpt-web-session'
+
+      try {
+        payloadModel = JSON.parse(postData).model || payloadModel
+      } catch {}
+
+      const headers = {
+        authorization: reqHeaders.authorization || '',
+        accept: reqHeaders.accept || 'text/event-stream',
+        'accept-language': reqHeaders['accept-language'] || 'en-US,en;q=0.9',
+        'content-type': reqHeaders['content-type'] || 'application/json',
+        origin: reqHeaders.origin || 'https://chatgpt.com',
+        referer: reqHeaders.referer || 'https://chatgpt.com/',
+        'user-agent': reqHeaders['user-agent'] || '',
+        'oai-client-build-number': reqHeaders['oai-client-build-number'] || '',
+        'oai-client-version': reqHeaders['oai-client-version'] || '',
+        'oai-device-id': reqHeaders['oai-device-id'] || '',
+        'oai-language': reqHeaders['oai-language'] || 'en-US',
+        'oai-session-id': reqHeaders['oai-session-id'] || '',
+        'openai-sentinel-chat-requirements-token': reqHeaders['openai-sentinel-chat-requirements-token'] || '',
+        'openai-sentinel-proof-token': reqHeaders['openai-sentinel-proof-token'] || '',
+        'openai-sentinel-turnstile-token': reqHeaders['openai-sentinel-turnstile-token'] || '',
+        'x-conduit-token': reqHeaders['x-conduit-token'] || '',
+        'x-oai-turn-trace-id': reqHeaders['x-oai-turn-trace-id'] || '',
+        'x-openai-target-path': reqHeaders['x-openai-target-path'] || '/backend-api/f/conversation',
+        'x-openai-target-route': reqHeaders['x-openai-target-route'] || '/backend-api/f/conversation',
+      }
+
+      if (!headers.authorization) {
+        await route.continue()
+        return
+      }
+
+      state.chatgpt.cachedHeaders = {
+        headers,
+        payload: postData,
+        model: payloadModel,
+        url: request.url(),
+      }
+      state.chatgpt.lastHeadersTime = Date.now()
+
+      await route.abort('aborted')
+      await page.unroute('**/backend-api/f/conversation*', routeHandler)
+      resolve(state.chatgpt.cachedHeaders)
+    }
+
+    page.route('**/backend-api/f/conversation*', routeHandler).then(async () => {
+      await page.focus(inputSelector)
+      await page.fill(inputSelector, '')
+      await page.type(inputSelector, 'a', { delay: 50 })
+      await sleep(1500)
+      await page.keyboard.press('Enter')
+    })
+  })
+}
+
+async function getChatGPTBasicHeaders() {
+  const page = state.chatgpt.page
+  if (!page) throw new Error('ChatGPT Playwright not initialized')
+
+  const cookies = await page.context().cookies()
+  const cookie = cookies.map((item) => `${item.name}=${item.value}`).join('; ')
+  const userAgent = await page.evaluate(() => navigator.userAgent)
+  const template = state.chatgpt.cachedHeaders
+
+  return {
+    headers: {
+      cookie,
+      authorization: template?.headers?.authorization || '',
+      'user-agent': userAgent,
+      origin: 'https://chatgpt.com',
+      referer: 'https://chatgpt.com/',
+    },
+  }
+}
+
+function buildChatGPTPayload(prompt, model, webSearch) {
+  return {
+    action: 'next',
+    messages: [
+      {
+        id: randomUUID(),
+        author: { role: 'user' },
+        create_time: Date.now() / 1000,
+        content: {
+          content_type: 'text',
+          parts: [prompt],
+        },
+        metadata: {
+          developer_mode_connector_ids: [],
+          selected_sources: webSearch ? ['web'] : [],
+          selected_github_repos: [],
+          selected_all_github_repos: false,
+          serialization_metadata: {
+            custom_symbol_offsets: [],
+          },
+        },
+      },
+    ],
+    parent_message_id: 'client-created-root',
+    model,
+    client_prepare_state: 'success',
+    timezone_offset_min: -new Date().getTimezoneOffset(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    conversation_mode: { kind: 'primary_assistant' },
+    enable_message_followups: true,
+    system_hints: [],
+    supports_buffering: true,
+    supported_encodings: ['v1'],
+    client_contextual_info: {
+      app_name: 'chatgpt.com',
+    },
+    paragen_cot_summary_display_override: 'allow',
+    force_parallel_switch: 'auto',
+    thinking_effort: model.includes('thinking') ? 'extended' : 'auto',
+  }
+}
+
+function extractChatGPTAssistantText(payload) {
+  if (!payload || typeof payload !== 'object') return ''
+  const mapping = payload.mapping && typeof payload.mapping === 'object' ? Object.values(payload.mapping) : []
+  const messages = mapping
+    .map((entry) => entry?.message)
+    .filter((message) => message?.author?.role === 'assistant')
+    .sort((left, right) => (left?.create_time || 0) - (right?.create_time || 0))
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const content = messages[index]?.content
+    if (!content) continue
+    const parts = Array.isArray(content.parts) ? content.parts : []
+    const text = parts
+      .filter((part) => typeof part === 'string')
+      .join('\n')
+      .trim()
+    if (text) return text
+  }
+
+  return ''
+}
+
+async function listChatGPTModels() {
+  const template = await captureChatGPTTemplate(false)
+  return {
+    data: [
+      {
+        id: ensureSessionText(template.model, 'chatgpt-web-session'),
+        provider: 'chatgpt',
+      },
+    ],
+  }
+}
+
+async function chatChatGPT({ model, prompt, web_search = false }) {
+  const page = state.chatgpt.page
+  if (!page) throw new Error('ChatGPT Playwright not initialized')
+
+  const template = await captureChatGPTTemplate(true)
+  const requestHeaders = { ...template.headers }
+  delete requestHeaders.cookie
+
+  const payload = buildChatGPTPayload(prompt, ensureSessionText(model, template.model || 'chatgpt-web-session'), web_search)
+  const requestResult = await page.evaluate(async ({ headers, payload }) => {
+    const response = await fetch('https://chatgpt.com/backend-api/f/conversation', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify(payload),
+    })
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    let raw = ''
+    let conversationId = ''
+
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        raw += decoder.decode(value, { stream: true })
+        const lines = raw.split('\n')
+        raw = lines.pop() || ''
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed.startsWith('data:')) continue
+          const chunk = trimmed.slice(5).trim()
+          if (!chunk || chunk === '[DONE]') continue
+          try {
+            const parsed = JSON.parse(chunk)
+            conversationId =
+              parsed.conversation_id ||
+              parsed.token?.conversation_id ||
+              parsed.options?.[0]?.conversation_id ||
+              conversationId
+          } catch {}
+        }
+      }
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      conversationId,
+    }
+  }, { headers: requestHeaders, payload })
+
+  if (!requestResult.ok || !requestResult.conversationId) {
+    throw new Error(`ChatGPT upstream request failed with status ${requestResult.status}`)
+  }
+
+  const conversationJson = await page.evaluate(async ({ headers, conversationId }) => {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await fetch(`https://chatgpt.com/backend-api/conversation/${conversationId}`, {
+        method: 'GET',
+        credentials: 'include',
+        headers,
+      })
+
+      if (response.ok) {
+        const text = await response.text()
+        if (text && text !== 'null') {
+          return text
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+
+    return ''
+  }, { headers: requestHeaders, conversationId: requestResult.conversationId })
+
+  const text = extractChatGPTAssistantText(conversationJson ? JSON.parse(conversationJson) : null)
+  if (!text) {
+    throw new Error('ChatGPT response was empty. Confirm session is active, then retry.')
+  }
+
+  return {
+    text,
+    model: payload.model,
+    conversation_id: requestResult.conversationId,
+    warning: web_search
+      ? 'ChatGPT web search toggle not mapped yet. Current web-session defaults were used.'
+      : null,
+  }
+}
+
+async function openChatGPTLogin({ runtime_dir, browser }) {
+  await initChatGPT({ runtime_dir, headless: false, browser })
+  await state.chatgpt.page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
+}
+
+async function initGemini({ runtime_dir, headless, browser }) {
+  process.chdir(runtime_dir)
+  if (state.gemini.context && state.gemini.headless === headless) return
+  if (state.gemini.context) {
+    await state.gemini.context.close()
+    state.gemini.context = null
+    state.gemini.page = null
+    state.gemini.cachedHeaders = null
+    state.gemini.lastHeadersTime = 0
+  }
+  ensureDir(path.resolve('gemini_profile'))
+  const { engine, channel } = resolveEngine(browser)
+  state.gemini.context = await engine.launchPersistentContext(path.resolve('gemini_profile'), {
+    headless,
+    channel,
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: ['--disable-blink-features=AutomationControlled'],
+  })
+  await state.gemini.context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+  })
+  state.gemini.page = await state.gemini.context.newPage()
+  state.gemini.headless = headless
+}
+
+async function captureGeminiTemplate(forceNew = false) {
+  const page = state.gemini.page
+  if (!page) throw new Error('Gemini Playwright not initialized')
+
+  if (!forceNew && state.gemini.cachedHeaders && Date.now() - state.gemini.lastHeadersTime < 5 * 60 * 1000) {
+    return state.gemini.cachedHeaders
+  }
+
+  if (!page.url().includes('gemini.google.com') || forceNew) {
+    await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' })
+  }
+
+  const inputSelector = 'rich-textarea textarea, textarea:visible, div[contenteditable="true"]:visible'
+  await page.waitForSelector(inputSelector, { timeout: 30000 }).catch(() => {
+    throw new Error('Timeout waiting for Gemini input. Are you logged in?')
+  })
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timeout waiting for Gemini request template')), 60000)
+    const routeHandler = async (route, request) => {
+      clearTimeout(timeout)
+      const reqHeaders = request.headers()
+      const headers = {
+        accept: reqHeaders.accept || '*/*',
+        'accept-language': reqHeaders['accept-language'] || 'en-US,en;q=0.9',
+        'content-type': reqHeaders['content-type'] || 'application/x-www-form-urlencoded;charset=UTF-8',
+        origin: reqHeaders.origin || 'https://gemini.google.com',
+        referer: reqHeaders.referer || 'https://gemini.google.com/app',
+        'user-agent': reqHeaders['user-agent'] || '',
+        'x-goog-ext-525001261-jspb': reqHeaders['x-goog-ext-525001261-jspb'] || '',
+        'x-goog-ext-525005358-jspb': reqHeaders['x-goog-ext-525005358-jspb'] || '',
+        'x-same-domain': reqHeaders['x-same-domain'] || '1',
+      }
+
+      state.gemini.cachedHeaders = {
+        headers,
+        payload: request.postData() || '',
+        url: request.url(),
+      }
+      state.gemini.lastHeadersTime = Date.now()
+
+      await route.abort('aborted')
+      await page.unroute('**/StreamGenerate*', routeHandler)
+      resolve(state.gemini.cachedHeaders)
+    }
+
+    page.route('**/StreamGenerate*', routeHandler).then(async () => {
+      await page.focus(inputSelector)
+      await page.fill(inputSelector, '')
+      await page.type(inputSelector, 'a', { delay: 50 })
+      await sleep(1500)
+      await page.keyboard.press('Enter')
+    })
+  })
+}
+
+async function getGeminiBasicHeaders() {
+  const page = state.gemini.page
+  if (!page) throw new Error('Gemini Playwright not initialized')
+
+  const cookies = await page.context().cookies()
+  const cookie = cookies.map((item) => `${item.name}=${item.value}`).join('; ')
+  const userAgent = await page.evaluate(() => navigator.userAgent)
+
+  return {
+    headers: {
+      cookie,
+      'user-agent': userAgent,
+      origin: 'https://gemini.google.com',
+      referer: 'https://gemini.google.com/app',
+    },
+  }
+}
+
+function extractGeminiText(body) {
+  for (const rawLine of body.split('\n')) {
+    const line = rawLine.replace(/^\)\]\}'/, '').trim()
+    if (!line.startsWith('[')) continue
+    try {
+      const envelope = JSON.parse(line)
+      const payload = envelope?.[0]?.[2]
+      if (typeof payload !== 'string') continue
+      const decoded = JSON.parse(payload)
+      const text =
+        decoded?.[4]?.[0]?.[1]?.[0] ||
+        decoded?.[4]?.[0]?.[0] ||
+        decoded?.[0]?.[0] ||
+        ''
+      if (typeof text === 'string' && text.trim()) {
+        return text.trim()
+      }
+    } catch {}
+  }
+
+  return ''
+}
+
+async function listGeminiModels() {
+  await captureGeminiTemplate(false)
+  return {
+    data: [
+      {
+        id: 'gemini-web-session',
+        provider: 'gemini',
+      },
+    ],
+  }
+}
+
+async function chatGemini({ prompt, web_search = false }) {
+  const page = state.gemini.page
+  if (!page) throw new Error('Gemini Playwright not initialized')
+
+  const template = await captureGeminiTemplate(true)
+  const form = new URLSearchParams(template.payload)
+  const rawFReq = form.get('f.req')
+  if (!rawFReq) {
+    throw new Error('Gemini request template missing f.req payload')
+  }
+
+  const outer = JSON.parse(rawFReq)
+  const inner = JSON.parse(outer[1])
+  if (Array.isArray(inner[0])) {
+    inner[0][0] = prompt
+  } else {
+    inner[0] = [prompt, 0, null, null, null, null, 0]
+  }
+  outer[1] = JSON.stringify(inner)
+  form.set('f.req', JSON.stringify(outer))
+
+  const requestHeaders = { ...template.headers }
+  const response = await page.evaluate(async ({ url, headers, body }) => {
+    const result = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body,
+    })
+    return {
+      ok: result.ok,
+      status: result.status,
+      body: await result.text(),
+    }
+  }, { url: template.url, headers: requestHeaders, body: form.toString() })
+
+  if (!response.ok) {
+    throw new Error(`Gemini upstream request failed with status ${response.status}`)
+  }
+
+  const text = extractGeminiText(response.body)
+  if (!text) {
+    throw new Error('Gemini response was empty. Confirm session is active, then retry.')
+  }
+
+  return {
+    text,
+    model: 'gemini-web-session',
+    warning: web_search
+      ? 'Gemini web search toggle not mapped yet. Current web-session defaults were used.'
+      : null,
+  }
+}
+
+async function openGeminiLogin({ runtime_dir, browser }) {
+  await initGemini({ runtime_dir, headless: false, browser })
+  await state.gemini.page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' })
+}
+
 async function initKimi({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
-  if (state.kimi.context) return
+  if (state.kimi.context && state.kimi.headless === headless) return
+  if (state.kimi.context) {
+    await state.kimi.context.close()
+    state.kimi.context = null
+    state.kimi.page = null
+    state.kimi.currentHeaders = {}
+    state.kimi.cachedHeaders = null
+    state.kimi.lastHeadersTime = 0
+  }
   ensureDir(path.resolve('kimi_profile'))
   const { engine, channel } = resolveEngine(browser)
   state.kimi.context = await engine.launchPersistentContext(path.resolve('kimi_profile'), {
@@ -190,6 +734,7 @@ async function initKimi({ runtime_dir, headless, browser }) {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
   state.kimi.page = await state.kimi.context.newPage()
+  state.kimi.headless = headless
 }
 
 async function getKimiBasicHeaders() {
@@ -310,7 +855,11 @@ async function openKimiLogin({ runtime_dir, browser }) {
 async function initQwen({ runtime_dir, headless, browser, account_id = null }) {
   process.chdir(runtime_dir)
   const slot = getQwenSlot(account_id)
-  if (slot.context) return
+  if (slot.context && slot.headless === headless) return
+  if (slot.context) {
+    await slot.context.close()
+    resetQwenSlot(slot)
+  }
   const profileId = account_id || '_default'
   ensureDir(path.resolve('qwen_profiles', profileId))
   const { engine, channel } = resolveEngine(browser)
@@ -325,6 +874,7 @@ async function initQwen({ runtime_dir, headless, browser, account_id = null }) {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
   slot.page = await slot.context.newPage()
+  slot.headless = headless
   if (!account_id) {
     await attemptQwenAutoLogin(null)
   }
@@ -527,7 +1077,7 @@ async function closeQwenAccount({ account_id = null }) {
 }
 
 async function closeAll() {
-  for (const key of ['deepseek', 'kimi', 'qwen']) {
+  for (const key of ['deepseek', 'chatgpt', 'gemini', 'kimi', 'qwen']) {
     if (state[key].context) {
       await state[key].context.close()
       if (key === 'qwen') {
@@ -535,6 +1085,9 @@ async function closeAll() {
       } else {
         state[key].context = null
         state[key].page = null
+        state[key].headless = null
+        state[key].cachedHeaders = null
+        state[key].lastHeadersTime = 0
       }
     }
   }
@@ -554,6 +1107,30 @@ async function handle(method, provider, params) {
       return captureDeepSeekHeaders(!!params.force_new)
     case 'deepseek:manual_login':
       return openDeepSeekLogin(params)
+    case 'chatgpt:init':
+      return initChatGPT(params)
+    case 'chatgpt:capture_headers':
+      return captureChatGPTTemplate(!!params.force_new)
+    case 'chatgpt:basic_headers':
+      return getChatGPTBasicHeaders()
+    case 'chatgpt:manual_login':
+      return openChatGPTLogin(params)
+    case 'chatgpt:list_models':
+      return listChatGPTModels()
+    case 'chatgpt:chat':
+      return chatChatGPT(params)
+    case 'gemini:init':
+      return initGemini(params)
+    case 'gemini:capture_headers':
+      return captureGeminiTemplate(!!params.force_new)
+    case 'gemini:basic_headers':
+      return getGeminiBasicHeaders()
+    case 'gemini:manual_login':
+      return openGeminiLogin(params)
+    case 'gemini:list_models':
+      return listGeminiModels()
+    case 'gemini:chat':
+      return chatGemini(params)
     case 'kimi:init':
       return initKimi(params)
     case 'kimi:capture_headers':
@@ -575,6 +1152,8 @@ async function handle(method, provider, params) {
     case 'qwen:close_account':
       return closeQwenAccount(params)
     case 'deepseek:shutdown':
+    case 'chatgpt:shutdown':
+    case 'gemini:shutdown':
     case 'kimi:shutdown':
     case 'qwen:shutdown':
       await closeAll()

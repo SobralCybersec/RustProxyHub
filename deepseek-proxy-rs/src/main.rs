@@ -19,6 +19,7 @@ use proxy_core::{
     build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
     StreamingToolParser, ToolCallFunction,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -56,6 +57,18 @@ struct AppConfig {
 }
 
 #[derive(Clone)]
+pub struct DeepseekServiceConfig {
+    pub host: String,
+    pub port: u16,
+    pub api_key: Option<String>,
+    pub headless: bool,
+    pub browser: String,
+    pub runtime_dir: PathBuf,
+    pub helper_dir: PathBuf,
+    pub node_path: Option<PathBuf>,
+}
+
+#[derive(Clone)]
 struct AppState {
     bridge: Arc<PlaywrightBridge>,
     client: reqwest::Client,
@@ -76,6 +89,12 @@ enum ParsedEvent {
     Reasoning(String),
     Text(String),
     ToolCall(MessageToolCall),
+}
+
+#[derive(Debug, Deserialize)]
+struct ManualLoginRequest {
+    #[serde(default)]
+    browser: Option<String>,
 }
 
 #[tokio::main]
@@ -112,6 +131,7 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/admin/manual_login", post(admin_manual_login))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(CorsLayer::permissive())
@@ -170,8 +190,55 @@ fn load_config() -> AppConfig {
     }
 }
 
+pub async fn serve_embedded(config: DeepseekServiceConfig) -> Result<()> {
+    tokio::fs::create_dir_all(&config.runtime_dir).await?;
+    let bridge = Arc::new(
+        PlaywrightBridge::new_with_node(
+            &config.helper_dir,
+            config.node_path.clone(),
+            "deepseek",
+        )
+        .await?,
+    );
+    run_server(
+        bridge,
+        AppConfig {
+            host: config.host,
+            port: config.port,
+            api_key: config.api_key,
+            headless: config.headless,
+            browser: config.browser,
+            runtime_dir: config.runtime_dir,
+        },
+    )
+    .await
+}
+
 async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
+}
+
+async fn admin_manual_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ManualLoginRequest>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref(), true) {
+        return response;
+    }
+
+    match state
+        .bridge
+        .manual_login(ManualLoginParams {
+            runtime_dir: state.config.runtime_dir.to_string_lossy().to_string(),
+            browser: body.browser.unwrap_or_else(|| state.config.browser.clone()),
+            account_id: None,
+        })
+        .await
+    {
+        Ok(()) => Json(json!({ "ok": true, "provider": "deepseek" })).into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -266,7 +333,10 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
         payload.insert("prompt".to_owned(), Value::String(final_prompt.clone()));
         payload.insert("ref_file_ids".to_owned(), Value::Array(Vec::new()));
         payload.insert("thinking_enabled".to_owned(), Value::Bool(is_thinking));
-        payload.insert("search_enabled".to_owned(), Value::Bool(true));
+        payload.insert(
+            "search_enabled".to_owned(),
+            Value::Bool(body.web_search.unwrap_or(true)),
+        );
         payload.insert("preempt".to_owned(), Value::Bool(false));
 
         let request = state

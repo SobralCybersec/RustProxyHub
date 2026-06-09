@@ -31,9 +31,18 @@ enum Commands {
 }
 
 #[derive(Clone)]
-struct ProviderConfig {
+pub struct ProviderConfig {
     base_url: String,
     api_key: Option<String>,
+}
+
+impl ProviderConfig {
+    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -44,6 +53,20 @@ struct AppConfig {
     deepseek: ProviderConfig,
     kimi: ProviderConfig,
     qwen: ProviderConfig,
+    chatgpt: ProviderConfig,
+    gemini: ProviderConfig,
+}
+
+#[derive(Clone)]
+pub struct HubServiceConfig {
+    pub host: String,
+    pub port: u16,
+    pub api_key: Option<String>,
+    pub qwen: ProviderConfig,
+    pub deepseek: ProviderConfig,
+    pub kimi: ProviderConfig,
+    pub chatgpt: ProviderConfig,
+    pub gemini: ProviderConfig,
 }
 
 #[derive(Clone)]
@@ -58,6 +81,8 @@ enum ProviderName {
     Deepseek,
     Kimi,
     Qwen,
+    Chatgpt,
+    Gemini,
 }
 
 impl ProviderName {
@@ -66,14 +91,18 @@ impl ProviderName {
             Self::Deepseek => "deepseek",
             Self::Kimi => "kimi",
             Self::Qwen => "qwen",
+            Self::Chatgpt => "chatgpt",
+            Self::Gemini => "gemini",
         }
     }
 }
 
-const PROVIDER_ORDER: [ProviderName; 3] = [
+const PROVIDER_ORDER: [ProviderName; 5] = [
     ProviderName::Qwen,
     ProviderName::Deepseek,
     ProviderName::Kimi,
+    ProviderName::Chatgpt,
+    ProviderName::Gemini,
 ];
 
 #[derive(Debug, Serialize)]
@@ -151,6 +180,20 @@ fn load_config() -> AppConfig {
             base_url: std::env::var("QWEN_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned()),
             api_key: std::env::var("QWEN_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        },
+        chatgpt: ProviderConfig {
+            base_url: std::env::var("CHATGPT_BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3003".to_owned()),
+            api_key: std::env::var("CHATGPT_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        },
+        gemini: ProviderConfig {
+            base_url: std::env::var("GEMINI_BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3004".to_owned()),
+            api_key: std::env::var("GEMINI_API_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
         },
@@ -590,6 +633,8 @@ fn normalize_prefixed_model(model: &str) -> RoutedModel {
             "deepseek" => ProviderName::Deepseek,
             "kimi" => ProviderName::Kimi,
             "qwen" => ProviderName::Qwen,
+            "chatgpt" => ProviderName::Chatgpt,
+            "gemini" => ProviderName::Gemini,
             _ => infer_provider(trimmed),
         };
         return RoutedModel {
@@ -610,6 +655,15 @@ fn infer_provider(model: &str) -> ProviderName {
         ProviderName::Deepseek
     } else if lower.starts_with("k2") || lower.starts_with("kimi") {
         ProviderName::Kimi
+    } else if lower.starts_with("gemini") {
+        ProviderName::Gemini
+    } else if lower.starts_with("gpt")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+        || lower.starts_with("chatgpt")
+    {
+        ProviderName::Chatgpt
     } else {
         ProviderName::Qwen
     }
@@ -621,8 +675,24 @@ impl AppState {
             ProviderName::Deepseek => &self.config.deepseek,
             ProviderName::Kimi => &self.config.kimi,
             ProviderName::Qwen => &self.config.qwen,
+            ProviderName::Chatgpt => &self.config.chatgpt,
+            ProviderName::Gemini => &self.config.gemini,
         }
     }
+}
+
+pub async fn serve_embedded(config: HubServiceConfig) -> Result<()> {
+    run_server(AppConfig {
+        host: config.host,
+        port: config.port,
+        api_key: config.api_key,
+        qwen: config.qwen,
+        deepseek: config.deepseek,
+        kimi: config.kimi,
+        chatgpt: config.chatgpt,
+        gemini: config.gemini,
+    })
+    .await
 }
 
 fn openapi_document(config: &AppConfig) -> Value {
@@ -631,7 +701,7 @@ fn openapi_document(config: &AppConfig) -> Value {
         "info": {
             "title": "RustProxyHub Unified API",
             "version": "0.1.0",
-            "description": "Unified OpenAI-compatible gateway for the Rust DeepSeek, Kimi, and Qwen proxy services."
+            "description": "Unified OpenAI-compatible gateway for the embedded Qwen, DeepSeek, Kimi, ChatGPT, and Gemini proxy services."
         },
         "servers": [
             { "url": format!("http://127.0.0.1:{}", config.port) }

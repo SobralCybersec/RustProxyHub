@@ -1,6 +1,6 @@
 [package]
 name = "tauri-app"
-version = "2.10.0"
+version = "2.11.2"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -16,18 +16,27 @@ name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
 anyhow = "1"
+async-stream = "0.3"
+axum = { version = "0.8", features = ["macros", "multipart"] }
+browser-bridge = { path = "../browser-bridge" }
+bytes = "1"
+deepseek-proxy-rs = { path = "../deepseek-proxy-rs" }
+hub-proxy-rs = { path = "../hub-proxy-rs" }
+kimi-proxy-rs = { path = "../kimi-proxy-rs" }
+proxy-core = { path = "../proxy-core" }
+qwen-proxy-rs = { path = "../qwen-proxy-rs" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
+tauri = { version = "2.11.2", features = [] }
 tauri-plugin-prevent-default = "5.0"
 tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["v4"] }
 
 [profile.dev]

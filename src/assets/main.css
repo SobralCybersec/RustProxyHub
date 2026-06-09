@@ -516,8 +516,17 @@ input[type='checkbox'] {
   gap: 0.75rem;
 }
 
+.search-field {
+  margin-top: 1.15rem;
+}
+
+.hub-ribbon {
+  display: grid;
+  gap: 0.75rem;
+}
+
 .login-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .login-card {
@@ -548,6 +557,86 @@ input[type='checkbox'] {
 .provider-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-bottom: 0.85rem;
+}
+
+.provider-grid-expanded {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.provider-panel {
+  padding: 1rem;
+  border: 1px solid rgba(60, 35, 22, 0.12);
+  border-radius: 1.05rem;
+  background: rgba(255, 253, 248, 0.82);
+}
+
+.provider-panel h3,
+.account-card h3 {
+  margin: 0;
+  font-family: "Bahnschrift", "Segoe UI Variable Display", "Aptos Display", "Trebuchet MS", sans-serif;
+  letter-spacing: -0.03em;
+}
+
+.provider-meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.85rem;
+}
+
+.mini-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(34, 24, 18, 0.08);
+}
+
+.mini-pill[data-state='healthy'] {
+  color: var(--success);
+  background: rgba(21, 121, 94, 0.1);
+}
+
+.mini-pill[data-state='accent'] {
+  color: var(--accent-2);
+  background: rgba(14, 138, 121, 0.12);
+}
+
+.mini-pill[data-state='degraded'],
+.mini-pill[data-state='idle'] {
+  color: var(--warning);
+  background: rgba(175, 111, 36, 0.12);
+}
+
+.providers-panel {
+  padding: 1.2rem;
+}
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(21, 15, 11, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.drawer-panel {
+  width: min(38rem, 100vw);
+  height: 100vh;
+  overflow: auto;
+  padding: 1.2rem;
+  background: linear-gradient(180deg, rgba(248, 240, 229, 0.98) 0%, rgba(240, 229, 216, 0.98) 100%);
+  box-shadow: -20px 0 60px rgba(37, 24, 18, 0.18);
+}
+
+.drawer-stack {
+  display: grid;
+  gap: 0.85rem;
 }
 
 .account-card,

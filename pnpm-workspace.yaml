@@ -3,3 +3,9 @@ allowBuilds:
   electron: true
   esbuild: true
 minimumReleaseAge: 1440
+onlyBuiltDependencies:
+  - '@swc/core'
+  - '@tailwindcss/oxide'
+  - electron
+  - esbuild
+  - vue-demi

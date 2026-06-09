@@ -103,10 +103,19 @@ pub trait BrowserBridge: Send + Sync {
 
 impl PlaywrightBridge {
     pub async fn new(helper_dir: impl AsRef<Path>, provider: impl Into<String>) -> Result<Self> {
+        Self::new_with_node(helper_dir, None::<PathBuf>, provider).await
+    }
+
+    pub async fn new_with_node(
+        helper_dir: impl AsRef<Path>,
+        node_path: Option<PathBuf>,
+        provider: impl Into<String>,
+    ) -> Result<Self> {
         let helper_dir = helper_dir.as_ref();
         let helper_path = helper_dir.join("index.mjs");
+        let node = node_path.unwrap_or_else(|| PathBuf::from("node"));
 
-        let mut child = Command::new("node")
+        let mut child = Command::new(node)
             .arg(helper_path)
             .current_dir(helper_dir)
             .stdin(std::process::Stdio::piped())
@@ -170,7 +179,11 @@ impl PlaywrightBridge {
         })
     }
 
-    async fn call<T: Serialize, R: DeserializeOwned>(&self, method: &str, params: T) -> Result<R> {
+    pub async fn request<T: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: T,
+    ) -> Result<R> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = RpcRequest {
             id,
@@ -200,18 +213,18 @@ impl PlaywrightBridge {
 #[async_trait]
 impl BrowserBridge for PlaywrightBridge {
     async fn init(&self, params: InitParams) -> Result<()> {
-        self.call::<_, Value>("init", params).await.map(|_| ())
+        self.request::<_, Value>("init", params).await.map(|_| ())
     }
 
     async fn capture_headers(&self, params: CaptureHeadersParams) -> Result<BridgeCaptureResponse> {
-        self.call("capture_headers", params).await
+        self.request("capture_headers", params).await
     }
 
     async fn basic_headers(
         &self,
         account_id: Option<String>,
     ) -> Result<BridgeBasicHeadersResponse> {
-        self.call(
+        self.request(
             "basic_headers",
             serde_json::json!({ "account_id": account_id }),
         )
@@ -219,25 +232,25 @@ impl BrowserBridge for PlaywrightBridge {
     }
 
     async fn manual_login(&self, params: ManualLoginParams) -> Result<()> {
-        self.call::<_, Value>("manual_login", params)
+        self.request::<_, Value>("manual_login", params)
             .await
             .map(|_| ())
     }
 
     async fn login_account(&self, params: LoginAccountParams) -> Result<()> {
-        self.call::<_, Value>("login_account", params)
+        self.request::<_, Value>("login_account", params)
             .await
             .map(|_| ())
     }
 
     async fn close_account(&self, params: CloseAccountParams) -> Result<()> {
-        self.call::<_, Value>("close_account", params)
+        self.request::<_, Value>("close_account", params)
             .await
             .map(|_| ())
     }
 
     async fn shutdown(&self) -> Result<()> {
-        self.call::<_, Value>("shutdown", serde_json::json!({}))
+        self.request::<_, Value>("shutdown", serde_json::json!({}))
             .await
             .map(|_| ())
     }

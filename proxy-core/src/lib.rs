@@ -66,6 +66,8 @@ pub struct OpenAIRequest {
     #[serde(default)]
     pub stream: Option<bool>,
     #[serde(default)]
+    pub web_search: Option<bool>,
+    #[serde(default)]
     pub tools: Option<Vec<FunctionToolDefinition>>,
     #[serde(default)]
     pub tool_choice: Option<Value>,

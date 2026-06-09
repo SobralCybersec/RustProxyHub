@@ -52,22 +52,38 @@ pub fn workspace_root() -> PathBuf {
 pub fn load_config() -> AppConfig {
     let root = workspace_root();
     let runtime_dir = root.join("runtime").join("qwen");
+    build_embedded_config(
+        runtime_dir,
+        env::var("PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3000),
+        env::var("API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+        env::var("BROWSER").unwrap_or_else(|_| "chromium".to_owned()),
+        env::var("HEADLESS")
+            .map(|value| value != "false")
+            .unwrap_or(true),
+    )
+}
+
+pub fn build_embedded_config(
+    runtime_dir: PathBuf,
+    port: u16,
+    api_key: Option<String>,
+    browser: String,
+    headless: bool,
+) -> AppConfig {
     let data_dir = runtime_dir.join("data");
     let db_path = data_dir.join("qwenproxy.db");
 
     AppConfig {
         host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
-        port: env::var("PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(3000),
-        api_key: env::var("API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty()),
-        headless: env::var("HEADLESS")
-            .map(|value| value != "false")
-            .unwrap_or(true),
-        browser: env::var("BROWSER").unwrap_or_else(|_| "chromium".to_owned()),
+        port,
+        api_key,
+        headless,
+        browser,
         runtime_dir,
         data_dir,
         db_path,

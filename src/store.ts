@@ -1,50 +1,36 @@
 import { invoke } from '@tauri-apps/api/core'
 import { acceptHMRUpdate, defineStore } from 'pinia'
 import type {
-  DashboardSnapshot,
+  BrowserPrefs,
+  DashboardOverview,
+  ProviderDetails,
+  ProviderLogs,
   ProviderName,
-  ServiceConfig,
-  ServiceName,
-  ServiceSnapshot,
+  ProviderOverview,
+  QwenAccountSummary,
 } from '@/lib/types'
 
 const versionString =
   import.meta.env.MODE === 'development' ? `${import.meta.env.VITE_APP_VERSION}-dev` : import.meta.env.VITE_APP_VERSION
 
-const providerNames: ProviderName[] = ['qwen', 'deepseek', 'kimi']
-const serviceNames: ServiceName[] = ['hub', 'qwen', 'deepseek', 'kimi']
+export const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini']
 
-const defaultServiceConfigs: Record<ServiceName, ServiceConfig> = {
-  hub: {
-    port: 3100,
-    apiKey: '',
-    browser: 'chromium',
-    headless: true,
-  },
-  qwen: {
-    port: 3000,
-    apiKey: '',
-    browser: 'chromium',
-    headless: true,
-  },
-  deepseek: {
-    port: 3001,
-    apiKey: '',
-    browser: 'chromium',
-    headless: true,
-  },
-  kimi: {
-    port: 3002,
-    apiKey: '',
-    browser: 'chromium',
-    headless: true,
-  },
+const defaultBrowserPrefs: BrowserPrefs = {
+  qwen: 'msedge',
+  deepseek: 'msedge',
+  kimi: 'msedge',
+  chatgpt: 'msedge',
+  gemini: 'msedge',
 }
 
 type BusyMap = Record<string, boolean>
 
 function describeError(error: unknown) {
   return error instanceof Error ? error.message : String(error)
+}
+
+function formatHubModel(provider: ProviderName, model: string) {
+  return model.startsWith(`${provider}:`) ? model : `${provider}:${model}`
 }
 
 export const useStore = defineStore('main', {
@@ -54,31 +40,80 @@ export const useStore = defineStore('main', {
     isInitialized: false,
     isRefreshing: false,
     error: '',
-    dashboard: null as DashboardSnapshot | null,
-    qwenEmail: '',
-    qwenPassword: '',
-    serviceConfigs: structuredClone(defaultServiceConfigs) as Record<ServiceName, ServiceConfig>,
+    overview: null as DashboardOverview | null,
+    providerDetails: {} as Partial<Record<ProviderName, ProviderDetails>>,
+    providerLogs: {} as Partial<Record<ProviderName | 'hub', string[]>>,
+    qwenAccounts: [] as QwenAccountSummary[],
+    searchQuery: '',
+    activeDrawer: null as ProviderName | null,
+    browserPrefs: structuredClone(defaultBrowserPrefs) as BrowserPrefs,
     busy: {} as BusyMap,
     refreshTimer: null as number | null,
-    workbenchService: 'hub' as ServiceName,
+    qwenEmail: '',
+    qwenPassword: '',
     workbenchModel: '',
     workbenchPrompt: 'Say hello from RustProxyHub and report which provider answered.',
+    workbenchWebSearch: false,
     workbenchResponse: '',
   }),
 
   getters: {
-    serviceByName: (state) => {
-      return (provider: ServiceName): ServiceSnapshot | undefined =>
-        state.dashboard?.services.find((service) => service.provider === provider)
+    providersByName: (state) => {
+      const entries = state.overview?.providers ?? []
+      return entries.reduce(
+        (accumulator, provider) => {
+          accumulator[provider.name] = provider
+          return accumulator
+        },
+        {} as Record<ProviderName, ProviderOverview>,
+      )
     },
-    activeServiceCount: (state) => state.dashboard?.services.filter((service) => service.running).length ?? 0,
-    qwenService: (state) => state.dashboard?.services.find((service) => service.provider === 'qwen') ?? null,
-    hubService: (state) => state.dashboard?.services.find((service) => service.provider === 'hub') ?? null,
-    qwenAccounts: (state) => state.dashboard?.qwen_accounts ?? [],
-    availableWorkbenchModels(): string[] {
-      const service = this.serviceByName(this.workbenchService)
-      const ids = service?.models.map((model) => model.id) ?? []
-      return Array.from(new Set(ids))
+
+    filteredProviders(): ProviderOverview[] {
+      const providers = this.overview?.providers ?? []
+      const query = this.searchQuery.trim().toLowerCase()
+      if (!query) return providers
+
+      return providers.filter((provider) => {
+        const haystack = [
+          provider.name,
+          provider.health_status,
+          provider.login_state,
+          provider.base_url,
+          ...provider.models,
+          provider.last_error ?? '',
+        ]
+          .join(' ')
+          .toLowerCase()
+        return haystack.includes(query)
+      })
+    },
+
+    hubModelOptions(): string[] {
+      const providers = this.overview?.providers ?? []
+      const models = providers.flatMap((provider) => provider.models.map((model) => formatHubModel(provider.name, model)))
+      return Array.from(new Set(models))
+    },
+
+    filteredQwenAccounts(): QwenAccountSummary[] {
+      const query = this.searchQuery.trim().toLowerCase()
+      if (!query) return this.qwenAccounts
+
+      return this.qwenAccounts.filter((account) => {
+        return [account.email, account.id, account.created_at ?? ''].join(' ').toLowerCase().includes(query)
+      })
+    },
+
+    activeProviderDetails(state): ProviderDetails | null {
+      return state.activeDrawer ? state.providerDetails[state.activeDrawer] ?? null : null
+    },
+
+    activeProviderLogs(state): string[] {
+      return state.activeDrawer ? state.providerLogs[state.activeDrawer] ?? [] : []
+    },
+
+    openLoginCount(state): number {
+      return (state.overview?.open_provider_login_sessions.length ?? 0) + (state.overview?.open_qwen_account_login_sessions.length ?? 0)
     },
   },
 
@@ -87,13 +122,12 @@ export const useStore = defineStore('main', {
       this.busy[key] = value
     },
 
-    setWorkbenchService(service: ServiceName) {
-      this.workbenchService = service
-      this.syncWorkbenchModel()
+    setSearchQuery(value: string) {
+      this.searchQuery = value
     },
 
     syncWorkbenchModel() {
-      const available = this.availableWorkbenchModels
+      const available = this.hubModelOptions
       if (!available.length) return
       if (!this.workbenchModel || !available.includes(this.workbenchModel)) {
         this.workbenchModel = available[0]
@@ -113,17 +147,11 @@ export const useStore = defineStore('main', {
       }
     },
 
-    async refreshSnapshot() {
+    async refreshOverview() {
       if (this.isRefreshing) return
       this.isRefreshing = true
       try {
-        const snapshot = await invoke<DashboardSnapshot>('app_snapshot')
-        this.dashboard = snapshot
-        for (const service of snapshot.services) {
-          if (service.port != null) {
-            this.serviceConfigs[service.provider].port = service.port
-          }
-        }
+        this.overview = await invoke<DashboardOverview>('dashboard_overview')
         this.syncWorkbenchModel()
       } catch (error) {
         this.error = describeError(error)
@@ -132,13 +160,27 @@ export const useStore = defineStore('main', {
       }
     },
 
+    async refreshProviderDetails(provider: ProviderName) {
+      this.providerDetails[provider] = await invoke<ProviderDetails>('provider_details', { provider })
+    },
+
+    async refreshProviderLogs(provider: ProviderName | 'hub') {
+      const response = await invoke<ProviderLogs>('provider_logs', { provider })
+      this.providerLogs[provider] = response.entries
+    },
+
+    async loadQwenAccounts() {
+      this.qwenAccounts = await invoke<QwenAccountSummary[]>('list_qwen_accounts')
+    },
+
     async initApp() {
       if (this.isInitialized) return
       this.isInitialized = true
-      await this.refreshSnapshot()
+      await this.refreshOverview()
+      await this.loadQwenAccounts()
       this.refreshTimer = window.setInterval(() => {
-        void this.refreshSnapshot()
-      }, 3500)
+        void this.refreshOverview()
+      }, 4000)
     },
 
     disposeApp() {
@@ -148,59 +190,15 @@ export const useStore = defineStore('main', {
       }
     },
 
-    buildStartRequest(service: ServiceName) {
-      const config = this.serviceConfigs[service]
-      return {
-        provider: service,
-        port: config.port,
-        apiKey: config.apiKey,
-        browser: config.browser,
-        headless: config.headless,
-        upstreams:
-          service === 'hub'
-            ? providerNames.map((provider) => ({
-                provider,
-                port: this.serviceConfigs[provider].port,
-                apiKey: this.serviceConfigs[provider].apiKey,
-              }))
-            : undefined,
-      }
-    },
-
-    async startService(service: ServiceName) {
-      await this.runTask(`start:${service}`, async () => {
-        await invoke<ServiceSnapshot>('start_service', {
-          request: this.buildStartRequest(service),
-        })
-        await this.refreshSnapshot()
+    async openProviderDrawer(provider: ProviderName) {
+      this.activeDrawer = provider
+      await this.runTask(`drawer:${provider}`, async () => {
+        await Promise.all([this.refreshProviderDetails(provider), this.refreshProviderLogs(provider)])
       })
     },
 
-    async stopService(service: ServiceName) {
-      await this.runTask(`stop:${service}`, async () => {
-        await invoke<ServiceSnapshot>('stop_service', { provider: service })
-        await this.refreshSnapshot()
-      })
-    },
-
-    async startStack() {
-      await this.runTask('stack:start', async () => {
-        for (const service of serviceNames) {
-          await invoke<ServiceSnapshot>('start_service', {
-            request: this.buildStartRequest(service),
-          })
-        }
-        await this.refreshSnapshot()
-      })
-    },
-
-    async stopStack() {
-      await this.runTask('stack:stop', async () => {
-        for (const service of [...serviceNames].reverse()) {
-          await invoke<ServiceSnapshot>('stop_service', { provider: service })
-        }
-        await this.refreshSnapshot()
-      })
+    closeProviderDrawer() {
+      this.activeDrawer = null
     },
 
     async addQwenAccount() {
@@ -210,8 +208,8 @@ export const useStore = defineStore('main', {
         return
       }
 
-      await this.runTask('account:add', async () => {
-        await invoke('add_qwen_account', {
+      await this.runTask('qwen-account:add', async () => {
+        this.qwenAccounts = await invoke<QwenAccountSummary[]>('add_qwen_account', {
           request: {
             email,
             password: this.qwenPassword,
@@ -219,86 +217,52 @@ export const useStore = defineStore('main', {
         })
         this.qwenEmail = ''
         this.qwenPassword = ''
-        await this.refreshSnapshot()
-      })
-    },
-
-    async addQwenAccountAndOpenLogin() {
-      const email = this.qwenEmail.trim()
-      if (!email) {
-        this.error = 'Email is required.'
-        return
-      }
-
-      await this.runTask('account:add-open-login', async () => {
-        await invoke('add_qwen_account', {
-          request: {
-            email,
-            password: this.qwenPassword,
-          },
-        })
-        await this.refreshSnapshot()
-
-        const account = this.qwenAccounts.find((entry) => entry.email.toLowerCase() === email.toLowerCase())
-        if (!account) {
-          throw new Error('Account was saved but could not be found for login launch.')
-        }
-
-        await invoke('start_qwen_login_session', {
-          request: {
-            accountId: account.id,
-            browser: this.serviceConfigs.qwen.browser,
-          },
-        })
-
-        this.qwenEmail = ''
-        this.qwenPassword = ''
-        await this.refreshSnapshot()
+        await this.refreshOverview()
       })
     },
 
     async removeQwenAccount(accountId: string) {
-      await this.runTask(`account:remove:${accountId}`, async () => {
-        await invoke('remove_qwen_account', { accountId })
-        await this.refreshSnapshot()
-      })
-    },
-
-    async startQwenLogin(accountId: string) {
-      await this.runTask(`login:start:${accountId}`, async () => {
-        await invoke('start_qwen_login_session', {
-          request: {
-            accountId,
-            browser: this.serviceConfigs.qwen.browser,
-          },
-        })
-        await this.refreshSnapshot()
-      })
-    },
-
-    async stopQwenLogin(accountId: string) {
-      await this.runTask(`login:stop:${accountId}`, async () => {
-        await invoke('stop_qwen_login_session', { accountId })
-        await this.refreshSnapshot()
+      await this.runTask(`qwen-account:remove:${accountId}`, async () => {
+        this.qwenAccounts = await invoke<QwenAccountSummary[]>('remove_qwen_account', { accountId })
+        await this.refreshOverview()
       })
     },
 
     async startProviderLogin(provider: ProviderName) {
-      await this.runTask(`provider-login:start:${provider}`, async () => {
-        await invoke('start_provider_login_session', {
+      await this.runTask(`login:start:${provider}`, async () => {
+        await invoke<string[]>('start_provider_login_session', {
           request: {
             provider,
-            browser: this.serviceConfigs[provider].browser,
+            browser: this.browserPrefs[provider],
           },
         })
-        await this.refreshSnapshot()
+        await this.refreshOverview()
       })
     },
 
     async stopProviderLogin(provider: ProviderName) {
-      await this.runTask(`provider-login:stop:${provider}`, async () => {
-        await invoke('stop_provider_login_session', { provider })
-        await this.refreshSnapshot()
+      await this.runTask(`login:stop:${provider}`, async () => {
+        await invoke<string[]>('stop_provider_login_session', { provider })
+        await this.refreshOverview()
+      })
+    },
+
+    async startQwenAccountLogin(accountId: string) {
+      await this.runTask(`login:qwen-account:start:${accountId}`, async () => {
+        await invoke<string[]>('start_qwen_account_login_session', {
+          request: {
+            account_id: accountId,
+            browser: this.browserPrefs.qwen,
+          },
+        })
+        await this.refreshOverview()
+      })
+    },
+
+    async stopQwenAccountLogin(accountId: string) {
+      await this.runTask(`login:qwen-account:stop:${accountId}`, async () => {
+        await invoke<string[]>('stop_qwen_account_login_session', { account_id: accountId })
+        await this.refreshOverview()
       })
     },
 
@@ -306,7 +270,7 @@ export const useStore = defineStore('main', {
       const model = this.workbenchModel.trim()
       const prompt = this.workbenchPrompt.trim()
       if (!model) {
-        this.error = 'Choose or type a model first.'
+        this.error = 'Choose a prefixed hub model first.'
         return
       }
       if (!prompt) {
@@ -317,12 +281,13 @@ export const useStore = defineStore('main', {
       await this.runTask('workbench:run', async () => {
         const response = await invoke<unknown>('run_workbench_request', {
           request: {
-            service: this.workbenchService,
             model,
             prompt,
+            web_search: this.workbenchWebSearch,
           },
         })
         this.workbenchResponse = JSON.stringify(response, null, 2)
+        await this.refreshOverview()
       })
     },
 
