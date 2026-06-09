@@ -59,7 +59,7 @@ jobs:
         run: pnpm build
 
       - name: Cargo fmt
-        run: cargo fmt --all --check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
 
       - name: Cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml
