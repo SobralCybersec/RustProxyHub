@@ -1,10 +1,13 @@
+mod runtime;
+
 use anyhow::{anyhow, Context, Result};
-use proxy_hub::{
+use crate::runtime::{
     build_embedded_config,
     serve_browser_provider, BrowserProviderKind, BrowserProviderServerConfig,
     DeepseekServiceConfig, HubServiceConfig, KimiServiceConfig, ProviderConfig,
     serve_deepseek, serve_hub, serve_kimi, serve_qwen,
 };
+pub use crate::runtime::{browser_bridge, proxy_core};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -1021,7 +1024,10 @@ fn resolve_helper_dir(app: &AppHandle, workspace_root: &Path) -> Result<PathBuf>
         }
     }
 
-    let dev = workspace_root.join("playwright-bridge");
+    let dev = workspace_root
+        .join("src-tauri")
+        .join("resources")
+        .join("playwright-bridge");
     if dev.exists() {
         return Ok(dev);
     }
@@ -1031,14 +1037,29 @@ fn resolve_helper_dir(app: &AppHandle, workspace_root: &Path) -> Result<PathBuf>
 
 fn resolve_node_path(app: &AppHandle, workspace_root: &Path) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok();
+    let candidates = resolve_node_candidates_for_tests(resource_dir.as_deref(), workspace_root);
+    candidates.into_iter().find(|path| path.exists())
+}
+
+fn resolve_node_candidates_for_tests(
+    resource_dir: Option<&Path>,
+    workspace_root: &Path,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(resource_dir) = resource_dir {
         candidates.push(resource_dir.join("node").join("node.exe"));
         candidates.push(resource_dir.join("node.exe"));
     }
+    candidates.push(
+        workspace_root
+            .join("src-tauri")
+            .join("resources")
+            .join("node")
+            .join("node.exe"),
+    );
+    candidates.push(workspace_root.join("src-tauri").join("resources").join("node.exe"));
     candidates.push(workspace_root.join("node.exe"));
-
-    candidates.into_iter().find(|path| path.exists())
+    candidates
 }
 
 fn now_ts() -> u64 {
@@ -1091,4 +1112,33 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_base_url, resolve_node_candidates_for_tests};
+    use std::path::PathBuf;
+
+    #[test]
+    fn provider_base_urls_keep_embedded_ports() {
+        assert_eq!(provider_base_url("qwen"), "http://127.0.0.1:3000");
+        assert_eq!(provider_base_url("deepseek"), "http://127.0.0.1:3001");
+        assert_eq!(provider_base_url("kimi"), "http://127.0.0.1:3002");
+        assert_eq!(provider_base_url("chatgpt"), "http://127.0.0.1:3003");
+        assert_eq!(provider_base_url("gemini"), "http://127.0.0.1:3004");
+    }
+
+    #[test]
+    fn node_candidates_prefer_src_tauri_resources_before_repo_root() {
+        let root = PathBuf::from("G:/repo");
+        let candidates = resolve_node_candidates_for_tests(None, &root);
+        assert_eq!(
+            candidates,
+            vec![
+                root.join("src-tauri").join("resources").join("node").join("node.exe"),
+                root.join("src-tauri").join("resources").join("node.exe"),
+                root.join("node.exe"),
+            ]
+        );
+    }
 }

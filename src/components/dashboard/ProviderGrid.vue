@@ -45,11 +45,11 @@ function formatStarted(value: number | null) {
   <section class="panel providers-panel">
     <div class="panel-top">
       <div>
-        <p class="eyebrow">Provider grid</p>
+        <p class="eyebrow">Provider dossiers</p>
         <h2>Embedded proxy surfaces</h2>
         <p class="panel-copy">
-          Each provider now runs behind the same desktop app. Cards stay lightweight and the heavier details
-          move into the side drawer on demand.
+          Each bridge lives inside same runtime spine now. Use cards for fast triage, then open full dossier
+          when you need health payloads or local logs.
         </p>
       </div>
       <span class="status-chip" :data-state="providers.length ? 'accent' : 'idle'">
@@ -59,6 +59,8 @@ function formatStarted(value: number | null) {
 
     <div class="provider-grid provider-grid-expanded">
       <article v-for="provider in providers" :key="provider.name" class="provider-panel">
+        <div class="dossier-index">FILE {{ provider.name.toUpperCase() }}</div>
+
         <div class="panel-top">
           <div>
             <p class="eyebrow">{{ provider.name }}</p>
@@ -120,7 +122,7 @@ function formatStarted(value: number | null) {
           >
             Mark done
           </button>
-          <button class="primary-button" @click="store.openProviderDrawer(provider.name)">Open details</button>
+          <button class="primary-button" @click="store.openProviderDrawer(provider.name)">Open dossier</button>
         </div>
       </article>
     </div>

@@ -7,11 +7,11 @@ const { hubModelOptions, overview } = storeToRefs(store)
   <section class="panel workbench-panel">
     <div class="panel-top">
       <div>
-        <p class="eyebrow">Unified workbench</p>
+        <p class="eyebrow">Trial terminal</p>
         <h2>Real hub request</h2>
         <p class="panel-copy">
-          Requests always go through the embedded hub now. Pick a provider-prefixed model and decide whether the
-          normalized web-search flag should be sent.
+          Requests always pass through embedded hub. Pick provider-prefixed model, toggle normalized search flag,
+          then inspect raw JSON reply below.
         </p>
       </div>
       <span class="status-chip" :data-state="overview?.hub.running ? 'healthy' : 'idle'">
@@ -44,11 +44,17 @@ const { hubModelOptions, overview } = storeToRefs(store)
 
       <div class="action-row">
         <button class="primary-button" :disabled="store.isBusy('workbench:run')" @click="store.runWorkbench()">
-          {{ store.isBusy('workbench:run') ? 'Running...' : 'Run hub request' }}
+          {{ store.isBusy('workbench:run') ? 'Running...' : 'Run live probe' }}
         </button>
       </div>
     </div>
 
-    <pre class="code-window large">{{ store.workbenchResponse || 'The live JSON response lands here.' }}</pre>
+    <div class="terminal-shell">
+      <div class="terminal-bar">
+        <span>HUB STREAM</span>
+        <span>{{ store.workbenchModel || 'no model selected' }}</span>
+      </div>
+      <pre class="code-window large">{{ store.workbenchResponse || 'The live JSON response lands here.' }}</pre>
+    </div>
   </section>
 </template>

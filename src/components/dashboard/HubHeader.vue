@@ -24,23 +24,28 @@ function copyText(value: string | null | undefined) {
 <template>
   <header class="hero panel">
     <div class="hero-copy">
-      <p class="eyebrow">RustProxyHub Desktop</p>
-      <h1>One EXE. One hub. Every browser-backed proxy under one roof.</h1>
+      <p class="eyebrow">RustProxy Control Room</p>
+      <h1>One desktop shell. Five browser-backed providers. One hub watching all of them.</h1>
       <p class="lede">
-        The app now owns the embedded providers, the OpenAI-compatible hub, and the login flows. Search,
-        inspect, log in, and run smoke prompts from one control room.
+        Runtime moved out of Tauri edge work and into one internal engine room. Track status, reopen manual
+        sessions, inspect health, and run live hub probes without leaving this dossier wall.
       </p>
 
       <label class="field search-field">
-        <span>Search everything</span>
-        <input v-model="searchValue" type="search" placeholder="providers, models, accounts, log states" />
+        <span>Trace filter</span>
+        <input v-model="searchValue" type="search" placeholder="providers, models, accounts, states, errors" />
       </label>
     </div>
 
     <div class="hero-rail">
+      <div class="hero-warning">
+        <span class="warning-mark">Packaging note</span>
+        <p>Bundled helper path first. Portable <code>node.exe</code> still not shipped, so system Node remains fallback.</p>
+      </div>
+
       <div class="hero-actions">
         <button class="primary-button" :disabled="store.isRefreshing" @click="store.refreshOverview()">
-          {{ store.isRefreshing ? 'Refreshing...' : 'Refresh hub pulse' }}
+          {{ store.isRefreshing ? 'Refreshing...' : 'Refresh surveillance' }}
         </button>
         <button class="ghost-button" :disabled="!hub?.base_url" @click="copyText(hub?.base_url)">
           Copy hub URL
@@ -77,6 +82,14 @@ function copyText(value: string | null | undefined) {
         <div class="info-card">
           <p class="info-label">OpenAPI</p>
           <p class="mono-line">{{ hub?.openapi_url ?? 'waiting for /openapi.json' }}</p>
+        </div>
+        <div class="info-card">
+          <p class="info-label">Helper root</p>
+          <p class="mono-line">{{ overview?.helper_dir ?? 'resolving helper assets...' }}</p>
+        </div>
+        <div class="info-card">
+          <p class="info-label">Runtime data</p>
+          <p class="mono-line">{{ overview?.app_data_dir ?? 'resolving app data dir...' }}</p>
         </div>
       </div>
     </div>

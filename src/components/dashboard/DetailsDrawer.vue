@@ -15,8 +15,8 @@ function prettyJson(value: unknown) {
       <div class="panel-top">
         <div>
           <p class="eyebrow">{{ store.activeDrawer }}</p>
-          <h2>Provider details</h2>
-          <p class="panel-copy">On-demand health payloads and local runtime notes only. Heavy polling stays off the hot path.</p>
+          <h2>Provider dossier</h2>
+          <p class="panel-copy">On-demand health payloads and local runtime notes only. Heavy polling stays off hot path.</p>
         </div>
         <button class="secondary-button" @click="store.closeProviderDrawer()">Close</button>
       </div>
@@ -35,6 +35,11 @@ function prettyJson(value: unknown) {
         <div class="info-card">
           <p class="info-label">Runtime logs</p>
           <pre class="log-window">{{ logs.length ? logs.join('\n') : 'No local lifecycle logs yet.' }}</pre>
+        </div>
+
+        <div v-if="details?.qwen_accounts?.length" class="info-card">
+          <p class="info-label">Qwen accounts</p>
+          <pre class="code-window">{{ prettyJson(details.qwen_accounts) }}</pre>
         </div>
       </div>
     </section>

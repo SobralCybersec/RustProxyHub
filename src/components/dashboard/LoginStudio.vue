@@ -44,11 +44,11 @@ function loginOpen(provider: ProviderName) {
   <section class="panel login-panel">
     <div class="panel-top">
       <div>
-        <p class="eyebrow">Login studio</p>
+        <p class="eyebrow">Ritual access</p>
         <h2>Playwright handoff points</h2>
         <p class="panel-copy">
-          Use visible sessions only when you need fresh browser auth. The embedded request bridges take over again
-          after you mark the login flow complete.
+          Visible browser sessions stay last-resort. Open one when auth expires, let cookies settle, then hand
+          control back to headless bridge path.
         </p>
       </div>
       <span class="status-chip" data-state="accent">{{ store.openLoginCount }} active</span>
@@ -56,6 +56,8 @@ function loginOpen(provider: ProviderName) {
 
     <div class="login-grid">
       <article v-for="provider in providers" :key="provider.name" class="login-card">
+        <div class="dossier-index">ACCESS {{ provider.name.toUpperCase() }}</div>
+
         <div class="panel-top">
           <div>
             <p class="eyebrow">{{ provider.name }}</p>
@@ -86,7 +88,7 @@ function loginOpen(provider: ProviderName) {
             :disabled="store.isBusy(`login:start:${provider.name}`)"
             @click="store.startProviderLogin(provider.name)"
           >
-            Open login
+            Open ritual
           </button>
           <button
             class="secondary-button"

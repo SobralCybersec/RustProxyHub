@@ -21,9 +21,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="shell">
-    <div class="ambient ambient-a" />
-    <div class="ambient ambient-b" />
+  <div class="control-room">
+    <div class="backdrop-haze haze-a" />
+    <div class="backdrop-haze haze-b" />
+    <div class="backdrop-grid" />
+    <div class="scanline" />
+    <div class="fracture fracture-a" />
+    <div class="fracture fracture-b" />
 
     <main class="frame">
       <HubHeader :overview="overview" />
