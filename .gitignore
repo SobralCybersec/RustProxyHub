@@ -14,7 +14,7 @@ node_modules
 dist
 dist-ssr
 *.local
-runtime
+
 
 # Editor directories and files
 .idea
