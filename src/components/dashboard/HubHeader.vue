@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { DashboardOverview } from '@/lib/types'
+import { useStore } from '@/store'
 
 const props = defineProps<{
   overview: DashboardOverview | null
@@ -39,8 +40,13 @@ function copyText(value: string | null | undefined) {
 
     <div class="hero-rail">
       <div class="hero-warning">
-        <span class="warning-mark">Packaging note</span>
-        <p>Bundled helper path first. Portable <code>node.exe</code> still not shipped, so system Node remains fallback.</p>
+        <span class="warning-mark">Runtime status</span>
+        <p v-if="overview?.runtime.single_runner_ready">
+          Single-runner preflight passed. Bundled helper, bundled <code>node.exe</code>, writable data dir, and Edge check all look good.
+        </p>
+        <p v-else>
+          Single-runner preflight blocked startup. Fix listed runtime issues before trusting provider status.
+        </p>
       </div>
 
       <div class="hero-actions">
@@ -72,6 +78,10 @@ function copyText(value: string | null | undefined) {
           <span>Login windows</span>
           <strong>{{ store.openLoginCount }}</strong>
         </div>
+        <div class="stat-pill">
+          <span>Runner</span>
+          <strong>{{ overview?.runtime.single_runner_ready ? 'ready' : 'degraded' }}</strong>
+        </div>
       </div>
 
       <div class="hub-ribbon">
@@ -85,11 +95,26 @@ function copyText(value: string | null | undefined) {
         </div>
         <div class="info-card">
           <p class="info-label">Helper root</p>
-          <p class="mono-line">{{ overview?.helper_dir ?? 'resolving helper assets...' }}</p>
+          <p class="mono-line">{{ overview?.runtime.helper_dir ?? overview?.helper_dir ?? 'resolving helper assets...' }}</p>
+        </div>
+        <div class="info-card">
+          <p class="info-label">Bundled Node</p>
+          <p class="mono-line">{{ overview?.runtime.node_path ?? 'node.exe missing from bundle' }}</p>
+        </div>
+        <div class="info-card">
+          <p class="info-label">Node source</p>
+          <p class="mono-line">{{ overview?.runtime.node_source ?? 'unresolved' }}</p>
         </div>
         <div class="info-card">
           <p class="info-label">Runtime data</p>
           <p class="mono-line">{{ overview?.app_data_dir ?? 'resolving app data dir...' }}</p>
+        </div>
+      </div>
+
+      <div v-if="overview?.runtime.issues.length" class="hub-ribbon issues-ribbon">
+        <div v-for="issue in overview.runtime.issues" :key="issue" class="info-card issue-card">
+          <p class="info-label">Runtime issue</p>
+          <p>{{ issue }}</p>
         </div>
       </div>
     </div>

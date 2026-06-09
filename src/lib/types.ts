@@ -30,10 +30,20 @@ export interface ProviderOverview {
   last_error: string | null
 }
 
+export interface RuntimeDiagnostics {
+  node_path: string | null
+  node_source: string | null
+  helper_dir: string | null
+  edge_available: boolean
+  single_runner_ready: boolean
+  issues: string[]
+}
+
 export interface DashboardOverview {
   generated_at: number
   app_data_dir: string
   helper_dir: string
+  runtime: RuntimeDiagnostics
   hub: HubOverview
   providers: ProviderOverview[]
   qwen_account_count: number

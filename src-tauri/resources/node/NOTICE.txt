@@ -1,0 +1,4 @@
+RustProxyHub bundles portable Node.js for the embedded Playwright bridge.
+Version: v24.11.1
+Purpose: run bundled src-tauri/resources/playwright-bridge/index.mjs without requiring system Node.
+License: see LICENSE.txt.

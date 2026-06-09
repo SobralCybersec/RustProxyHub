@@ -40,7 +40,7 @@ module.exports = [
   },
 
   ...pluginVue.configs['flat/recommended'],
-  ...vueTsEslintConfig(),
+  ...vueTsEslintConfig.default(),
 
   {
     ...pluginVitest.configs.recommended,

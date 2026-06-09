@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useStore } from '@/store'
+
 const store = useStore()
 
 function sessionOpen(accountId: string) {

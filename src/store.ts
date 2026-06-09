@@ -115,6 +115,14 @@ export const useStore = defineStore('main', {
     openLoginCount(state): number {
       return (state.overview?.open_provider_login_sessions.length ?? 0) + (state.overview?.open_qwen_account_login_sessions.length ?? 0)
     },
+
+    runtimeReady(state): boolean {
+      return state.overview?.runtime.single_runner_ready ?? false
+    },
+
+    runtimeIssues(state): string[] {
+      return state.overview?.runtime.issues ?? []
+    },
   },
 
   actions: {
@@ -269,6 +277,10 @@ export const useStore = defineStore('main', {
     async runWorkbench() {
       const model = this.workbenchModel.trim()
       const prompt = this.workbenchPrompt.trim()
+      if (!this.runtimeReady) {
+        this.error = this.runtimeIssues[0] ?? 'Runtime preflight is blocking startup.'
+        return
+      }
       if (!model) {
         this.error = 'Choose a prefixed hub model first.'
         return

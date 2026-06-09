@@ -1,9 +1,18 @@
 {
   "extends": "./tsconfig.app.json",
-  "include": ["tests/unit/**/*.ts"],
+  "include": [
+    "env.d.ts",
+    "components.d.ts",
+    "auto-imports.d.ts",
+    "src/**/*",
+    "src/**/*.vue",
+    "tests/unit/**/*.ts"
+  ],
   "compilerOptions": {
     "composite": true,
+    "noEmit": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.vitest.tsbuildinfo",
-    "types": ["node"]
+    "ignoreDeprecations": "6.0",
+    "types": ["node", "vite/client"]
   }
 }

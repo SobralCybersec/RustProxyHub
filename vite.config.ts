@@ -71,4 +71,8 @@ export default defineConfig({
     chunkSizeWarningLimit: 1024,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['tests/setup/testglobals.ts'],
+  },
 })

@@ -494,6 +494,21 @@ input[type='checkbox'] {
   margin: 0;
 }
 
+.issues-ribbon {
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+}
+
+.issue-card {
+  border-color: rgba(240, 180, 110, 0.24);
+  background: linear-gradient(180deg, rgba(240, 180, 110, 0.12), rgba(255, 255, 255, 0.03));
+}
+
+.issue-card p:last-child {
+  margin: 0.5rem 0 0;
+  color: #fff4df;
+  line-height: 1.5;
+}
+
 .mono-line,
 .code-window,
 .log-window {
@@ -515,6 +530,26 @@ input[type='checkbox'] {
   background: rgba(122, 13, 31, 0.34);
   padding: 0.95rem 1rem;
   color: #ffe5ea;
+}
+
+.panel-alert {
+  border: 1px solid rgba(240, 180, 110, 0.3);
+  border-radius: 1rem;
+  padding: 0.95rem 1rem;
+  background: linear-gradient(180deg, rgba(240, 180, 110, 0.12), rgba(255, 255, 255, 0.03));
+}
+
+.panel-alert strong {
+  display: block;
+  font-family: var(--font-display);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.panel-alert p {
+  margin: 0.45rem 0 0;
+  color: #fff2df;
+  line-height: 1.55;
 }
 
 .board {

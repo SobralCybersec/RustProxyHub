@@ -1,6 +1,12 @@
 <script setup lang="ts">
+import { storeToRefs } from 'pinia'
+import { computed } from 'vue'
+import { useStore } from '@/store'
+
 const store = useStore()
 const { hubModelOptions, overview } = storeToRefs(store)
+const runtimeBlocked = computed(() => (overview.value ? !overview.value.runtime.single_runner_ready : false))
+const runtimeIssueText = computed(() => overview.value?.runtime.issues.join(' ') ?? '')
 </script>
 
 <template>
@@ -20,9 +26,19 @@ const { hubModelOptions, overview } = storeToRefs(store)
     </div>
 
     <div class="workbench-grid">
+      <div v-if="runtimeBlocked" class="panel-alert span-field">
+        <strong>Runtime blocked.</strong>
+        <p>{{ runtimeIssueText }}</p>
+      </div>
+
       <label class="field span-field">
         <span>Model</span>
-        <input v-model="store.workbenchModel" list="hub-model-options" placeholder="qwen:model-id or chatgpt:model-id" />
+        <input
+          v-model="store.workbenchModel"
+          list="hub-model-options"
+          placeholder="qwen:model-id or chatgpt:model-id"
+          :disabled="runtimeBlocked"
+        />
         <datalist id="hub-model-options">
           <option v-for="model in hubModelOptions" :key="model" :value="model" />
         </datalist>
@@ -30,7 +46,7 @@ const { hubModelOptions, overview } = storeToRefs(store)
 
       <label class="field toggle-field">
         <span>Web search</span>
-        <input v-model="store.workbenchWebSearch" type="checkbox" />
+        <input v-model="store.workbenchWebSearch" type="checkbox" :disabled="runtimeBlocked" />
       </label>
 
       <label class="field span-field">
@@ -39,11 +55,16 @@ const { hubModelOptions, overview } = storeToRefs(store)
           v-model="store.workbenchPrompt"
           rows="7"
           placeholder="Ask for a smoke response and confirm which provider answered."
+          :disabled="runtimeBlocked"
         />
       </label>
 
       <div class="action-row">
-        <button class="primary-button" :disabled="store.isBusy('workbench:run')" @click="store.runWorkbench()">
+        <button
+          class="primary-button"
+          :disabled="store.isBusy('workbench:run') || runtimeBlocked"
+          @click="store.runWorkbench()"
+        >
           {{ store.isBusy('workbench:run') ? 'Running...' : 'Run live probe' }}
         </button>
       </div>

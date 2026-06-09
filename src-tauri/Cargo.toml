@@ -15,6 +15,9 @@ repository = "https://github.com/Uninen/tauri-vue-template"
 name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+standalone-provider-cli = []
+
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
 

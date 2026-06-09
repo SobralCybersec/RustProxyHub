@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
+import dns from 'node:dns'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+
+// Fix IPv6/IPv4 resolution issue in Node 17+ (localhost resolves to ::1 instead of 127.0.0.1)
+// See: https://github.com/microsoft/playwright/issues/20784
+dns.setDefaultResultOrder('ipv4first')
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 async function importPlaywright() {
@@ -180,6 +185,9 @@ async function initDeepSeek({ runtime_dir, headless, browser }) {
       '--no-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
+      // Fix Chrome 136+ DevTools debugging restrictions
+      // See: https://github.com/microsoft/playwright/issues/35836
+      '--disable-features=DevToolsDebuggingRestrictions',
     ],
   })
   state.deepseek.page = await state.deepseek.context.newPage()
@@ -261,7 +269,11 @@ async function initChatGPT({ runtime_dir, headless, browser }) {
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
-    args: ['--disable-blink-features=AutomationControlled'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      // Fix Chrome 136+ DevTools debugging restrictions
+      '--disable-features=DevToolsDebuggingRestrictions',
+    ],
   })
   await state.chatgpt.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
@@ -560,7 +572,11 @@ async function initGemini({ runtime_dir, headless, browser }) {
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
-    args: ['--disable-blink-features=AutomationControlled'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      // Fix Chrome 136+ DevTools debugging restrictions
+      '--disable-features=DevToolsDebuggingRestrictions',
+    ],
   })
   await state.gemini.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
@@ -755,7 +771,11 @@ async function initKimi({ runtime_dir, headless, browser }) {
     channel,
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
-    args: ['--disable-blink-features=AutomationControlled'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      // Fix Chrome 136+ DevTools debugging restrictions
+      '--disable-features=DevToolsDebuggingRestrictions',
+    ],
   })
   await state.kimi.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
@@ -895,7 +915,11 @@ async function initQwen({ runtime_dir, headless, browser, account_id = null }) {
     channel,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
-    args: ['--disable-blink-features=AutomationControlled'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      // Fix Chrome 136+ DevTools debugging restrictions
+      '--disable-features=DevToolsDebuggingRestrictions',
+    ],
   })
   await slot.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
