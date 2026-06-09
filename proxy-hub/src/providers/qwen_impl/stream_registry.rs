@@ -51,7 +51,7 @@ impl StreamRegistry {
                 chat_id,
                 response_id: None,
                 account_id,
-                created_at: proxy_core::current_timestamp(),
+                created_at: crate::proxy_core::current_timestamp(),
             },
             headers,
             cancel: token.clone(),

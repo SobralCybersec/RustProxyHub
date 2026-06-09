@@ -8,14 +8,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use browser_bridge::{
+use crate::browser_bridge::{
     helper_dir_from, BrowserBridge, CaptureHeadersParams, InitParams, ManualLoginParams,
     PlaywrightBridge,
 };
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
-use proxy_core::{
+use crate::proxy_core::{
     build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
     StreamingToolParser, ToolCallFunction,
 };
@@ -142,7 +142,7 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
         .parse()
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let addr = SocketAddr::new(host, config.port);
-    println!("deepseek-proxy-rs listening on http://{addr}");
+    println!("proxy-hub deepseek listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -784,7 +784,10 @@ async fn collect_deepseek_events(
     Ok(vec![ParsedEvent::Text(v_str)])
 }
 
-fn tool_call_to_message(_index: usize, parsed: proxy_core::ParsedToolCall) -> MessageToolCall {
+fn tool_call_to_message(
+    _index: usize,
+    parsed: crate::proxy_core::ParsedToolCall,
+) -> MessageToolCall {
     MessageToolCall {
         id: parsed.id,
         tool_type: "function".to_owned(),

@@ -1,11 +1,6 @@
 [workspace]
 members = [
-  "proxy-core",
-  "browser-bridge",
-  "deepseek-proxy-rs",
-  "kimi-proxy-rs",
-  "qwen-proxy-rs",
-  "hub-proxy-rs",
+  "proxy-hub",
 ]
 exclude = ["src-tauri"]
 resolver = "2"

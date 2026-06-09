@@ -314,7 +314,7 @@ fn build_qwen_file_entry(
     json!({
         "type": detected.show_type,
         "file": {
-            "created_at": proxy_core::current_timestamp(),
+            "created_at": crate::proxy_core::current_timestamp(),
             "data": {},
             "filename": filename,
             "hash": Value::Null,
@@ -325,8 +325,8 @@ fn build_qwen_file_entry(
                 "size": file_size,
                 "content_type": detected.mime,
             },
-            "update_at": proxy_core::current_timestamp(),
-            "lastModified": proxy_core::current_timestamp(),
+            "update_at": crate::proxy_core::current_timestamp(),
+            "lastModified": crate::proxy_core::current_timestamp(),
             "name": filename,
             "webkitRelativePath": "",
             "size": file_size,
@@ -371,7 +371,7 @@ fn decode_data_url(data_url: &str, kind: &str) -> Result<(String, Vec<u8>, Strin
     Ok((
         mime.to_owned(),
         bytes,
-        format!("{stem}_{}.{}", proxy_core::current_timestamp(), extension),
+        format!("{stem}_{}.{}", crate::proxy_core::current_timestamp(), extension),
     ))
 }
 
@@ -403,5 +403,9 @@ fn filename_from_url(url: &str, kind: &str, content_type: Option<&str>) -> Strin
         .and_then(|mime| mime_guess::get_mime_extensions_str(mime))
         .and_then(|extensions| extensions.first().copied())
         .unwrap_or("bin");
-    format!("{stem}_{}.{}", proxy_core::current_timestamp(), extension)
+    format!(
+        "{stem}_{}.{}",
+        crate::proxy_core::current_timestamp(),
+        extension
+    )
 }

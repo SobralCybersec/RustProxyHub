@@ -7,9 +7,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
+use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
 use bytes::Bytes;
-use proxy_core::{build_prompt, current_timestamp, usage_from_text, OpenAIRequest};
+use crate::proxy_core::{build_prompt, current_timestamp, usage_from_text, OpenAIRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{

@@ -22,13 +22,8 @@ tauri-build = { version = "2.6.2", features = [] }
 anyhow = "1"
 async-stream = "0.3"
 axum = { version = "0.8", features = ["macros", "multipart"] }
-browser-bridge = { path = "../browser-bridge" }
 bytes = "1"
-deepseek-proxy-rs = { path = "../deepseek-proxy-rs" }
-hub-proxy-rs = { path = "../hub-proxy-rs" }
-kimi-proxy-rs = { path = "../kimi-proxy-rs" }
-proxy-core = { path = "../proxy-core" }
-qwen-proxy-rs = { path = "../qwen-proxy-rs" }
+proxy-hub = { path = "../proxy-hub" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

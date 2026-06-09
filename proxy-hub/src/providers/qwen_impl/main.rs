@@ -18,14 +18,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use browser_bridge::{
+use crate::browser_bridge::{
     helper_dir_from, BrowserBridge, CaptureHeadersParams, CloseAccountParams, InitParams,
     LoginAccountParams, ManualLoginParams, PlaywrightBridge,
 };
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
-use proxy_core::{
+use crate::proxy_core::{
     build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
     StreamingToolParser, ToolCallFunction,
 };
@@ -274,7 +274,7 @@ async fn run_server(
         .parse()
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let addr = SocketAddr::new(host, config.port);
-    println!("qwen-proxy-rs listening on http://{addr}");
+    println!("proxy-hub qwen listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -1702,7 +1702,7 @@ async fn collect_qwen_events(
     Ok(vec![QwenEvent::Text(incremental)])
 }
 
-fn tool_call_from_parsed(parsed: proxy_core::ParsedToolCall) -> MessageToolCall {
+fn tool_call_from_parsed(parsed: crate::proxy_core::ParsedToolCall) -> MessageToolCall {
     MessageToolCall {
         id: parsed.id,
         tool_type: "function".to_owned(),

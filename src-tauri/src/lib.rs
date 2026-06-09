@@ -1,13 +1,10 @@
-mod browser_provider;
-
 use anyhow::{anyhow, Context, Result};
-use browser_provider::{
+use proxy_hub::{
+    build_embedded_config,
     serve_browser_provider, BrowserProviderKind, BrowserProviderServerConfig,
+    DeepseekServiceConfig, HubServiceConfig, KimiServiceConfig, ProviderConfig,
+    serve_deepseek, serve_hub, serve_kimi, serve_qwen,
 };
-use deepseek_proxy_rs::DeepseekServiceConfig;
-use hub_proxy_rs::{serve_embedded as serve_hub, HubServiceConfig, ProviderConfig};
-use kimi_proxy_rs::KimiServiceConfig;
-use qwen_proxy_rs::{build_embedded_config, serve_embedded as serve_qwen};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -229,7 +226,7 @@ impl ControlState {
         self.spawn_service("deepseek", {
             let state = self.clone();
             async move {
-                deepseek_proxy_rs::serve_embedded(DeepseekServiceConfig {
+                serve_deepseek(DeepseekServiceConfig {
                     host: "127.0.0.1".to_owned(),
                     port: DEEPSEEK_PORT,
                     api_key: None,
@@ -246,7 +243,7 @@ impl ControlState {
         self.spawn_service("kimi", {
             let state = self.clone();
             async move {
-                kimi_proxy_rs::serve_embedded(KimiServiceConfig {
+                serve_kimi(KimiServiceConfig {
                     host: "127.0.0.1".to_owned(),
                     port: KIMI_PORT,
                     api_key: None,

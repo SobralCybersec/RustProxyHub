@@ -37,7 +37,7 @@ impl Watchdog {
             consecutive_failures: 0,
             active_streams: 0,
             memory_percent: 0.0,
-            checked_at: proxy_core::current_timestamp(),
+            checked_at: crate::proxy_core::current_timestamp(),
         }));
 
         let latest_task = Arc::clone(&latest);
@@ -139,7 +139,7 @@ impl Watchdog {
                     consecutive_failures,
                     active_streams,
                     memory_percent,
-                    checked_at: proxy_core::current_timestamp(),
+                    checked_at: crate::proxy_core::current_timestamp(),
                 };
             }
         });

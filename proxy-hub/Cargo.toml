@@ -1,26 +1,24 @@
 [package]
-name = "qwen-proxy-rs"
+name = "proxy-hub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[lib]
-path = "src/lib.rs"
-
 [dependencies]
 anyhow.workspace = true
 async-stream.workspace = true
+async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
-browser-bridge = { path = "../browser-bridge" }
 bytes.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 httpdate.workspace = true
+json5.workspace = true
 mime_guess.workspace = true
 once_cell.workspace = true
-proxy-core = { path = "../proxy-core" }
+regex.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -30,5 +28,6 @@ sha2.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tower-http.workspace = true
 url.workspace = true
 uuid.workspace = true

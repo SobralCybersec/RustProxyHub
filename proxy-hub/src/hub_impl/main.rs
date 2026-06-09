@@ -10,7 +10,7 @@ use axum::{
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use futures_util::TryStreamExt;
-use proxy_core::OpenAIRequest;
+use crate::proxy_core::OpenAIRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -160,7 +160,7 @@ async fn run_server(config: AppConfig) -> Result<()> {
         .parse()
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let addr = SocketAddr::new(host, config.port);
-    println!("hub-proxy-rs listening on http://{addr}");
+    println!("proxy-hub hub listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())

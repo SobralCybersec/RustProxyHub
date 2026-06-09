@@ -1,4 +1,4 @@
-use proxy_core::current_timestamp;
+use crate::proxy_core::current_timestamp;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
