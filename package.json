@@ -6,16 +6,21 @@
   "scripts": {
     "dev": "cross-env DEBUG=0 vite",
     "test": "vitest",
+    "lint": "eslint src tests --ext .ts,.vue",
+    "format": "prettier --write src tests vite.config.ts vitest.config.ts eslint.config.cjs",
+    "format:check": "prettier --check src tests vite.config.ts vitest.config.ts eslint.config.cjs",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc --build --force",
-    "verify": "pnpm exec eslint src tests --ext .ts,.vue && pnpm type-check && pnpm test --run && pnpm build && rtk cargo test --manifest-path src-tauri/Cargo.toml && rtk cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "verify": "pnpm lint && pnpm type-check && pnpm test --run && pnpm build && rtk cargo test --manifest-path src-tauri/Cargo.toml && rtk cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "release:windows": "powershell -ExecutionPolicy Bypass -File scripts/release-windows.ps1",
     "tauri": "tauri",
     "bump": "node bump-version.cjs",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
+    "@hugeicons/core-free-icons": "^4.2.0",
+    "@hugeicons/vue": "^1.0.5",
     "@tauri-apps/api": "^2.11.0",
     "@vue/devtools": "^8.1.1",
     "chart.js": "^4.5.1",
@@ -24,11 +29,7 @@
     "vue": "^3.5.30"
   },
   "devDependencies": {
-    "@egoist/tailwindcss-icons": "^1.9.2",
-    "@iconify-json/mdi": "^1.2.3",
-    "@iconify/types": "^2.0.0",
     "@pinia/testing": "^1.0.3",
-    "@tailwindcss/vite": "^4.3.0",
     "@tauri-apps/cli": "^2.11.2",
     "@tsconfig/node22": "^22.0.5",
     "@types/lodash-es": "^4.17.12",
@@ -49,7 +50,6 @@
     "jsdom": "^27.2.0",
     "lodash-es": "^4.17.23",
     "prettier": "^3.8.1",
-    "tailwindcss": "^4.3.0",
     "typescript": "^6.0.2",
     "unplugin-auto-import": "^21.0.0",
     "unplugin-vue-components": "^32.0.0",

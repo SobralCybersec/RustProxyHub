@@ -24,6 +24,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -96,6 +97,154 @@ enum ParsedEvent {
     ToolCall(MessageToolCall),
 }
 
+fn collect_fragment_events(
+    items: &[Value],
+    parse_state: &mut DeepSeekParseState,
+    tool_parser: &mut Option<StreamingToolParser>,
+) -> Vec<ParsedEvent> {
+    let mut events = Vec::new();
+
+    for item in items {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        let Some(text) = object.get("content").and_then(Value::as_str) else {
+            continue;
+        };
+        if text.is_empty() || text == "FINISHED" {
+            continue;
+        }
+
+        let fragment_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        parse_state.current_fragment_type = fragment_type.clone();
+
+        if fragment_type == "THINK" {
+            parse_state.current_append_path = "response/thinking_content".to_owned();
+            parse_state.reasoning.push_str(text);
+            events.push(ParsedEvent::Reasoning(text.to_owned()));
+            continue;
+        }
+
+        parse_state.current_append_path = "response/content".to_owned();
+        if let Some(parser) = tool_parser {
+            let parsed = parser.feed(text);
+            if !parsed.text.is_empty() {
+                events.push(ParsedEvent::Text(parsed.text));
+            }
+            for tool_call in parsed.tool_calls {
+                events.push(ParsedEvent::ToolCall(tool_call_to_message(
+                    parser.emitted_tool_call_count(),
+                    tool_call,
+                )));
+            }
+        } else {
+            events.push(ParsedEvent::Text(text.to_owned()));
+        }
+    }
+
+    events
+}
+
+fn deepseek_model_type(is_pro: bool) -> &'static str {
+    if is_pro { "expert" } else { "default" }
+}
+
+fn upsert_deepseek_event(events: &mut Vec<Value>, name: &str, params: Value) {
+    for event in events.iter_mut() {
+        let Some(object) = event.as_object_mut() else {
+            continue;
+        };
+        if object.get("event").and_then(Value::as_str) == Some(name) {
+            object.insert("params".to_owned(), params);
+            return;
+        }
+    }
+
+    events.push(json!({
+        "event": name,
+        "params": params,
+    }));
+}
+
+fn sync_deepseek_events(payload: &mut serde_json::Map<String, Value>, is_pro: bool, is_thinking: bool) {
+    let sync_events = |events: &mut Vec<Value>| {
+        upsert_deepseek_event(
+            events,
+            "switchModelType",
+            Value::String(deepseek_model_type(is_pro).to_owned()),
+        );
+        upsert_deepseek_event(events, "thinkingSwitchToggled", Value::Bool(is_thinking));
+    };
+
+    if let Some(Value::Array(events)) = payload.get_mut("events") {
+        let is_direct_event_list = events.iter().any(|item| {
+            item.as_object()
+                .and_then(|object| object.get("event"))
+                .and_then(Value::as_str)
+                .is_some()
+        });
+        if is_direct_event_list {
+            sync_events(events);
+            return;
+        }
+
+        for group in events.iter_mut() {
+            let Some(group_object) = group.as_object_mut() else {
+                continue;
+            };
+            if let Some(group_events) = group_object.get_mut("events").and_then(Value::as_array_mut) {
+                sync_events(group_events);
+                return;
+            }
+        }
+    }
+
+    let mut events = Vec::new();
+    sync_events(&mut events);
+    payload.insert("events".to_owned(), Value::Array(events));
+}
+
+fn build_deepseek_payload(
+    template: Option<Value>,
+    final_prompt: &str,
+    ui_session_id: &str,
+    actual_parent: Option<i64>,
+    is_pro: bool,
+    is_thinking: bool,
+    search_enabled: bool,
+) -> Value {
+    let mut payload = template
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    if !ui_session_id.is_empty() {
+        payload.insert(
+            "chat_session_id".to_owned(),
+            Value::String(ui_session_id.to_owned()),
+        );
+    }
+    payload.insert(
+        "parent_message_id".to_owned(),
+        actual_parent.map(Value::from).unwrap_or(Value::Null),
+    );
+    payload.insert(
+        "model_type".to_owned(),
+        Value::String(deepseek_model_type(is_pro).to_owned()),
+    );
+    payload.insert("prompt".to_owned(), Value::String(final_prompt.to_owned()));
+    payload.insert("ref_file_ids".to_owned(), Value::Array(Vec::new()));
+    payload.insert("thinking_enabled".to_owned(), Value::Bool(is_thinking));
+    payload.insert("search_enabled".to_owned(), Value::Bool(search_enabled));
+    payload.insert("preempt".to_owned(), Value::Bool(false));
+    sync_deepseek_events(&mut payload, is_pro, is_thinking);
+
+    Value::Object(payload)
+}
+
 #[derive(Debug, Deserialize)]
 struct ManualLoginRequest {
     #[serde(default)]
@@ -130,7 +279,13 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
 
     let state = AppState {
         bridge,
-        client: reqwest::Client::builder().build()?,
+        client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .tcp_nodelay(true)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(16)
+            .timeout(Duration::from_secs(120))
+            .build()?,
         config: config.clone(),
         session_parents: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -304,13 +459,21 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
     let mut ui_session_id = String::new();
 
     for _ in 0..3 {
-        let captured = state
+        let captured = match state
             .bridge
             .capture_headers(CaptureHeadersParams {
                 force_new: is_new_session,
                 account_id: None,
             })
-            .await?;
+            .await
+        {
+            Ok(captured) => captured,
+            Err(err) => {
+                last_error = Some(anyhow!(err));
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
 
         ui_session_id = captured.chat_session_id.unwrap_or_default();
         let browser_parent = captured.parent_message_id.as_ref().and_then(Value::as_i64);
@@ -327,33 +490,15 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                 .or(browser_parent)
         };
 
-        let mut payload = serde_json::Map::new();
-        if !ui_session_id.is_empty() {
-            payload.insert(
-                "chat_session_id".to_owned(),
-                Value::String(ui_session_id.clone()),
-            );
-        }
-        payload.insert(
-            "parent_message_id".to_owned(),
-            actual_parent.map(Value::from).unwrap_or(Value::Null),
+        let payload = build_deepseek_payload(
+            captured.request_payload.clone(),
+            &final_prompt,
+            &ui_session_id,
+            actual_parent,
+            is_pro,
+            is_thinking,
+            body.web_search.unwrap_or(true),
         );
-        payload.insert(
-            "model_type".to_owned(),
-            if is_pro {
-                Value::String("expert".to_owned())
-            } else {
-                Value::Null
-            },
-        );
-        payload.insert("prompt".to_owned(), Value::String(final_prompt.clone()));
-        payload.insert("ref_file_ids".to_owned(), Value::Array(Vec::new()));
-        payload.insert("thinking_enabled".to_owned(), Value::Bool(is_thinking));
-        payload.insert(
-            "search_enabled".to_owned(),
-            Value::Bool(body.web_search.unwrap_or(true)),
-        );
-        payload.insert("preempt".to_owned(), Value::Bool(false));
 
         let request = state
             .client
@@ -398,7 +543,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
             .header("x-client-locale", "pt_BR")
             .header("x-client-platform", "web")
             .header("x-client-version", "2.0.0")
-            .json(&Value::Object(payload))
+            .json(&payload)
             .send()
             .await;
 
@@ -726,40 +871,10 @@ async fn collect_deepseek_events(
             .and_then(Value::as_object)
             .and_then(|response| response.get("fragments"))
             .and_then(Value::as_array)
-            .and_then(|fragments| fragments.first())
-            .and_then(Value::as_object)
         {
-            if let Some(text) = response.get("content").and_then(Value::as_str) {
-                v_str = Some(text.to_owned());
-                parse_state.current_append_path =
-                    if response.get("type").and_then(Value::as_str) == Some("THINK") {
-                        "response/thinking_content".to_owned()
-                    } else {
-                        "response/content".to_owned()
-                    };
-                parse_state.current_fragment_type = response
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-            }
+            return Ok(collect_fragment_events(response, parse_state, tool_parser));
         } else if let Some(items) = value.as_array() {
-            if let Some(item) = items.first().and_then(Value::as_object) {
-                if let Some(text) = item.get("content").and_then(Value::as_str) {
-                    v_str = Some(text.to_owned());
-                    parse_state.current_append_path =
-                        if item.get("type").and_then(Value::as_str) == Some("THINK") {
-                            "response/thinking_content".to_owned()
-                        } else {
-                            "response/content".to_owned()
-                        };
-                    parse_state.current_fragment_type = item
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned();
-                }
-            }
+            return Ok(collect_fragment_events(items, parse_state, tool_parser));
         }
     }
 
@@ -870,4 +985,94 @@ where
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(stream))
         .expect("valid streaming response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_deepseek_payload, collect_fragment_events, DeepSeekParseState, ParsedEvent,
+    };
+    use crate::proxy_core::StreamingToolParser;
+    use serde_json::json;
+
+    #[test]
+    fn fragment_arrays_keep_reasoning_and_visible_text_separate() {
+        let mut state = DeepSeekParseState::default();
+        let mut parser = None::<StreamingToolParser>;
+        let events = collect_fragment_events(
+            &[
+                json!({ "type": "THINK", "content": "internal" }),
+                json!({ "type": "TEXT", "content": "visible" }),
+            ],
+            &mut state,
+            &mut parser,
+        );
+
+        assert_eq!(state.reasoning, "internal");
+        assert_eq!(
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    ParsedEvent::Text(text) => Some(text),
+                    _ => None,
+                })
+                .collect::<String>(),
+            "visible"
+        );
+    }
+
+    #[test]
+    fn deepseek_payload_reuses_template_and_syncs_direct_events() {
+        let payload = build_deepseek_payload(
+            Some(json!({
+                "events": [
+                    { "event": "switchModelType", "params": "default" },
+                    { "event": "thinkingSwitchToggled", "params": false }
+                ],
+                "unused": true
+            })),
+            "READY",
+            "session-1",
+            Some(42),
+            true,
+            true,
+            false,
+        );
+
+        assert_eq!(payload["chat_session_id"], "session-1");
+        assert_eq!(payload["parent_message_id"], 42);
+        assert_eq!(payload["model_type"], "expert");
+        assert_eq!(payload["prompt"], "READY");
+        assert_eq!(payload["thinking_enabled"], true);
+        assert_eq!(payload["search_enabled"], false);
+        assert_eq!(payload["unused"], true);
+        assert_eq!(payload["events"][0]["params"], "expert");
+        assert_eq!(payload["events"][1]["params"], true);
+    }
+
+    #[test]
+    fn deepseek_payload_syncs_nested_event_groups() {
+        let payload = build_deepseek_payload(
+            Some(json!({
+                "events": [
+                    {
+                        "events": [
+                            { "event": "switchModelType", "params": "expert" }
+                        ]
+                    }
+                ]
+            })),
+            "READY",
+            "session-2",
+            None,
+            false,
+            false,
+            true,
+        );
+
+        assert_eq!(payload["model_type"], "default");
+        assert_eq!(payload["events"][0]["events"][0]["params"], "default");
+        assert_eq!(payload["events"][0]["events"][1]["event"], "thinkingSwitchToggled");
+        assert_eq!(payload["events"][0]["events"][1]["params"], false);
+    }
 }

@@ -11,6 +11,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -18,7 +19,7 @@ use tokio::{
     sync::{oneshot, Mutex},
 };
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InitParams {
     pub runtime_dir: String,
     pub headless: bool,
@@ -59,6 +60,8 @@ pub struct BridgeCaptureResponse {
     pub chat_session_id: Option<String>,
     #[serde(default)]
     pub parent_message_id: Option<Value>,
+    #[serde(default)]
+    pub request_payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +97,7 @@ pub struct PlaywrightBridge {
     next_id: Arc<AtomicU64>,
     init_params: Arc<Mutex<Option<InitParams>>>,
     initialized: Arc<Mutex<bool>>,
+    request_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -136,6 +140,12 @@ impl PlaywrightBridge {
             .unwrap_or_else(|| PathBuf::from("node"));
         let log_path = Arc::new(bridge_log_path(&provider)?);
         reset_bridge_log(log_path.as_ref())?;
+        let request_timeout = Duration::from_millis(
+            std::env::var("RUST_PROXY_HUB_BRIDGE_TIMEOUT_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(120_000),
+        );
 
         Ok(Self {
             provider,
@@ -147,6 +157,7 @@ impl PlaywrightBridge {
             next_id: Arc::new(AtomicU64::new(1)),
             init_params: Arc::new(Mutex::new(None)),
             initialized: Arc::new(Mutex::new(false)),
+            request_timeout,
         })
     }
 
@@ -159,10 +170,6 @@ impl PlaywrightBridge {
         method: &str,
         params: T,
     ) -> Result<R> {
-        if should_auto_init(method) {
-            self.ensure_initialized().await?;
-        }
-
         self.request_raw(method, params).await
     }
 
@@ -204,28 +211,39 @@ impl PlaywrightBridge {
             }
         }
 
-        let value = receiver.await.map_err(|_| {
-            anyhow!(
-                "helper response channel closed; inspect {}",
-                self.log_path.display()
-            )
-        })??;
+        let value = match tokio::time::timeout(self.request_timeout, receiver).await {
+            Ok(Ok(result)) => result.map_err(|err| {
+                anyhow!(
+                    "helper method {method} failed; inspect {}",
+                    self.log_path.display()
+                )
+                .context(err)
+            })?,
+            Ok(Err(err)) => {
+                return Err(anyhow!(
+                    "helper response channel closed for {method}; inspect {}",
+                    self.log_path.display()
+                )
+                .context(err))
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                return Err(anyhow!(
+                    "helper request timed out after {}ms: {method}; inspect {}",
+                    self.request_timeout.as_millis(),
+                    self.log_path.display()
+                ));
+            }
+        };
         Ok(serde_json::from_value(value)?)
     }
 
-    async fn ensure_initialized(&self) -> Result<()> {
-        let mut initialized = self.initialized.lock().await;
-        if *initialized {
-            return Ok(());
+    async fn is_initialized_with(&self, params: &InitParams) -> bool {
+        let initialized = *self.initialized.lock().await;
+        if !initialized {
+            return false;
         }
-
-        let Some(params) = self.init_params.lock().await.clone() else {
-            return Ok(());
-        };
-
-        self.request_raw::<_, Value>("init", params).await?;
-        *initialized = true;
-        Ok(())
+        self.init_params.lock().await.as_ref() == Some(params)
     }
 
     async fn ensure_process(&self) -> Result<Arc<Mutex<ChildStdin>>> {
@@ -410,11 +428,12 @@ impl PlaywrightBridge {
 #[async_trait]
 impl BrowserBridge for PlaywrightBridge {
     async fn init(&self, params: InitParams) -> Result<()> {
-        *self.init_params.lock().await = Some(params.clone());
-        if self.process.lock().await.is_some() {
-            self.request_raw::<_, Value>("init", params).await?;
-            *self.initialized.lock().await = true;
+        if self.is_initialized_with(&params).await {
+            return Ok(());
         }
+        *self.init_params.lock().await = Some(params.clone());
+        self.request_raw::<_, Value>("init", params).await?;
+        *self.initialized.lock().await = true;
         Ok(())
     }
 
@@ -463,13 +482,6 @@ impl BrowserBridge for PlaywrightBridge {
         *self.initialized.lock().await = false;
         result
     }
-}
-
-fn should_auto_init(method: &str) -> bool {
-    !matches!(
-        method,
-        "init" | "manual_login" | "shutdown" | "close_account"
-    )
 }
 
 pub fn helper_dir_from(crate_dir: &str) -> PathBuf {

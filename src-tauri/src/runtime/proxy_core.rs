@@ -538,7 +538,15 @@ fn parse_tool_call_value(value: Value) -> Option<ParsedToolCall> {
         });
 
     let parsed_args = match arguments {
-        Value::String(text) => robust_parse_json(&text).unwrap_or(Value::String(text)),
+        Value::Null => Value::Object(Map::new()),
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                Value::Object(Map::new())
+            } else {
+                robust_parse_json(trimmed).unwrap_or(Value::String(text))
+            }
+        }
         other => other,
     };
 

@@ -9,8 +9,7 @@ mod upload;
 mod watchdog;
 
 use crate::browser_bridge::{
-    BrowserBridge, CaptureHeadersParams, CloseAccountParams, InitParams, ManualLoginParams,
-    PlaywrightBridge,
+    BrowserBridge, CaptureHeadersParams, CloseAccountParams, ManualLoginParams, PlaywrightBridge,
 };
 use crate::proxy_core::{
     build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
@@ -253,14 +252,6 @@ async fn run_server(
     config: AppConfig,
     runtime: ServerRuntime,
 ) -> Result<()> {
-    bridge
-        .init(InitParams {
-            runtime_dir: config.runtime_dir.to_string_lossy().to_string(),
-            headless: config.headless,
-            browser: config.browser.clone(),
-        })
-        .await?;
-
     let state = AppState {
         bridge,
         client: reqwest::Client::builder().build()?,
@@ -1600,10 +1591,6 @@ async fn collect_qwen_events(
         return Ok(Vec::new());
     }
 
-    if phase != "answer" {
-        return Ok(Vec::new());
-    }
-
     let Some(content) = delta.get("content").and_then(Value::as_str) else {
         return Ok(Vec::new());
     };
@@ -1924,7 +1911,10 @@ pub async fn serve_embedded(
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_qwen_api_error, extract_qwen_chat_id};
+    use super::{
+        collect_qwen_events, extract_qwen_api_error, extract_qwen_chat_id, QwenEvent,
+        QwenParseState, StreamRegistry,
+    };
     use serde_json::json;
 
     #[test]
@@ -1959,5 +1949,63 @@ mod tests {
             })),
             Some("Unauthorized: login required".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn parses_answer_content_without_phase() {
+        let registry = StreamRegistry::new();
+        let mut state = QwenParseState::default();
+        let mut parser = None;
+        let data = json!({
+            "response_id": "resp-1",
+            "choices": [{
+                "delta": {
+                    "content": "visible answer"
+                }
+            }]
+        })
+        .to_string();
+
+        let events = collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events.as_slice(),
+            [QwenEvent::Text(text)] if text == "visible answer"
+        ));
+        assert_eq!(state.last_full_content, "visible answer");
+    }
+
+    #[tokio::test]
+    async fn maps_thinking_summary_to_reasoning() {
+        let registry = StreamRegistry::new();
+        let mut state = QwenParseState::default();
+        let mut parser = None;
+        let data = json!({
+            "response_id": "resp-1",
+            "choices": [{
+                "delta": {
+                    "phase": "thinking_summary",
+                    "extra": {
+                        "summary_thought": {
+                            "content": ["first thought"]
+                        }
+                    }
+                }
+            }]
+        })
+        .to_string();
+
+        let events = collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events.as_slice(),
+            [QwenEvent::Reasoning(text)] if text == "first thought"
+        ));
+        assert_eq!(state.reasoning, "first thought");
+        assert!(state.last_full_content.is_empty());
     }
 }

@@ -59,6 +59,7 @@ struct AppConfig {
     qwen: ProviderConfig,
     chatgpt: ProviderConfig,
     gemini: ProviderConfig,
+    mistral: ProviderConfig,
 }
 
 #[derive(Clone)]
@@ -71,6 +72,7 @@ pub struct HubServiceConfig {
     pub kimi: ProviderConfig,
     pub chatgpt: ProviderConfig,
     pub gemini: ProviderConfig,
+    pub mistral: ProviderConfig,
 }
 
 #[derive(Clone)]
@@ -87,6 +89,7 @@ enum ProviderName {
     Qwen,
     Chatgpt,
     Gemini,
+    Mistral,
 }
 
 impl ProviderName {
@@ -97,16 +100,18 @@ impl ProviderName {
             Self::Qwen => "qwen",
             Self::Chatgpt => "chatgpt",
             Self::Gemini => "gemini",
+            Self::Mistral => "mistral",
         }
     }
 }
 
-const PROVIDER_ORDER: [ProviderName; 5] = [
+const PROVIDER_ORDER: [ProviderName; 6] = [
     ProviderName::Qwen,
     ProviderName::Deepseek,
     ProviderName::Kimi,
     ProviderName::Chatgpt,
     ProviderName::Gemini,
+    ProviderName::Mistral,
 ];
 
 #[derive(Debug, Serialize)]
@@ -142,6 +147,10 @@ async fn main() -> Result<()> {
 async fn run_server(config: AppConfig) -> Result<()> {
     let state = AppState {
         client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .tcp_nodelay(true)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(16)
             .timeout(Duration::from_secs(120))
             .build()?,
         config: config.clone(),
@@ -200,6 +209,13 @@ fn load_config() -> AppConfig {
             base_url: std::env::var("GEMINI_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3004".to_owned()),
             api_key: std::env::var("GEMINI_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        },
+        mistral: ProviderConfig {
+            base_url: std::env::var("MISTRAL_BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3005".to_owned()),
+            api_key: std::env::var("MISTRAL_API_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
         },
@@ -464,6 +480,10 @@ async fn fetch_provider_models(state: &AppState, provider: ProviderName) -> Resu
         .cloned()
         .unwrap_or_default();
 
+    Ok(tag_provider_models(items, provider))
+}
+
+fn tag_provider_models(items: Vec<Value>, provider: ProviderName) -> Vec<Value> {
     let mut output = Vec::new();
     for item in items {
         let mut object = match item {
@@ -476,7 +496,7 @@ async fn fetch_provider_models(state: &AppState, provider: ProviderName) -> Resu
         );
         output.push(Value::Object(object));
     }
-    Ok(output)
+    output
 }
 
 async fn proxy_json_post<T: serde::Serialize>(
@@ -641,6 +661,7 @@ fn normalize_prefixed_model(model: &str) -> RoutedModel {
             "qwen" => ProviderName::Qwen,
             "chatgpt" => ProviderName::Chatgpt,
             "gemini" => ProviderName::Gemini,
+            "mistral" => ProviderName::Mistral,
             _ => infer_provider(trimmed),
         };
         return RoutedModel {
@@ -663,6 +684,11 @@ fn infer_provider(model: &str) -> ProviderName {
         ProviderName::Kimi
     } else if lower.starts_with("gemini") {
         ProviderName::Gemini
+    } else if lower.starts_with("mistral")
+        || lower.starts_with("magistral")
+        || lower.starts_with("codestral")
+    {
+        ProviderName::Mistral
     } else if lower.starts_with("gpt")
         || lower.starts_with("o1")
         || lower.starts_with("o3")
@@ -683,6 +709,7 @@ impl AppState {
             ProviderName::Qwen => &self.config.qwen,
             ProviderName::Chatgpt => &self.config.chatgpt,
             ProviderName::Gemini => &self.config.gemini,
+            ProviderName::Mistral => &self.config.mistral,
         }
     }
 }
@@ -697,6 +724,7 @@ pub async fn serve_embedded(config: HubServiceConfig) -> Result<()> {
         kimi: config.kimi,
         chatgpt: config.chatgpt,
         gemini: config.gemini,
+        mistral: config.mistral,
     })
     .await
 }
@@ -707,7 +735,7 @@ fn openapi_document(config: &AppConfig) -> Value {
         "info": {
             "title": "RustProxyHub Unified API",
             "version": "0.1.0",
-            "description": "Unified OpenAI-compatible gateway for the embedded Qwen, DeepSeek, Kimi, ChatGPT, and Gemini proxy services."
+            "description": "Unified OpenAI-compatible gateway for the embedded Qwen, DeepSeek, Kimi, ChatGPT, Gemini, and Mistral proxy services."
         },
         "servers": [
             { "url": format!("http://127.0.0.1:{}", config.port) }
@@ -890,4 +918,41 @@ fn openapi_document(config: &AppConfig) -> Value {
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{infer_provider, normalize_prefixed_model, tag_provider_models, ProviderName};
+    use serde_json::{json, Value};
+
+    #[test]
+    fn routes_prefixed_mistral_models_to_mistral() {
+        let routed = normalize_prefixed_model("mistral:mistral-large-latest");
+        assert_eq!(routed.provider, ProviderName::Mistral);
+        assert_eq!(routed.model, "mistral-large-latest");
+    }
+
+    #[test]
+    fn infers_mistral_family_models() {
+        assert_eq!(infer_provider("mistral-medium"), ProviderName::Mistral);
+        assert_eq!(infer_provider("magistral-medium"), ProviderName::Mistral);
+        assert_eq!(infer_provider("codestral-latest"), ProviderName::Mistral);
+    }
+
+    #[test]
+    fn model_merge_tags_provider_and_skips_invalid_items() {
+        let items = vec![json!({ "id": "mistral-web-session" }), Value::String("bad".to_owned())];
+
+        let tagged = tag_provider_models(items, ProviderName::Mistral);
+
+        assert_eq!(tagged.len(), 1);
+        assert_eq!(
+            tagged[0].get("provider").and_then(Value::as_str),
+            Some("mistral")
+        );
+        assert_eq!(
+            tagged[0].get("id").and_then(Value::as_str),
+            Some("mistral-web-session")
+        );
+    }
 }

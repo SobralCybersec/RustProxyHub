@@ -217,8 +217,8 @@ function renderChart() {
     data: {
       labels,
       datasets: [
-        { label: 'Models discovered', data: models, borderWidth: 1 },
-        { label: 'Healthy status', data: healthy, borderWidth: 1, type: 'line', tension: 0.25 },
+        { label: 'Models discovered', data: models, borderWidth: 1, xAxisID: 'providerAxis', yAxisID: 'countAxis' },
+        { label: 'Healthy status', data: healthy, borderWidth: 1, type: 'line', tension: 0.25, xAxisID: 'providerAxis', yAxisID: 'countAxis' },
       ],
     },
     options: {
@@ -227,8 +227,8 @@ function renderChart() {
       interaction: { intersect: false, mode: 'index' },
       plugins: { legend: { labels: { color: 'lightgreen' } } },
       scales: {
-        x: { ticks: { color: 'lightgreen' }, grid: { color: 'rgba(144, 238, 144, 0.14)' } },
-        y: { beginAtZero: true, ticks: { color: 'lightgreen', precision: 0 }, grid: { color: 'rgba(144, 238, 144, 0.14)' } },
+        providerAxis: { ticks: { color: 'lightgreen' }, grid: { color: 'rgba(144, 238, 144, 0.14)' } },
+        countAxis: { beginAtZero: true, ticks: { color: 'lightgreen', precision: 0 }, grid: { color: 'rgba(144, 238, 144, 0.14)' } },
       },
     },
   })
@@ -280,7 +280,7 @@ onBeforeUnmount(() => {
       <div class="workbench-grid">
         <label class="field span-field">
           <span>Model</span>
-          <input v-model="workbenchModel" list="hub-model-options" placeholder="qwen:model-id or chatgpt:model-id" :disabled="workbenchBlocked" />
+          <input v-model="workbenchModel" list="hub-model-options" placeholder="provider:model-id" :disabled="workbenchBlocked" />
           <datalist id="hub-model-options">
             <option v-for="model in hubModelOptions" :key="model" :value="model" />
           </datalist>

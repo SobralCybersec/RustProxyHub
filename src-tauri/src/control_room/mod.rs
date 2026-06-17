@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    env,
     fs,
     future::Future,
     path::PathBuf,
@@ -39,6 +40,7 @@ const DEEPSEEK_PORT: u16 = 3001;
 const KIMI_PORT: u16 = 3002;
 const CHATGPT_PORT: u16 = 3003;
 const GEMINI_PORT: u16 = 3004;
+const MISTRAL_PORT: u16 = 3005;
 const DEFAULT_BROWSER: &str = "msedge";
 const LOG_LIMIT: usize = 240;
 
@@ -55,12 +57,14 @@ struct ControlState {
     app_data_dir: PathBuf,
     qwen_runtime_dir: PathBuf,
     runtime: RuntimeDiagnostics,
+    startup_config: StartupConfig,
     client: reqwest::Client,
     hub_api_key: Option<String>,
     statuses: Arc<Mutex<HashMap<String, ServiceRuntimeStatus>>>,
     logs: Arc<Mutex<HashMap<String, VecDeque<String>>>>,
     open_provider_login_sessions: Arc<Mutex<HashSet<String>>>,
     open_qwen_account_login_sessions: Arc<Mutex<HashSet<String>>>,
+    tasks: Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +90,17 @@ struct WorkbenchRequest {
     model: String,
     prompt: String,
     web_search: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct StartServicesRequest {
+    services: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct StartupConfig {
+    mode: String,
+    services: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -128,6 +143,7 @@ struct DashboardOverview {
     app_data_dir: String,
     helper_dir: String,
     runtime: RuntimeDiagnostics,
+    startup_config: StartupConfig,
     hub: HubOverview,
     providers: Vec<ProviderOverview>,
     qwen_account_count: usize,
@@ -168,6 +184,7 @@ impl ControlState {
             &app_data_dir,
             detect_edge_available(),
         );
+        let startup_config = startup_config_from_env();
         let hub_api_key = std::env::var("RUST_PROXY_HUB_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -185,7 +202,12 @@ impl ControlState {
             app_data_dir,
             qwen_runtime_dir,
             runtime,
+            startup_config,
             client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .tcp_nodelay(true)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .pool_max_idle_per_host(16)
                 .timeout(Duration::from_secs(12))
                 .build()?,
             hub_api_key,
@@ -193,6 +215,7 @@ impl ControlState {
             logs: Arc::new(Mutex::new(logs)),
             open_provider_login_sessions: Arc::new(Mutex::new(HashSet::new())),
             open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::new())),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -204,131 +227,200 @@ impl ControlState {
 
         fs::create_dir_all(self.providers_root())?;
         fs::create_dir_all(self.qwen_runtime_dir())?;
-        fs::create_dir_all(self.deepseek_runtime_dir())?;
-        fs::create_dir_all(self.kimi_runtime_dir())?;
-        fs::create_dir_all(self.chatgpt_runtime_dir())?;
-        fs::create_dir_all(self.gemini_runtime_dir())?;
-        fs::create_dir_all(self.hub_runtime_dir())?;
         let _ = ensure_qwen_db(&self.qwen_runtime_dir(), &self.workspace_root)?;
+        let selected = self.selected_startup_services();
+
+        for name in &selected {
+            self.ensure_service_dir(name);
+            self.spawn_service_by_name(name)
+                .map_err(|err| anyhow!("failed to start {name}: {err}"))?;
+        }
+
+        Ok(())
+    }
+
+    fn selected_startup_services(&self) -> Vec<&'static str> {
+        let configured = self
+            .startup_config
+            .services
+            .iter()
+            .filter_map(|name| normalize_service_name(name).ok())
+            .collect::<HashSet<_>>();
+
+        service_names()
+            .into_iter()
+            .filter(|name| configured.contains(name))
+            .collect()
+    }
+
+    fn ensure_service_dir(&self, name: &str) {
+        let _ = match name {
+            "qwen" => fs::create_dir_all(self.qwen_runtime_dir()),
+            "deepseek" => fs::create_dir_all(self.deepseek_runtime_dir()),
+            "kimi" => fs::create_dir_all(self.kimi_runtime_dir()),
+            "chatgpt" => fs::create_dir_all(self.chatgpt_runtime_dir()),
+            "gemini" => fs::create_dir_all(self.gemini_runtime_dir()),
+            "mistral" => fs::create_dir_all(self.mistral_runtime_dir()),
+            "hub" => fs::create_dir_all(self.hub_runtime_dir()),
+            _ => Ok(()),
+        };
+    }
+
+    fn spawn_service_by_name(&self, name: &str) -> Result<()> {
         let helper_dir = require_helper_dir(&self.runtime)?;
         let node_path = Some(require_node_path(&self.runtime)?);
 
-        self.spawn_service("qwen", {
-            let runtime_dir = self.qwen_runtime_dir();
-            let helper_dir = helper_dir.clone();
-            let node_path = node_path.clone();
-            async move {
-                serve_qwen(
-                    build_embedded_config(
+        match name {
+            "qwen" => {
+                let runtime_dir = self.qwen_runtime_dir();
+                let helper_dir = helper_dir.clone();
+                let node_path = node_path.clone();
+                self.spawn_service("qwen".to_owned(), async move {
+                    serve_qwen(
+                        build_embedded_config(
+                            runtime_dir,
+                            QWEN_PORT,
+                            None,
+                            DEFAULT_BROWSER.to_owned(),
+                            true,
+                        ),
+                        helper_dir,
+                        node_path,
+                    )
+                    .await
+                });
+            }
+            "deepseek" => {
+                let runtime_dir = self.deepseek_runtime_dir();
+                let helper_dir = helper_dir.clone();
+                let node_path = node_path.clone();
+                self.spawn_service("deepseek".to_owned(), async move {
+                    serve_deepseek(DeepseekServiceConfig {
+                        host: "127.0.0.1".to_owned(),
+                        port: DEEPSEEK_PORT,
+                        api_key: None,
+                        headless: true,
+                        browser: DEFAULT_BROWSER.to_owned(),
                         runtime_dir,
-                        QWEN_PORT,
-                        None,
-                        DEFAULT_BROWSER.to_owned(),
-                        true,
-                    ),
-                    helper_dir,
-                    node_path,
-                )
-                .await
+                        helper_dir,
+                        node_path,
+                    })
+                    .await
+                });
             }
-        });
-
-        self.spawn_service("deepseek", {
-            let runtime_dir = self.deepseek_runtime_dir();
-            let helper_dir = helper_dir.clone();
-            let node_path = node_path.clone();
-            async move {
-                serve_deepseek(DeepseekServiceConfig {
-                    host: "127.0.0.1".to_owned(),
-                    port: DEEPSEEK_PORT,
-                    api_key: None,
-                    headless: true,
-                    browser: DEFAULT_BROWSER.to_owned(),
-                    runtime_dir,
-                    helper_dir,
-                    node_path,
-                })
-                .await
+            "kimi" => {
+                let runtime_dir = self.kimi_runtime_dir();
+                let helper_dir = helper_dir.clone();
+                let node_path = node_path.clone();
+                self.spawn_service("kimi".to_owned(), async move {
+                    serve_kimi(KimiServiceConfig {
+                        host: "127.0.0.1".to_owned(),
+                        port: KIMI_PORT,
+                        api_key: None,
+                        headless: true,
+                        browser: DEFAULT_BROWSER.to_owned(),
+                        runtime_dir,
+                        helper_dir,
+                        node_path,
+                    })
+                    .await
+                });
             }
-        });
-
-        self.spawn_service("kimi", {
-            let runtime_dir = self.kimi_runtime_dir();
-            let helper_dir = helper_dir.clone();
-            let node_path = node_path.clone();
-            async move {
-                serve_kimi(KimiServiceConfig {
-                    host: "127.0.0.1".to_owned(),
-                    port: KIMI_PORT,
-                    api_key: None,
-                    headless: true,
-                    browser: DEFAULT_BROWSER.to_owned(),
-                    runtime_dir,
-                    helper_dir,
-                    node_path,
-                })
-                .await
+            "chatgpt" => {
+                let runtime_dir = self.chatgpt_runtime_dir();
+                let helper_dir = helper_dir.clone();
+                let node_path = node_path.clone();
+                self.spawn_service("chatgpt".to_owned(), async move {
+                    serve_browser_provider(BrowserProviderServerConfig {
+                        kind: BrowserProviderKind::Chatgpt,
+                        host: "127.0.0.1".to_owned(),
+                        port: CHATGPT_PORT,
+                        api_key: None,
+                        headless: true,
+                        browser: DEFAULT_BROWSER.to_owned(),
+                        runtime_dir,
+                        helper_dir,
+                        node_path,
+                    })
+                    .await
+                });
             }
-        });
-
-        self.spawn_service("chatgpt", {
-            let runtime_dir = self.chatgpt_runtime_dir();
-            let helper_dir = helper_dir.clone();
-            let node_path = node_path.clone();
-            async move {
-                serve_browser_provider(BrowserProviderServerConfig {
-                    kind: BrowserProviderKind::Chatgpt,
-                    host: "127.0.0.1".to_owned(),
-                    port: CHATGPT_PORT,
-                    api_key: None,
-                    headless: true,
-                    browser: DEFAULT_BROWSER.to_owned(),
-                    runtime_dir,
-                    helper_dir,
-                    node_path,
-                })
-                .await
+            "gemini" => {
+                let runtime_dir = self.gemini_runtime_dir();
+                let helper_dir = helper_dir.clone();
+                let node_path = node_path.clone();
+                self.spawn_service("gemini".to_owned(), async move {
+                    serve_browser_provider(BrowserProviderServerConfig {
+                        kind: BrowserProviderKind::Gemini,
+                        host: "127.0.0.1".to_owned(),
+                        port: GEMINI_PORT,
+                        api_key: None,
+                        headless: true,
+                        browser: DEFAULT_BROWSER.to_owned(),
+                        runtime_dir,
+                        helper_dir,
+                        node_path,
+                    })
+                    .await
+                });
             }
-        });
-
-        self.spawn_service("gemini", {
-            let runtime_dir = self.gemini_runtime_dir();
-            let helper_dir = helper_dir.clone();
-            let node_path = node_path.clone();
-            async move {
-                serve_browser_provider(BrowserProviderServerConfig {
-                    kind: BrowserProviderKind::Gemini,
-                    host: "127.0.0.1".to_owned(),
-                    port: GEMINI_PORT,
-                    api_key: None,
-                    headless: true,
-                    browser: DEFAULT_BROWSER.to_owned(),
-                    runtime_dir,
-                    helper_dir,
-                    node_path,
-                })
-                .await
+            "mistral" => {
+                let runtime_dir = self.mistral_runtime_dir();
+                let helper_dir = helper_dir.clone();
+                let node_path = node_path.clone();
+                self.spawn_service("mistral".to_owned(), async move {
+                    serve_browser_provider(BrowserProviderServerConfig {
+                        kind: BrowserProviderKind::Mistral,
+                        host: "127.0.0.1".to_owned(),
+                        port: MISTRAL_PORT,
+                        api_key: None,
+                        headless: true,
+                        browser: DEFAULT_BROWSER.to_owned(),
+                        runtime_dir,
+                        helper_dir,
+                        node_path,
+                    })
+                    .await
+                });
             }
-        });
-
-        self.spawn_service("hub", {
-            let hub_api_key = self.hub_api_key.clone();
-            async move {
-                serve_hub(HubServiceConfig {
-                    host: "127.0.0.1".to_owned(),
-                    port: HUB_PORT,
-                    api_key: hub_api_key,
-                    qwen: ProviderConfig::new(provider_base_url("qwen"), None::<String>),
-                    deepseek: ProviderConfig::new(provider_base_url("deepseek"), None::<String>),
-                    kimi: ProviderConfig::new(provider_base_url("kimi"), None::<String>),
-                    chatgpt: ProviderConfig::new(provider_base_url("chatgpt"), None::<String>),
-                    gemini: ProviderConfig::new(provider_base_url("gemini"), None::<String>),
-                })
-                .await
+            "hub" => {
+                let hub_api_key = self.hub_api_key.clone();
+                self.spawn_service("hub".to_owned(), async move {
+                    serve_hub(HubServiceConfig {
+                        host: "127.0.0.1".to_owned(),
+                        port: HUB_PORT,
+                        api_key: hub_api_key,
+                        qwen: ProviderConfig::new(provider_base_url("qwen"), None::<String>),
+                        deepseek: ProviderConfig::new(provider_base_url("deepseek"), None::<String>),
+                        kimi: ProviderConfig::new(provider_base_url("kimi"), None::<String>),
+                        chatgpt: ProviderConfig::new(provider_base_url("chatgpt"), None::<String>),
+                        gemini: ProviderConfig::new(provider_base_url("gemini"), None::<String>),
+                        mistral: ProviderConfig::new(provider_base_url("mistral"), None::<String>),
+                    })
+                    .await
+                });
             }
-        });
+            _ => return Err(anyhow!("unsupported service: {name}")),
+        }
 
         Ok(())
+    }
+
+    async fn start_services(&self, requested: Vec<String>) -> Result<Vec<String>> {
+        if !self.runtime.single_runner_ready {
+            return Err(anyhow!("runtime preflight is blocking startup"));
+        }
+
+        let mut started = Vec::new();
+        for raw in requested {
+            let name = normalize_service_name(&raw)?;
+            self.ensure_service_dir(name);
+            self.spawn_service_by_name(name)
+                .map_err(|err| anyhow!("failed to start {name}: {err}"))?;
+            started.push(name.to_owned());
+        }
+
+        Ok(started)
     }
 
     async fn mark_runtime_blocked(&self) {
@@ -348,13 +440,15 @@ impl ControlState {
         }
     }
 
-    fn spawn_service<F>(&self, name: &'static str, future: F)
+    fn spawn_service<F>(&self, name: String, future: F)
     where
         F: Future<Output = Result<()>> + Send + 'static,
     {
         let state = self.clone();
-        let service_name = name.to_owned();
-        tauri::async_runtime::spawn(async move {
+        let service_name = name;
+        let service_name_for_task = service_name.clone();
+        
+        let handle = tauri::async_runtime::spawn(async move {
             state
                 .mark_service_started(&service_name, format!("starting embedded {service_name}"))
                 .await;
@@ -379,6 +473,11 @@ impl ControlState {
                         .await;
                 }
             }
+        });
+        
+        let state_for_map = self.clone();
+        tauri::async_runtime::spawn(async move {
+            state_for_map.tasks.lock().await.insert(service_name_for_task, handle);
         });
     }
 
@@ -472,6 +571,10 @@ impl ControlState {
         self.providers_root().join("gemini")
     }
 
+    fn mistral_runtime_dir(&self) -> PathBuf {
+        self.providers_root().join("mistral")
+    }
+
     fn hub_runtime_dir(&self) -> PathBuf {
         self.providers_root().join("hub")
     }
@@ -494,6 +597,7 @@ impl ControlState {
                 .clone()
                 .unwrap_or_else(|| "unavailable".to_owned()),
             runtime: self.runtime.clone(),
+            startup_config: self.startup_config.clone(),
             hub: self.hub_overview().await,
             providers,
             qwen_account_count: list_qwen_accounts_db(
@@ -643,7 +747,7 @@ impl ControlState {
 
         let login_state = if login_open {
             "login_open".to_owned()
-        } else if name == "chatgpt" || name == "gemini" {
+        } else if name == "chatgpt" || name == "gemini" || name == "mistral" {
             if model_count > 0 {
                 "authenticated".to_owned()
             } else if status.running {
@@ -671,6 +775,30 @@ impl ControlState {
             web_search_supported: provider_web_search_supported(name),
             last_error: status.last_error,
         }
+    }
+}
+
+#[tauri::command]
+async fn start_service(state: State<'_, ControlState>, name: String) -> Result<(), String> {
+    let name = normalize_service_name(&name).map_err(|err| err.to_string())?;
+    if state.service_status(name).await.running {
+        return Err(format!("service {} is already running", name));
+    }
+    state.ensure_service_dir(name);
+    state
+        .spawn_service_by_name(name)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn stop_service(state: State<'_, ControlState>, name: String) -> Result<(), String> {
+    let mut tasks = state.tasks.lock().await;
+    if let Some(handle) = tasks.remove(&name) {
+        handle.abort();
+        state.mark_service_stopped(&name, Some(format!("service {name} stopped by user")), None).await;
+        Ok(())
+    } else {
+        Err(format!("service {} is not running", name))
     }
 }
 
@@ -730,6 +858,21 @@ async fn hub_config(state: State<'_, ControlState>) -> Result<HubConfigResponse,
 }
 
 #[tauri::command]
+async fn start_services(
+    state: State<'_, ControlState>,
+    request: StartServicesRequest,
+) -> Result<Vec<String>, String> {
+    if request.services.is_empty() {
+        return Err("at least one service is required".to_owned());
+    }
+
+    state
+        .start_services(request.services)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 async fn run_workbench_request(
     state: State<'_, ControlState>,
     request: WorkbenchRequest,
@@ -769,19 +912,22 @@ async fn run_workbench_request(
             .to_owned());
     }
 
-    // Handle reasoning models: merge reasoning_content into content if content is empty
+    // Keep visible content clean. Do not surface reasoning/thinking as user text here.
+    let provider_warnings = value.get("provider_warnings").cloned();
     if let Some(choices) = value.get_mut("choices").and_then(Value::as_array_mut) {
         for choice in choices.iter_mut() {
             if let Some(message) = choice.get_mut("message").and_then(Value::as_object_mut) {
-                let content_empty = message
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(|s| s.is_empty())
-                    .unwrap_or(true);
-                
+                let content_empty = match message.get("content") {
+                    Some(Value::String(text)) => text.trim().is_empty(),
+                    Some(Value::Null) | None => true,
+                    Some(other) => other.as_array().map(|items| items.is_empty()).unwrap_or(false),
+                };
+
                 if content_empty {
-                    if let Some(reasoning) = message.get("reasoning_content").cloned() {
-                        message.insert("content".to_owned(), reasoning);
+                    if let Some(tool_calls) = message.get("tool_calls").cloned() {
+                        message.insert("content".to_owned(), Value::String(tool_calls.to_string()));
+                    } else if let Some(warnings) = provider_warnings.clone() {
+                        message.insert("content".to_owned(), Value::String(warnings.to_string()));
                     }
                 }
             }
@@ -951,6 +1097,7 @@ fn normalize_provider(value: &str) -> Result<&'static str> {
         "kimi" => Ok("kimi"),
         "chatgpt" => Ok("chatgpt"),
         "gemini" => Ok("gemini"),
+        "mistral" => Ok("mistral"),
         other => Err(anyhow!("unsupported provider: {other}")),
     }
 }
@@ -962,12 +1109,64 @@ fn normalize_service_name(value: &str) -> Result<&'static str> {
     }
 }
 
-fn service_names() -> [&'static str; 6] {
-    ["hub", "qwen", "deepseek", "kimi", "chatgpt", "gemini"]
+fn startup_config_from_env() -> StartupConfig {
+    let configured = env::var("RUST_PROXY_START_SERVICES")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+
+    let Some(configured) = configured else {
+        return StartupConfig {
+            mode: "manual".to_owned(),
+            services: Vec::new(),
+        };
+    };
+
+    if configured.eq_ignore_ascii_case("manual") || configured.eq_ignore_ascii_case("none") {
+        return StartupConfig {
+            mode: "manual".to_owned(),
+            services: Vec::new(),
+        };
+    }
+
+    if configured.eq_ignore_ascii_case("all") {
+        return StartupConfig {
+            mode: "all".to_owned(),
+            services: service_names().iter().map(|name| name.to_string()).collect(),
+        };
+    }
+
+    let mut seen = HashSet::new();
+    let services = configured
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| normalize_service_name(name).ok())
+        .filter(|name| seen.insert(*name))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    if services.is_empty() {
+        StartupConfig {
+            mode: "manual".to_owned(),
+            services,
+        }
+    } else {
+        StartupConfig {
+            mode: "selected".to_owned(),
+            services,
+        }
+    }
 }
 
-fn provider_names() -> [&'static str; 5] {
-    ["qwen", "deepseek", "kimi", "chatgpt", "gemini"]
+fn service_names() -> [&'static str; 7] {
+    [
+        "hub", "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral",
+    ]
+}
+
+fn provider_names() -> [&'static str; 6] {
+    ["qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral"]
 }
 
 fn provider_base_url(provider: &str) -> String {
@@ -977,6 +1176,7 @@ fn provider_base_url(provider: &str) -> String {
         "kimi" => KIMI_PORT,
         "chatgpt" => CHATGPT_PORT,
         "gemini" => GEMINI_PORT,
+        "mistral" => MISTRAL_PORT,
         _ => HUB_PORT,
     };
     format!("http://127.0.0.1:{port}")
@@ -1029,6 +1229,7 @@ pub fn run() {
             provider_details,
             provider_logs,
             hub_config,
+            start_services,
             run_workbench_request,
             list_qwen_accounts,
             add_qwen_account,
@@ -1036,7 +1237,9 @@ pub fn run() {
             start_provider_login_session,
             stop_provider_login_session,
             start_qwen_account_login_session,
-            stop_qwen_account_login_session
+            stop_qwen_account_login_session,
+            start_service,
+            stop_service
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1045,15 +1248,15 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_qwen_account_db, ensure_qwen_db, provider_base_url, service_names, ControlState,
-        RuntimeDiagnostics, ServiceRuntimeStatus,
+        add_qwen_account_db, ensure_qwen_db, normalize_provider, provider_base_url,
+        service_names, ControlState, RuntimeDiagnostics, ServiceRuntimeStatus, StartupConfig,
     };
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         fs,
         path::PathBuf,
         sync::Arc,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::Mutex;
 
@@ -1074,6 +1277,13 @@ mod tests {
         assert_eq!(provider_base_url("kimi"), "http://127.0.0.1:3002");
         assert_eq!(provider_base_url("chatgpt"), "http://127.0.0.1:3003");
         assert_eq!(provider_base_url("gemini"), "http://127.0.0.1:3004");
+        assert_eq!(provider_base_url("mistral"), "http://127.0.0.1:3005");
+    }
+
+    #[test]
+    fn provider_normalization_accepts_mistral() {
+        assert_eq!(normalize_provider(" MISTRAL ").unwrap(), "mistral");
+        assert!(normalize_provider("claude").is_err());
     }
 
     #[tokio::test]
@@ -1097,12 +1307,23 @@ mod tests {
                 single_runner_ready: false,
                 issues: vec!["Bundled node.exe not found in Tauri resources.".to_owned()],
             },
-            client: reqwest::Client::builder().build().unwrap(),
+            startup_config: StartupConfig {
+                mode: "manual".to_owned(),
+                services: Vec::new(),
+            },
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .tcp_nodelay(true)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .pool_max_idle_per_host(16)
+                .build()
+                .unwrap(),
             hub_api_key: None,
             statuses: Arc::new(Mutex::new(statuses)),
             logs: Arc::new(Mutex::new(logs)),
             open_provider_login_sessions: Arc::new(Mutex::new(HashSet::new())),
             open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::new())),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
         };
 
         state.mark_runtime_blocked().await;
@@ -1152,7 +1373,17 @@ mod tests {
                 single_runner_ready: true,
                 issues: Vec::new(),
             },
-            client: reqwest::Client::builder().build().unwrap(),
+            startup_config: StartupConfig {
+                mode: "manual".to_owned(),
+                services: Vec::new(),
+            },
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .tcp_nodelay(true)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .pool_max_idle_per_host(16)
+                .build()
+                .unwrap(),
             hub_api_key: None,
             statuses: Arc::new(Mutex::new(statuses)),
             logs: Arc::new(Mutex::new(logs)),
@@ -1162,6 +1393,7 @@ mod tests {
             open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::from([String::from(
                 "acct-1",
             )]))),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let overview = state.build_dashboard_overview().await.unwrap();

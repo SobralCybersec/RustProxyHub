@@ -1,4 +1,19 @@
 <script setup lang="ts">
+import { HugeiconsIcon } from '@hugeicons/vue'
+import {
+  AiBrain03Icon,
+  AiChat02Icon,
+  AppWindowIcon,
+  Cancel01Icon,
+  ComputerTerminalIcon,
+  DashboardSquare03Icon,
+  HelpCircleIcon,
+  Key02Icon,
+  Maximize01Icon,
+  Minimize01Icon,
+  ServerStack03Icon,
+} from '@hugeicons/core-free-icons'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import DetailsDrawer from '@/components/dashboard/DetailsDrawer.vue'
@@ -9,57 +24,53 @@ import QwenAccountsPanel from '@/components/dashboard/QwenAccountsPanel.vue'
 import WorkbenchPanel from '@/components/dashboard/WorkbenchPanel.vue'
 
 const store = useStore()
-const { overview, error, filteredProviders } = storeToRefs(store)
+const { overview, error, notice, filteredProviders } = storeToRefs(store)
 
-type TerminalTab = 'overview' | 'providers' | 'access' | 'qwen' | 'workbench'
+type ConsoleTab = 'overview' | 'providers' | 'access' | 'qwen' | 'workbench'
 
-const activeTab = ref<TerminalTab>('overview')
+const tutorialStorageKey = 'rustproxyhub:tutorial-complete'
+const activeTab = ref<ConsoleTab>('overview')
 const terminalInput = ref('')
 const inputRef = ref<HTMLInputElement | null>(null)
 const outputRef = ref<HTMLElement | null>(null)
-const soundEnabled = ref(true)
 const history = ref<string[]>([])
 const historyIndex = ref(-1)
+const tutorialOpen = ref(false)
+const tutorialSlide = ref(0)
 const output = ref<string[]>([
-  'RustProxy shell initialized.',
-  "Type 'help' for local commands. Use Ctrl+1..5 to switch panes.",
+  'RustProxyHub operator console ready.',
+  "Type 'help' for commands or use the left rail.",
 ])
 
-let audioContext: AudioContext | null = null
 let clockTimer: number | null = null
 const now = ref(new Date())
 
 const tabs = computed(() => [
-  { key: 'overview', label: 'overview.sh', meta: overview.value?.hub.health_status ?? 'booting' },
-  { key: 'providers', label: 'providers.log', meta: `${filteredProviders.value.length} visible` },
-  { key: 'access', label: 'loginctl', meta: `${store.openLoginCount} active` },
-  { key: 'qwen', label: 'qwen.vault', meta: `${store.qwenAccounts.length} stored` },
-  { key: 'workbench', label: 'probe.ts', meta: store.workbenchModel || 'no model' },
+  { key: 'overview', label: 'Overview', meta: overview.value?.hub.health_status ?? 'booting', icon: DashboardSquare03Icon },
+  { key: 'providers', label: 'Providers', meta: `${filteredProviders.value.length} visible`, icon: ServerStack03Icon },
+  { key: 'access', label: 'Access', meta: `${store.openLoginCount} active`, icon: Key02Icon },
+  { key: 'qwen', label: 'Qwen Vault', meta: `${store.qwenAccounts.length} stored`, icon: AiBrain03Icon },
+  { key: 'workbench', label: 'Workbench', meta: store.workbenchModel || 'no model', icon: ComputerTerminalIcon },
 ] as const)
 
-const prefix = computed(() => `visitor@rustproxy:${activeTab.value}$`)
-const clock = computed(() => now.value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+const tutorialSlides = [
+  {
+    title: 'Runtime Preflight',
+    body: 'Check bundled Node, Playwright helper, Edge availability, and writable app data before opening provider sessions.',
+  },
+  {
+    title: 'Provider Sessions',
+    body: 'Use Access to open browser-backed logins. Close each login window before running live hub probes.',
+  },
+  {
+    title: 'Model Discovery',
+    body: 'Refresh after login. Browser providers report discovered session models and keep a safe fallback when discovery fails.',
+  },
+]
 
-function playSound(kind: 'key' | 'tab' | 'ok' | 'error' = 'key') {
-  if (!soundEnabled.value || typeof window === 'undefined') return
-  try {
-    audioContext ??= new AudioContext()
-    const oscillator = audioContext.createOscillator()
-    const gain = audioContext.createGain()
-    const frequencies = { key: 520, tab: 680, ok: 860, error: 160 }
-    oscillator.type = kind === 'error' ? 'sawtooth' : 'square'
-    oscillator.frequency.value = frequencies[kind]
-    gain.gain.setValueAtTime(0.0001, audioContext.currentTime)
-    gain.gain.exponentialRampToValueAtTime(kind === 'key' ? 0.018 : 0.035, audioContext.currentTime + 0.01)
-    gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + (kind === 'key' ? 0.045 : 0.09))
-    oscillator.connect(gain)
-    gain.connect(audioContext.destination)
-    oscillator.start()
-    oscillator.stop(audioContext.currentTime + 0.11)
-  } catch {
-    // Audio is decorative only. Ignore browser autoplay restrictions.
-  }
-}
+const prefix = computed(() => `operator@rustproxy:${activeTab.value}$`)
+const clock = computed(() => now.value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }))
+const runtimeState = computed(() => (store.runtimeReady ? 'ready' : 'blocked'))
 
 function scrollOutput() {
   void nextTick(() => outputRef.value?.scrollTo({ top: outputRef.value.scrollHeight }))
@@ -74,27 +85,47 @@ function focusInput() {
   void nextTick(() => inputRef.value?.focus())
 }
 
-function focusShell(event?: MouseEvent) {
-  const target = event?.target as HTMLElement | null
-  if (target?.closest('button, a, select, input, textarea, [contenteditable="true"], .terminal-window')) return
+function selectTab(tab: ConsoleTab) {
+  activeTab.value = tab
+  write(`${prefix.value} open ${tab}`)
   focusInput()
 }
 
-function selectTab(tab: TerminalTab) {
-  activeTab.value = tab
-  playSound('tab')
-  write(`${prefix.value} cd ./${tab}`)
+function showTutorial() {
+  tutorialSlide.value = 0
+  tutorialOpen.value = true
+}
+
+function closeTutorial() {
+  tutorialOpen.value = false
+  window.localStorage.setItem(tutorialStorageKey, '1')
+  focusInput()
+}
+
+function nextTutorialSlide() {
+  if (tutorialSlide.value >= tutorialSlides.length - 1) {
+    closeTutorial()
+    return
+  }
+  tutorialSlide.value += 1
+}
+
+async function windowAction(action: 'minimize' | 'toggleMaximize' | 'close') {
+  const win = getCurrentWindow()
+  if (action === 'minimize') await win.minimize()
+  if (action === 'toggleMaximize') await win.toggleMaximize()
+  if (action === 'close') await win.close()
 }
 
 function printStatus() {
   write([
-    `hub.status     ${overview.value?.hub.health_status ?? 'booting'}`,
-    `hub.running    ${overview.value?.hub.running ? 'true' : 'false'}`,
-    `hub.models     ${overview.value?.hub.model_count ?? 0}`,
-    `providers      ${filteredProviders.value.length}`,
-    `qwen.accounts  ${store.qwenAccounts.length}`,
-    `login.windows  ${store.openLoginCount}`,
-    `sounds         ${soundEnabled.value ? 'on' : 'off'}`,
+    `hub.status      ${overview.value?.hub.health_status ?? 'booting'}`,
+    `hub.running     ${overview.value?.hub.running ? 'true' : 'false'}`,
+    `hub.models      ${overview.value?.hub.model_count ?? 0}`,
+    `providers       ${filteredProviders.value.length}`,
+    `qwen.accounts   ${store.qwenAccounts.length}`,
+    `login.windows   ${store.openLoginCount}`,
+    `runtime.state   ${runtimeState.value}`,
   ])
 }
 
@@ -109,51 +140,41 @@ async function execute(raw = terminalInput.value) {
 
   if (command === 'clear') {
     output.value = []
-    playSound('ok')
     return
   }
 
   if (command === 'help') {
     write([
-      'Available commands:',
-      '  help                 print this menu',
-      '  clear                clear terminal output',
-      '  status               print hub/provider status',
-      '  refresh              reload hub overview',
-      '  sounds on|off        enable or mute proxy beeps',
-      '  tab overview         open overview.sh',
-      '  tab providers        open providers.log',
-      '  tab access           open loginctl',
-      '  tab qwen             open qwen.vault',
-      '  tab workbench        open probe.ts',
-      '  providers            list visible providers',
+      'Commands:',
+      '  status            print runtime and hub status',
+      '  refresh           reload dashboard overview',
+      '  providers         list visible providers',
+      '  tab <name>        open overview, providers, access, qwen, workbench',
+      '  tutorial          reopen first-run guide',
+      '  clear             clear console output',
     ])
-    playSound('ok')
     return
   }
 
   if (command === 'status') {
     printStatus()
-    playSound('ok')
     return
   }
 
   if (command === 'refresh') {
     await store.refreshOverview()
-    write('stdout: overview refreshed')
-    playSound('ok')
+    store.syncWorkbenchModel()
+    write('overview refreshed')
     return
   }
 
-  if (command === 'sounds on' || command === 'sounds off') {
-    soundEnabled.value = command.endsWith('on')
-    write(`stdout: proxy sounds ${soundEnabled.value ? 'enabled' : 'muted'}`)
-    playSound('ok')
+  if (command === 'tutorial') {
+    showTutorial()
     return
   }
 
   if (command.startsWith('tab ')) {
-    const tab = command.slice(4).trim() as TerminalTab
+    const tab = command.slice(4).trim() as ConsoleTab
     if (['overview', 'providers', 'access', 'qwen', 'workbench'].includes(tab)) {
       selectTab(tab)
       return
@@ -161,16 +182,15 @@ async function execute(raw = terminalInput.value) {
   }
 
   if (command === 'providers') {
-    const lines = filteredProviders.value.length
-      ? filteredProviders.value.map((provider) => `${provider.name.padEnd(10)} ${String(provider.login_state).padEnd(22)} ${provider.model_count} models`)
-      : ['stdout: no providers visible']
-    write(lines)
-    playSound('ok')
+    write(
+      filteredProviders.value.length
+        ? filteredProviders.value.map(provider => `${provider.name.padEnd(10)} ${String(provider.login_state).padEnd(22)} ${provider.model_count} models`)
+        : 'no providers visible'
+    )
     return
   }
 
-  write(`stderr: command not found: ${command}`)
-  playSound('error')
+  write(`command not found: ${command}`)
 }
 
 function handleKeydown(event: KeyboardEvent) {
@@ -198,344 +218,107 @@ function handleKeydown(event: KeyboardEvent) {
   }
 }
 
-function handleGlobalClick(event: MouseEvent) {
-  const target = event.target as HTMLElement | null
-  if (target?.closest('button, a, select, input, textarea')) playSound('key')
-}
-
 onMounted(() => {
   void store.initApp()
   focusInput()
+  tutorialOpen.value = window.localStorage.getItem(tutorialStorageKey) !== '1'
   clockTimer = window.setInterval(() => (now.value = new Date()), 1000)
-  window.addEventListener('click', handleGlobalClick, true)
 })
 
 onBeforeUnmount(() => {
   store.disposeApp()
   if (clockTimer) window.clearInterval(clockTimer)
-  window.removeEventListener('click', handleGlobalClick, true)
-  void audioContext?.close()
 })
 </script>
 
 <template>
-  <div class="vue-terminal-page">
-    <main class="vue-terminal" @click="focusShell">
-      <p v-if="error" class="terminal-error"><span>stderr:</span> {{ error }}</p>
+  <div class="operator-console">
+    <header class="app-titlebar" data-tauri-drag-region>
+      <div class="titlebar-brand" data-tauri-drag-region>
+        <HugeiconsIcon :icon="AppWindowIcon" :size="18" aria-hidden="true" />
+        <span>RustProxyHub</span>
+        <strong>{{ runtimeState }}</strong>
+      </div>
+      <div class="titlebar-status" data-tauri-drag-region>
+        <span>{{ clock }}</span>
+        <span>{{ overview?.hub.base_url ?? 'hub offline' }}</span>
+      </div>
+      <div class="titlebar-actions">
+        <button type="button" class="icon-button" title="Open guide" aria-label="Open guide" @click="showTutorial">
+          <HugeiconsIcon :icon="HelpCircleIcon" :size="16" aria-hidden="true" />
+        </button>
+        <button type="button" class="icon-button" title="Minimize" aria-label="Minimize" @click="windowAction('minimize')">
+          <HugeiconsIcon :icon="Minimize01Icon" :size="16" aria-hidden="true" />
+        </button>
+        <button type="button" class="icon-button" title="Maximize or restore" aria-label="Maximize or restore" @click="windowAction('toggleMaximize')">
+          <HugeiconsIcon :icon="Maximize01Icon" :size="16" aria-hidden="true" />
+        </button>
+        <button type="button" class="icon-button danger" title="Close" aria-label="Close" @click="windowAction('close')">
+          <HugeiconsIcon :icon="Cancel01Icon" :size="16" aria-hidden="true" />
+        </button>
+      </div>
+    </header>
 
-      <section class="terminal-window" @click.stop>
-        <div class="window-title">
-          <span>visitor@rustproxy:/{{ activeTab }}</span>
-          <span>{{ clock }}</span>
-        </div>
+    <div class="console-body">
+      <aside class="rail" aria-label="Console sections">
+        <button
+          v-for="tab in tabs"
+          :key="tab.key"
+          type="button"
+          class="rail-item"
+          :class="{ active: activeTab === tab.key }"
+          @click="selectTab(tab.key)"
+        >
+          <HugeiconsIcon :icon="tab.icon" :size="20" aria-hidden="true" />
+          <span>{{ tab.label }}</span>
+          <small>{{ tab.meta }}</small>
+        </button>
+      </aside>
 
-        <HubHeader v-show="activeTab === 'overview'" :overview="overview" />
-        <ProviderGrid v-show="activeTab === 'providers'" :providers="filteredProviders" />
-        <LoginStudio v-show="activeTab === 'access'" :providers="filteredProviders" />
-        <QwenAccountsPanel v-show="activeTab === 'qwen'" />
-        <WorkbenchPanel v-show="activeTab === 'workbench'" />
-      </section>
+      <main class="workspace">
+        <p v-if="notice" class="notice-banner">{{ notice }}</p>
+        <p v-if="error" class="error-banner">{{ error }}</p>
 
-      <footer class="rustproxy-bottom-shell" @click="focusShell">
-        <div class="terminal-separator">╾───────────────────────────────────────────────────────────────────── rustproxyshell :: panes ───────────────────────────────────────────────────────────────────────╼</div>
-
-        <nav class="terminal-tabs" aria-label="RustProxy terminal panes">
-          <button
-            v-for="tab in tabs"
-            :key="tab.key"
-            type="button"
-            class="terminal-tab"
-            :class="{ active: activeTab === tab.key }"
-            @click.stop="selectTab(tab.key)"
-          >
-            <span>$ {{ tab.label }}</span>
-            <small>{{ tab.meta }}</small>
-          </button>
-        </nav>
-
-        <section class="terminal-output-block">
-          <ul ref="outputRef" class="vue-terminal-output-container">
-            <li v-for="(entry, index) in output" :key="`${entry}-${index}`">
-              <pre v-for="(line, lineIndex) in entry.split('\n')" :key="lineIndex"><span>{{ line }}</span></pre>
-            </li>
-          </ul>
-
-          <div class="vue-terminal-input-container">
-            <div class="vue-terminal-prefix">{{ prefix }}</div>
-            <input
-              ref="inputRef"
-              v-model="terminalInput"
-              class="vue-terminal-input"
-              autocomplete="off"
-              spellcheck="false"
-              @keydown="handleKeydown"
-            />
-          </div>
+        <section class="workspace-panel">
+          <HubHeader v-show="activeTab === 'overview'" :overview="overview" />
+          <ProviderGrid v-show="activeTab === 'providers'" :providers="filteredProviders" />
+          <LoginStudio v-show="activeTab === 'access'" :providers="filteredProviders" />
+          <QwenAccountsPanel v-show="activeTab === 'qwen'" />
+          <WorkbenchPanel v-show="activeTab === 'workbench'" />
         </section>
-      </footer>
-    </main>
+
+        <section class="command-console" aria-label="Command console">
+          <div ref="outputRef" class="command-output" aria-live="polite">
+            <p v-for="(entry, index) in output" :key="`${entry}-${index}`">{{ entry }}</p>
+          </div>
+          <label class="command-input">
+            <span>{{ prefix }}</span>
+            <input ref="inputRef" v-model="terminalInput" autocomplete="off" spellcheck="false" @keydown="handleKeydown" />
+          </label>
+        </section>
+      </main>
+    </div>
+
+    <div v-if="tutorialOpen" class="tutorial-backdrop" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
+      <section class="tutorial-dialog">
+        <div class="tutorial-icon">
+          <HugeiconsIcon :icon="AiChat02Icon" :size="24" aria-hidden="true" />
+        </div>
+        <p class="kicker">First run</p>
+        <h2 id="tutorial-title">{{ tutorialSlides[tutorialSlide].title }}</h2>
+        <p>{{ tutorialSlides[tutorialSlide].body }}</p>
+        <div class="tutorial-progress" aria-label="Tutorial progress">
+          <span v-for="(_, index) in tutorialSlides" :key="index" :class="{ active: index === tutorialSlide }" />
+        </div>
+        <div class="tutorial-actions">
+          <button type="button" class="secondary-button" @click="closeTutorial">Skip</button>
+          <button type="button" class="primary-button" @click="nextTutorialSlide">
+            {{ tutorialSlide === tutorialSlides.length - 1 ? 'Done' : 'Next' }}
+          </button>
+        </div>
+      </section>
+    </div>
 
     <DetailsDrawer />
   </div>
 </template>
-
-<style scoped>
-/* hard square terminal reset */
-
-
-@import url('https://fonts.googleapis.com/css?family=VT323');
-
-*,
-*::before,
-*::after {
-  border-radius: 0 !important;
-}
-
-:deep(*),
-:deep(*::before),
-:deep(*::after) {
-  border-radius: 0 !important;
-}
-
-:global(:root) {
-  --vt-font-family: 'VT323', 'JetBrains Mono', Consolas, monospace;
-  --vt-font-size: 21px;
-  --vt-margin: 22px;
-  --vt-padding: 6px;
-  --vt-border: 3px solid lightgreen;
-  --vt-background-color: #000;
-  --vt-color: lightgreen;
-}
-
-* { box-sizing: border-box; }
-
-.vue-terminal-page {
-  min-height: 100vh;
-  width: 100%;
-  padding: var(--vt-margin);
-  background:
-    radial-gradient(circle at 50% 0%, rgba(144, 238, 144, 0.16), transparent 28rem),
-    linear-gradient(135deg, #202b28 0%, #0d1412 45%, #000 100%);
-  color: var(--vt-color);
-  font-family: var(--vt-font-family);
-  overflow: hidden;
-}
-
-.vue-terminal {
-  position: relative;
-  width: calc(100vw - 2 * var(--vt-margin));
-  height: calc(100vh - 2 * var(--vt-margin));
-  padding: var(--vt-padding);
-  border: var(--vt-border);
-  border-radius: 0;
-  background-color: var(--vt-background-color);
-  color: var(--vt-color);
-  font-family: var(--vt-font-family);
-  font-size: var(--vt-font-size);
-  display: flex;
-  flex-direction: column;
-  gap: .65rem;
-  overflow: hidden;
-  box-shadow: 0 0 0 1px rgba(144, 238, 144, 0.18), 0 0 42px rgba(144, 238, 144, 0.14), inset 0 0 34px rgba(144, 238, 144, 0.08);
-}
-
-.vue-terminal::before {
-  content: '';
-  position: fixed;
-  inset: var(--vt-margin);
-  pointer-events: none;
-  background: repeating-linear-gradient(to bottom, rgba(255,255,255,.05), rgba(255,255,255,.05) 1px, transparent 1px, transparent 4px);
-  mix-blend-mode: screen;
-  opacity: .24;
-  z-index: 5;
-}
-
-.rustproxy-bottom-shell {
-  flex: 0 0 auto;
-  width: 100%;
-  border-top: 1px solid rgba(144, 238, 144, .35);
-  padding-top: .2rem;
-  background: #000;
-}
-
-.terminal-output-block {
-  width: 100%;
-  min-height: 7.5rem;
-  max-height: 14rem;
-  border: 1px solid rgba(144, 238, 144, 0.35);
-  background: #010301;
-}
-
-.vue-terminal-output-container {
-  width: 100%;
-  max-height: 8.5rem;
-  overflow: auto;
-  list-style: none;
-  margin: 0;
-  padding: var(--vt-padding);
-}
-
-.vue-terminal-output-container li {
-  width: 100%;
-  padding: 0 var(--vt-padding);
-}
-
-.vue-terminal-output-container li pre {
-  width: 100%;
-  margin: 0;
-  padding: 0;
-}
-
-.vue-terminal-output-container li pre span {
-  width: 100%;
-  font-family: var(--vt-font-family);
-  font-size: var(--vt-font-size);
-  white-space: pre;
-}
-
-.vue-terminal-input-container {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  border-top: 1px solid rgba(144, 238, 144, 0.25);
-  padding: 0 var(--vt-padding) var(--vt-padding);
-}
-
-.vue-terminal-prefix {
-  padding: var(--vt-padding);
-  padding-bottom: 0;
-  flex-shrink: 0;
-}
-
-.vue-terminal-input {
-  flex: 1;
-  min-width: 5rem;
-  border: 0;
-  outline: none;
-  background: transparent;
-  font-family: var(--vt-font-family);
-  font-size: var(--vt-font-size);
-  color: transparent;
-  text-shadow: 0 0 0 var(--vt-color);
-  caret-color: transparent;
-  padding: 0;
-  margin: var(--vt-padding);
-  margin-bottom: 0;
-  border-right: 10px solid var(--vt-color);
-  animation: terminal-cursor 1s steps(1) infinite;
-}
-
-@keyframes terminal-cursor { 50% { border-right-color: transparent; } }
-
-.terminal-separator {
-  padding: .25rem 0 .35rem;
-  color: rgba(144, 238, 144, .72);
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.terminal-tabs {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: .45rem;
-  margin-bottom: .55rem;
-}
-
-.terminal-tab {
-  border: 1px solid rgba(144, 238, 144, .38);
-  border-radius: 0;
-  background: #030903;
-  color: var(--vt-color);
-  padding: .5rem .65rem;
-  font: inherit;
-  text-align: center;
-  cursor: pointer;
-}
-
-.terminal-tab.active,
-.terminal-tab:hover {
-  background: rgba(144, 238, 144, .16);
-  box-shadow: inset 0 0 0 1px rgba(144, 238, 144, .25);
-}
-
-.terminal-tab span,
-.terminal-tab small {
-  display: block;
-}
-
-.terminal-tab small {
-  color: rgba(144, 238, 144, .68);
-  font-size: .82em;
-}
-
-.terminal-error {
-  margin: 0 0 .7rem;
-  border: 1px solid rgba(255, 82, 82, .55);
-  padding: .55rem .7rem;
-  color: #ffb4b4;
-  background: rgba(80,0,0,.26);
-}
-
-.terminal-error span { color: #ff6767; }
-
-.terminal-window {
-  flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
-  min-height: 0;
-  overflow: auto;
-  border: 1px solid rgba(144, 238, 144, .42);
-  background: #010401;
-}
-
-.window-title {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: .45rem .65rem;
-  border-bottom: 1px solid rgba(144, 238, 144, .35);
-  background: rgba(144, 238, 144, .12);
-}
-
-:deep(.terminal-panel),
-:deep(.panel) {
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  border-radius: 0 !important;
-  background: #010401 !important;
-  box-shadow: none !important;
-}
-
-:deep(button),
-:deep(input),
-:deep(select),
-:deep(textarea) {
-  border-radius: 0 !important;
-  font-family: var(--vt-font-family) !important;
-}
-
-
-:deep(label),
-:deep(input),
-:deep(select),
-:deep(textarea),
-:deep(button),
-:deep(a) {
-  pointer-events: auto;
-}
-
-:deep(input),
-:deep(select),
-:deep(textarea) {
-  user-select: text;
-}
-
-@media (max-width: 920px) {
-  .vue-terminal-page { padding: .65rem; }
-  .vue-terminal { width: calc(100vw - 1.3rem); height: calc(100vh - 1.3rem); }
-  .terminal-tabs { grid-template-columns: 1fr; }
-  .terminal-output-block { min-height: 7rem; }
-}
-</style>

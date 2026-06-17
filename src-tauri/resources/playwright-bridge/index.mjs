@@ -104,6 +104,13 @@ const state = {
     cachedHeaders: null,
     lastHeadersTime: 0,
   },
+  mistral: {
+    context: null,
+    page: null,
+    headless: null,
+    cachedHeaders: null,
+    lastHeadersTime: 0,
+  },
   kimi: {
     context: null,
     page: null,
@@ -164,6 +171,144 @@ function ensureSessionText(value, fallback) {
   return typeof value === 'string' && value.trim() ? value : fallback
 }
 
+function modelPattern(provider) {
+  switch (provider) {
+    case 'chatgpt':
+      return /^(?:gpt|o[0-9]|chatgpt)[a-z0-9_.:-]*$/i
+    case 'gemini':
+      return /^(?:gemini|learnlm)[a-z0-9_.:-]*$/i
+    case 'mistral':
+      return /^(?:mistral|magistral|codestral|vibe|le-chat)[a-z0-9_.:-]*$/i
+    default:
+      return /^[a-z0-9][a-z0-9_.:-]{1,80}$/i
+  }
+}
+
+function addModelCandidate(target, provider, value) {
+  if (typeof value !== 'string') return
+  const clean = value.trim().replace(/^model:/i, '').replace(/^models\//i, '')
+  if (!clean || clean.length > 96 || /\s/.test(clean)) return
+  if (modelPattern(provider).test(clean)) target.add(clean)
+}
+
+function collectModelIds(value, provider, target, depth = 0) {
+  if (depth > 8 || value == null) return
+
+  if (typeof value === 'string') {
+    addModelCandidate(target, provider, value)
+    const trimmed = value.trim()
+    if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && trimmed.length < 500000) {
+      try {
+        collectModelIds(JSON.parse(trimmed), provider, target, depth + 1)
+      } catch {}
+    }
+
+    const modelKeyRe = /["'](?:model|model_slug|slug|id|name)["']\s*:\s*["']([a-zA-Z0-9][\w.:-]{1,95})["']/g
+    for (const match of trimmed.matchAll(modelKeyRe)) addModelCandidate(target, provider, match[1])
+
+    const directPatterns = {
+      chatgpt: /\b(?:gpt|o[0-9]|chatgpt)[a-zA-Z0-9_.:-]{1,80}\b/g,
+      gemini: /\b(?:gemini|learnlm)[a-zA-Z0-9_.:-]{1,80}\b/g,
+      mistral: /\b(?:mistral|magistral|codestral|vibe|le-chat)[a-zA-Z0-9_.:-]{1,80}\b/g,
+    }
+    for (const match of trimmed.matchAll(directPatterns[provider] || /\b[a-z][a-z0-9_.:-]{1,80}\b/g)) {
+      addModelCandidate(target, provider, match[0])
+    }
+    return
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectModelIds(item, provider, target, depth + 1)
+    return
+  }
+
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      if (/^(?:model|model_slug|slug|id|name)$/i.test(key)) {
+        addModelCandidate(target, provider, child)
+      }
+      collectModelIds(child, provider, target, depth + 1)
+    }
+  }
+}
+
+function modelListResponse(ids, provider, fallbackModel) {
+  const data = [...ids].length ? [...ids] : [fallbackModel]
+  return {
+    data: data.map(id => ({ id, provider })),
+  }
+}
+
+async function scanPageModelHints(page, provider, endpointPaths = []) {
+  const bodies = await page.evaluate(async ({ endpointPaths }) => {
+    const out = []
+    const add = value => {
+      if (typeof value === 'string' && value.trim()) out.push(value.slice(0, 500000))
+    }
+
+    for (const endpoint of endpointPaths) {
+      try {
+        const response = await fetch(endpoint, { credentials: 'include' })
+        if (response.ok) add(await response.text())
+      } catch {}
+    }
+
+    try {
+      add(JSON.stringify(window.__NEXT_DATA__ || window.__NUXT__ || {}))
+    } catch {}
+
+    for (const script of Array.from(document.scripts).slice(0, 80)) {
+      const text = script.textContent || ''
+      if (/model|gemini|gpt|mistral|codestral|magistral/i.test(text)) add(text)
+    }
+
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      try {
+        for (let index = 0; index < storage.length; index += 1) {
+          const key = storage.key(index) || ''
+          const value = storage.getItem(key) || ''
+          if (/model|gemini|gpt|mistral|codestral|magistral/i.test(`${key} ${value}`)) {
+            add(`${key} ${value}`)
+          }
+        }
+      } catch {}
+    }
+
+    for (const resource of performance.getEntriesByType('resource').map(entry => entry.name)) {
+      if (/batchexecute|model|init|template|status/i.test(resource)) add(resource)
+    }
+
+    return out
+  }, { endpointPaths })
+
+  const ids = new Set()
+  for (const body of bodies) collectModelIds(body, provider, ids)
+  return ids
+}
+
+async function waitForInteractiveSelector(page, selectors, timeout = 30000) {
+  for (const selector of selectors) {
+    try {
+      await page.waitForSelector(selector, { timeout })
+      return selector
+    } catch {}
+  }
+
+  throw new Error(`Timeout waiting for interactive selector: ${selectors.join(', ')}`)
+}
+
+async function scanPageModelHintsWithRetries(page, provider, endpointPaths = [], attempts = 3) {
+  let ids = new Set()
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    ids = await scanPageModelHints(page, provider, endpointPaths)
+    if (ids.size > 0) {
+      return ids
+    }
+    await sleep(1200)
+  }
+  return ids
+}
+
 async function closeContext(context) {
   if (!context) return
   const browser = typeof context.browser === 'function' ? context.browser() : null
@@ -211,7 +356,12 @@ async function captureDeepSeekHeaders(forceNew = false) {
   const isOnDeepSeek = currentUrl.includes('chat.deepseek.com')
   const isOnSpecificChat = isOnDeepSeek && /\/chat\/\d+/.test(currentUrl)
   if (!isOnDeepSeek || forceNew || isOnSpecificChat) {
-    await page.goto('https://chat.deepseek.com/', { waitUntil: 'domcontentloaded' })
+    try {
+      await page.goto('https://chat.deepseek.com/', { waitUntil: 'domcontentloaded' })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!message.includes('net::ERR_ABORTED')) throw error
+    }
   }
 
   await page.waitForSelector('textarea', { timeout: 30000 }).catch(() => {
@@ -225,11 +375,13 @@ async function captureDeepSeekHeaders(forceNew = false) {
       const reqHeaders = request.headers()
       let chatSessionId = ''
       let parentMessageId = null
+      let requestPayload = null
 
       const postData = request.postData()
       if (postData) {
         try {
           const payload = JSON.parse(postData)
+          requestPayload = payload && typeof payload === 'object' ? payload : null
           chatSessionId = payload.chat_session_id || ''
           parentMessageId = payload.parent_message_id ?? null
         } catch {}
@@ -245,7 +397,12 @@ async function captureDeepSeekHeaders(forceNew = false) {
 
       await route.abort('aborted')
       await page.unroute('**/api/v0/chat/completion', routeHandler)
-      resolve({ headers, chat_session_id: chatSessionId, parent_message_id: parentMessageId })
+      resolve({
+        headers,
+        chat_session_id: chatSessionId,
+        parent_message_id: parentMessageId,
+        request_payload: requestPayload,
+      })
     }
 
     page.route('**/api/v0/chat/completion', routeHandler).then(async () => {
@@ -432,6 +589,74 @@ function buildChatGPTPayload(prompt, model, webSearch) {
   }
 }
 
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value))
+}
+
+function replaceChatGPTMessageContent(content, prompt) {
+  if (!content || typeof content !== 'object') {
+    return {
+      content_type: 'text',
+      parts: [prompt],
+    }
+  }
+
+  if (Array.isArray(content.parts)) {
+    return {
+      ...content,
+      parts: [prompt],
+    }
+  }
+
+  return {
+    ...content,
+    text: prompt,
+  }
+}
+
+function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch) {
+  let payload = null
+  try {
+    payload = template?.payload ? JSON.parse(template.payload) : null
+  } catch {}
+
+  if (!payload || typeof payload !== 'object') {
+    return buildChatGPTPayload(prompt, model, webSearch)
+  }
+
+  const nextPayload = cloneJson(payload)
+  const messages = Array.isArray(nextPayload.messages) ? nextPayload.messages : []
+  const templateMessage = messages.find((message) => message?.author?.role === 'user') || messages[0] || {}
+  const templateMetadata =
+    templateMessage?.metadata && typeof templateMessage.metadata === 'object'
+      ? templateMessage.metadata
+      : {}
+
+  nextPayload.model = model
+  nextPayload.messages = [
+    {
+      ...templateMessage,
+      id: randomUUID(),
+      create_time: Date.now() / 1000,
+      author: { ...(templateMessage.author || {}), role: 'user' },
+      content: replaceChatGPTMessageContent(templateMessage.content, prompt),
+      metadata: {
+        ...templateMetadata,
+        selected_sources: webSearch ? ['web'] : [],
+      },
+    },
+  ]
+
+  if (!nextPayload.parent_message_id || typeof nextPayload.parent_message_id !== 'string') {
+    nextPayload.parent_message_id = randomUUID()
+  }
+  if (!nextPayload.action || typeof nextPayload.action !== 'string') {
+    nextPayload.action = 'next'
+  }
+
+  return nextPayload
+}
+
 function extractChatGPTAssistantText(payload) {
   if (!payload || typeof payload !== 'object') return ''
   const mapping = payload.mapping && typeof payload.mapping === 'object' ? Object.values(payload.mapping) : []
@@ -455,15 +680,25 @@ function extractChatGPTAssistantText(payload) {
 }
 
 async function listChatGPTModels() {
-  const template = await captureChatGPTTemplate(false)
-  return {
-    data: [
-      {
-        id: ensureSessionText(template.model, 'chatgpt-web-session'),
-        provider: 'chatgpt',
-      },
-    ],
+  const page = state.chatgpt.page
+  if (!page) throw new Error('ChatGPT Playwright not initialized')
+  if (!page.url().includes('chatgpt.com')) {
+    await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
   }
+
+  await waitForInteractiveSelector(page, [
+    'textarea:visible',
+    '#prompt-textarea:visible',
+    'div[contenteditable="true"]:visible',
+  ])
+
+  const ids = await scanPageModelHintsWithRetries(page, 'chatgpt', [
+    '/backend-api/models',
+    '/backend-api/f/models',
+    '/backend-api/model_slug_availability',
+  ])
+  if (state.chatgpt.cachedHeaders?.model) addModelCandidate(ids, 'chatgpt', state.chatgpt.cachedHeaders.model)
+  return modelListResponse(ids, 'chatgpt', 'chatgpt-web-session')
 }
 
 async function chatChatGPT({ model, prompt, web_search = false }) {
@@ -474,7 +709,12 @@ async function chatChatGPT({ model, prompt, web_search = false }) {
   const requestHeaders = { ...template.headers }
   delete requestHeaders.cookie
 
-  const payload = buildChatGPTPayload(prompt, ensureSessionText(model, template.model || 'chatgpt-web-session'), web_search)
+  const payload = buildChatGPTPayloadFromTemplate(
+    template,
+    prompt,
+    ensureSessionText(model, template.model || 'chatgpt-web-session'),
+    web_search,
+  )
   const requestResult = await page.evaluate(async ({ headers, payload }) => {
     const response = await fetch('https://chatgpt.com/backend-api/f/conversation', {
       method: 'POST',
@@ -515,11 +755,18 @@ async function chatChatGPT({ model, prompt, web_search = false }) {
       ok: response.ok,
       status: response.status,
       conversationId,
+      body: raw,
     }
   }, { headers: requestHeaders, payload })
 
-  if (!requestResult.ok || !requestResult.conversationId) {
-    throw new Error(`ChatGPT upstream request failed with status ${requestResult.status}`)
+  const conversationId = requestResult.conversationId || payload.conversation_id || ''
+  if (!requestResult.ok || !conversationId) {
+    const detail = requestResult.body?.trim()
+    throw new Error(
+      detail
+        ? `ChatGPT upstream request failed with status ${requestResult.status}: ${detail.slice(0, 400)}`
+        : `ChatGPT upstream request failed with status ${requestResult.status}`,
+    )
   }
 
   const conversationJson = await page.evaluate(async ({ headers, conversationId }) => {
@@ -541,7 +788,7 @@ async function chatChatGPT({ model, prompt, web_search = false }) {
     }
 
     return ''
-  }, { headers: requestHeaders, conversationId: requestResult.conversationId })
+  }, { headers: requestHeaders, conversationId })
 
   const text = extractChatGPTAssistantText(conversationJson ? JSON.parse(conversationJson) : null)
   if (!text) {
@@ -551,7 +798,7 @@ async function chatChatGPT({ model, prompt, web_search = false }) {
   return {
     text,
     model: payload.model,
-    conversation_id: requestResult.conversationId,
+    conversation_id: conversationId,
     warning: web_search
       ? 'ChatGPT web search toggle not mapped yet. Current web-session defaults were used.'
       : null,
@@ -692,15 +939,27 @@ function extractGeminiText(body) {
 }
 
 async function listGeminiModels() {
-  await captureGeminiTemplate(false)
-  return {
-    data: [
-      {
-        id: 'gemini-web-session',
-        provider: 'gemini',
-      },
-    ],
+  const page = state.gemini.page
+  if (!page) throw new Error('Gemini Playwright not initialized')
+  if (!page.url().includes('gemini.google.com')) {
+    await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' })
   }
+
+  await waitForInteractiveSelector(page, [
+    'rich-textarea textarea',
+    'textarea:visible',
+    'div[contenteditable="true"]:visible',
+  ])
+
+  const resourceUrls = await page.evaluate(() =>
+    performance
+      .getEntriesByType('resource')
+      .map(entry => entry.name)
+      .filter(name => name.includes('batchexecute'))
+      .slice(0, 8)
+  )
+  const ids = await scanPageModelHintsWithRetries(page, 'gemini', resourceUrls)
+  return modelListResponse(ids, 'gemini', 'gemini-web-session')
 }
 
 async function chatGemini({ prompt, web_search = false }) {
@@ -760,6 +1019,271 @@ async function chatGemini({ prompt, web_search = false }) {
 async function openGeminiLogin({ runtime_dir, browser }) {
   await initGemini({ runtime_dir, headless: false, browser })
   await state.gemini.page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' })
+}
+
+async function initMistral({ runtime_dir, headless, browser }) {
+  process.chdir(runtime_dir)
+  if (state.mistral.context && state.mistral.headless === headless) return
+  if (state.mistral.context) {
+    await closeContext(state.mistral.context)
+    state.mistral.context = null
+    state.mistral.page = null
+    state.mistral.cachedHeaders = null
+    state.mistral.lastHeadersTime = 0
+  }
+  ensureDir(path.resolve('mistral_profile'))
+  const { engine, channel } = resolveEngine(browser)
+  state.mistral.context = await engine.launchPersistentContext(path.resolve('mistral_profile'), {
+    headless,
+    channel,
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=DevToolsDebuggingRestrictions',
+    ],
+  })
+  await state.mistral.context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+  })
+  state.mistral.page = await state.mistral.context.newPage()
+  state.mistral.headless = headless
+}
+
+async function captureMistralTemplate(forceNew = false) {
+  const page = state.mistral.page
+  if (!page) throw new Error('Mistral Playwright not initialized')
+
+  if (!forceNew && state.mistral.cachedHeaders && Date.now() - state.mistral.lastHeadersTime < 5 * 60 * 1000) {
+    return state.mistral.cachedHeaders
+  }
+
+  if (!page.url().includes('chat.mistral.ai') || forceNew) {
+    await page.goto('https://chat.mistral.ai/chat', { waitUntil: 'domcontentloaded' })
+  }
+
+  const inputSelector = 'textarea:visible, div[contenteditable="true"]:visible, [data-testid*="composer"] textarea'
+  await page.waitForSelector(inputSelector, { timeout: 30000 }).catch(() => {
+    throw new Error('Timeout waiting for Mistral chat input. Are you logged in?')
+  })
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timeout waiting for Mistral request template')), 60000)
+    const routeHandler = async (route, request) => {
+      const url = request.url()
+      const method = request.method()
+      if (method !== 'POST' || !url.includes('chat.mistral.ai')) {
+        await route.continue()
+        return
+      }
+
+      const postData = request.postData() || ''
+      if (!postData || !/(prompt|message|content|text|query|input|conversation)/i.test(postData + url)) {
+        await route.continue()
+        return
+      }
+
+      clearTimeout(timeout)
+      const reqHeaders = request.headers()
+      const headers = {
+        accept: reqHeaders.accept || '*/*',
+        'accept-language': reqHeaders['accept-language'] || 'en-US,en;q=0.9',
+        'content-type': reqHeaders['content-type'] || 'application/json',
+        origin: reqHeaders.origin || 'https://chat.mistral.ai',
+        referer: reqHeaders.referer || 'https://chat.mistral.ai/chat',
+        'user-agent': reqHeaders['user-agent'] || '',
+        authorization: reqHeaders.authorization || '',
+      }
+
+      state.mistral.cachedHeaders = {
+        headers,
+        payload: postData,
+        url,
+      }
+      state.mistral.lastHeadersTime = Date.now()
+
+      await route.abort('aborted')
+      await page.unroute('**/*', routeHandler)
+      resolve(state.mistral.cachedHeaders)
+    }
+
+    page.route('**/*', routeHandler).then(async () => {
+      await page.focus(inputSelector)
+      await page.fill(inputSelector, '')
+      await page.type(inputSelector, 'a', { delay: 50 })
+      await sleep(1500)
+      await page.keyboard.press('Enter')
+    })
+  })
+}
+
+function replacePromptAndModel(value, prompt, model) {
+  let changedPrompt = false
+  let changedModel = false
+  const promptKeys = new Set(['prompt', 'message', 'content', 'text', 'query', 'input'])
+
+  function visit(node, key = '') {
+    if (Array.isArray(node)) {
+      return node.map(item => visit(item))
+    }
+    if (!node || typeof node !== 'object') {
+      if (!changedPrompt && typeof node === 'string' && node.trim() === 'a') {
+        changedPrompt = true
+        return prompt
+      }
+      return node
+    }
+
+    const out = {}
+    for (const [childKey, childValue] of Object.entries(node)) {
+      if (!changedModel && model && /^model$/i.test(childKey) && typeof childValue === 'string') {
+        changedModel = true
+        out[childKey] = model
+        continue
+      }
+      if (!changedPrompt && promptKeys.has(childKey.toLowerCase()) && typeof childValue === 'string') {
+        changedPrompt = true
+        out[childKey] = prompt
+        continue
+      }
+      out[childKey] = visit(childValue, childKey)
+    }
+    return out
+  }
+
+  return { value: visit(value), changedPrompt, changedModel }
+}
+
+function buildMistralBody(template, prompt, model) {
+  const contentType = template.headers?.['content-type'] || ''
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    const form = new URLSearchParams(template.payload)
+    let changed = false
+    for (const [key, value] of [...form.entries()]) {
+      if (!changed && /prompt|message|content|text|query|input/i.test(key)) {
+        form.set(key, prompt)
+        changed = true
+      } else if (model && /^model$/i.test(key)) {
+        form.set(key, model)
+      } else if (!changed && (value.trim().startsWith('{') || value.trim().startsWith('['))) {
+        try {
+          const replaced = replacePromptAndModel(JSON.parse(value), prompt, model)
+          if (replaced.changedPrompt) {
+            form.set(key, JSON.stringify(replaced.value))
+            changed = true
+          }
+        } catch {}
+      }
+    }
+    if (!changed) throw new Error('Mistral request template did not expose a usable prompt field')
+    return form.toString()
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(template.payload)
+  } catch {
+    throw new Error('Mistral request template payload is not JSON or form data')
+  }
+  const replaced = replacePromptAndModel(parsed, prompt, model)
+  if (!replaced.changedPrompt) throw new Error('Mistral request template did not expose a usable prompt field')
+  return JSON.stringify(replaced.value)
+}
+
+function collectResponseText(value, out = [], depth = 0, key = '') {
+  if (depth > 10 || value == null) return out
+  if (typeof value === 'string') {
+    if (/^(content|text|answer|message|delta)$/i.test(key) && value.trim()) out.push(value.trim())
+    return out
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectResponseText(item, out, depth + 1, key)
+    return out
+  }
+  if (typeof value === 'object') {
+    for (const [childKey, childValue] of Object.entries(value)) {
+      collectResponseText(childValue, out, depth + 1, childKey)
+    }
+  }
+  return out
+}
+
+function extractMistralText(body) {
+  const texts = []
+  for (const rawLine of body.split('\n')) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const payload = line.startsWith('data:') ? line.slice(5).trim() : line
+    if (!payload || payload === '[DONE]') continue
+    try {
+      collectResponseText(JSON.parse(payload), texts)
+    } catch {}
+  }
+
+  if (!texts.length) {
+    try {
+      collectResponseText(JSON.parse(body), texts)
+    } catch {}
+  }
+
+  return texts.filter(Boolean).at(-1) || ''
+}
+
+async function listMistralModels() {
+  const page = state.mistral.page
+  if (!page) throw new Error('Mistral Playwright not initialized')
+  if (!page.url().includes('chat.mistral.ai')) {
+    await page.goto('https://chat.mistral.ai/chat', { waitUntil: 'domcontentloaded' })
+  }
+
+  const ids = await scanPageModelHints(page, 'mistral', ['/api/models', '/api/model'])
+  return modelListResponse(ids, 'mistral', 'mistral-web-session')
+}
+
+async function chatMistral({ model, prompt, web_search = false }) {
+  const page = state.mistral.page
+  if (!page) throw new Error('Mistral Playwright not initialized')
+
+  const template = await captureMistralTemplate(true)
+  const headers = { ...template.headers }
+  const body = buildMistralBody(template, prompt, model)
+
+  const response = await page.evaluate(async ({ url, headers, body }) => {
+    const result = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body,
+    })
+    return {
+      ok: result.ok,
+      status: result.status,
+      body: await result.text(),
+    }
+  }, { url: template.url, headers, body })
+
+  if (!response.ok) {
+    throw new Error(`Mistral upstream request failed with status ${response.status}`)
+  }
+
+  const text = extractMistralText(response.body)
+  if (!text) {
+    throw new Error('Mistral response was empty. Confirm session is active and the captured request template is still valid.')
+  }
+
+  return {
+    text,
+    model: ensureSessionText(model, 'mistral-web-session'),
+    warning: web_search
+      ? 'Mistral web search toggle is not mapped yet. Current web-session defaults were used.'
+      : null,
+  }
+}
+
+async function openMistralLogin({ runtime_dir, browser }) {
+  await initMistral({ runtime_dir, headless: false, browser })
+  await state.mistral.page.goto('https://chat.mistral.ai/chat', { waitUntil: 'domcontentloaded' })
 }
 
 async function initKimi({ runtime_dir, headless, browser }) {
@@ -1137,7 +1661,7 @@ async function closeQwenAccount({ account_id = null }) {
 }
 
 async function closeAll() {
-  for (const key of ['deepseek', 'chatgpt', 'gemini', 'kimi', 'qwen']) {
+  for (const key of ['deepseek', 'chatgpt', 'gemini', 'mistral', 'kimi', 'qwen']) {
     if (state[key].context) {
       await closeContext(state[key].context)
       if (key === 'qwen') {
@@ -1198,6 +1722,16 @@ async function handle(method, provider, params) {
       return listGeminiModels()
     case 'gemini:chat':
       return chatGemini(params)
+    case 'mistral:init':
+      return initMistral(params)
+    case 'mistral:capture_headers':
+      return captureMistralTemplate(!!params.force_new)
+    case 'mistral:manual_login':
+      return openMistralLogin(params)
+    case 'mistral:list_models':
+      return listMistralModels()
+    case 'mistral:chat':
+      return chatMistral(params)
     case 'kimi:init':
       return initKimi(params)
     case 'kimi:capture_headers':
@@ -1221,6 +1755,7 @@ async function handle(method, provider, params) {
     case 'deepseek:shutdown':
     case 'chatgpt:shutdown':
     case 'gemini:shutdown':
+    case 'mistral:shutdown':
     case 'kimi:shutdown':
     case 'qwen:shutdown':
       await closeAll()
@@ -1240,12 +1775,19 @@ process.stdin.on('data', async (chunk) => {
     const line = buffer.slice(0, newlineIndex).trim()
     buffer = buffer.slice(newlineIndex + 1)
     if (line) {
+      let requestId = null
       try {
         const request = JSON.parse(line)
+        requestId = request?.id ?? null
         const result = await handle(request.method, request.provider, request.params || {})
         send(request.id, result, null)
       } catch (error) {
-        send(JSON.parse(line).id, null, error instanceof Error ? error.message : String(error))
+        const message = error instanceof Error ? error.message : String(error)
+        if (requestId != null) {
+          send(requestId, null, message)
+        } else {
+          process.stderr.write(`bridge request parse failed: ${message}\n`)
+        }
       }
     }
     newlineIndex = buffer.indexOf('\n')

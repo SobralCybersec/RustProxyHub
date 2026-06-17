@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { acceptHMRUpdate, defineStore } from 'pinia'
+import { buildClaudeSetup, buildPiSetup, type AgentSetupKind } from '@/lib/agent-setups'
 import type {
   BrowserPrefs,
   DashboardOverview,
@@ -13,7 +14,7 @@ import type {
 const versionString =
   import.meta.env.MODE === 'development' ? `${import.meta.env.VITE_APP_VERSION}-dev` : import.meta.env.VITE_APP_VERSION
 
-export const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini']
+export const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral']
 
 const defaultBrowserPrefs: BrowserPrefs = {
   qwen: 'msedge',
@@ -21,6 +22,7 @@ const defaultBrowserPrefs: BrowserPrefs = {
   kimi: 'msedge',
   chatgpt: 'msedge',
   gemini: 'msedge',
+  mistral: 'msedge',
 }
 
 type BusyMap = Record<string, boolean>
@@ -33,6 +35,23 @@ function formatHubModel(provider: ProviderName, model: string) {
   return model.startsWith(`${provider}:`) ? model : `${provider}:${model}`
 }
 
+async function copyText(value: string) {
+  if (navigator?.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = value
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  document.execCommand('copy')
+  document.body.removeChild(textarea)
+}
+
 export const useStore = defineStore('main', {
   state: () => ({
     debug: import.meta.env.MODE === 'development',
@@ -40,6 +59,7 @@ export const useStore = defineStore('main', {
     isInitialized: false,
     isRefreshing: false,
     error: '',
+    notice: '',
     overview: null as DashboardOverview | null,
     providerDetails: {} as Partial<Record<ProviderName, ProviderDetails>>,
     providerLogs: {} as Partial<Record<ProviderName | 'hub', string[]>>,
@@ -130,6 +150,10 @@ export const useStore = defineStore('main', {
       this.busy[key] = value
     },
 
+    setNotice(value: string) {
+      this.notice = value
+    },
+
     setSearchQuery(value: string) {
       this.searchQuery = value
     },
@@ -145,6 +169,7 @@ export const useStore = defineStore('main', {
     async runTask<T>(key: string, task: () => Promise<T>): Promise<T> {
       this.setBusy(key, true)
       this.error = ''
+      this.notice = ''
       try {
         return await task()
       } catch (error) {
@@ -159,6 +184,7 @@ export const useStore = defineStore('main', {
       if (this.isRefreshing) return
       this.isRefreshing = true
       try {
+        this.notice = ''
         this.overview = await invoke<DashboardOverview>('dashboard_overview')
       } catch (error) {
         this.error = describeError(error)
@@ -271,6 +297,27 @@ export const useStore = defineStore('main', {
       })
     },
 
+    async startService(name: string) {
+      await this.runTask(`service:start:${name}`, async () => {
+        await invoke('start_service', { name })
+        await this.refreshOverview()
+        this.syncWorkbenchModel()
+      })
+    },
+
+    async copyAgentSetup(providerName: ProviderName, agent: AgentSetupKind) {
+      const provider = this.providersByName[providerName]
+      if (!provider) {
+        this.error = `Provider ${providerName} is not loaded yet.`
+        return
+      }
+
+      const setup = agent === 'pi' ? buildPiSetup(provider) : buildClaudeSetup(provider)
+      await copyText(setup.content)
+      this.error = ''
+      this.notice = `${agent === 'pi' ? 'Pi' : 'Claude'} setup copied for ${providerName}. Target: ${setup.target}`
+    },
+
     async runWorkbench() {
       const model = this.workbenchModel.trim()
       const prompt = this.workbenchPrompt.trim()
@@ -280,6 +327,10 @@ export const useStore = defineStore('main', {
       }
       if (this.openLoginCount > 0) {
         this.error = 'Close active login session before running workbench request.'
+        return
+      }
+      if (!this.overview?.hub.running) {
+        this.error = 'Start hub service before running workbench request.'
         return
       }
       if (!model) {
@@ -299,8 +350,9 @@ export const useStore = defineStore('main', {
             web_search: this.workbenchWebSearch,
           },
         })
-        this.workbenchResponse = JSON.stringify(response, null, 2)
+        this.workbenchResponse = JSON.stringify(response ?? { error: 'Workbench returned null response.' }, null, 2)
         await this.refreshOverview()
+        this.syncWorkbenchModel()
       })
     },
 

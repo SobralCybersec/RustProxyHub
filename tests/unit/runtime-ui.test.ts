@@ -35,10 +35,10 @@ describe('runtime diagnostics ui', () => {
       global: { plugins: [pinia] },
     })
 
-    expect(wrapper.text()).toContain('Single-runner preflight blocked startup')
+    expect(wrapper.text()).toContain('single-runner preflight blocked')
     expect(wrapper.text()).toContain('Bundled node.exe not found in Tauri resources.')
     expect(wrapper.text()).toContain('Microsoft Edge not found. Install Edge to run browser-backed providers.')
-    expect(wrapper.text()).toContain('degraded')
+    expect(wrapper.text()).toContain('"startup_mode": "manual"')
   })
 
   it('disables workbench controls until runtime is ready', () => {
@@ -58,11 +58,13 @@ describe('runtime diagnostics ui', () => {
       global: { plugins: [pinia] },
     })
 
-    expect(wrapper.get('.panel-alert').text()).toContain('Runtime blocked.')
+    expect(wrapper.get('.panel-alert').text()).toContain('Bundled node.exe not found in Tauri resources.')
     expect(wrapper.get('input[list="hub-model-options"]').element).toHaveProperty('disabled', true)
     expect(wrapper.get('input[type="checkbox"]').element).toHaveProperty('disabled', true)
     expect(wrapper.get('textarea').element).toHaveProperty('disabled', true)
-    expect(wrapper.get('button.primary-button').element).toHaveProperty('disabled', true)
+    const runButton = wrapper.findAll('button').find(button => button.text().includes('run live probe'))
+    expect(runButton).toBeTruthy()
+    expect(runButton!.element).toHaveProperty('disabled', true)
   })
 
   it('renders qwen account actions from live store state', () => {
@@ -85,7 +87,7 @@ describe('runtime diagnostics ui', () => {
 
     expect(wrapper.text()).toContain('pilot@example.com')
     expect(wrapper.text()).toContain('profile open')
-    expect(wrapper.text()).toContain('Open profile')
-    expect(wrapper.text()).toContain('Remove')
+    expect(wrapper.text()).toContain('open profile')
+    expect(wrapper.text()).toContain('remove')
   })
 })

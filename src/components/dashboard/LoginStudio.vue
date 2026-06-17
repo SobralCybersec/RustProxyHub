@@ -10,6 +10,7 @@ const guides: Record<ProviderName, string[]> = {
   kimi: ['open kimi.com', 'wait for session storage to settle', 'mark done when page is ready'],
   chatgpt: ['authenticate on chatgpt.com', 'mark done so headless path can resume', 'model ids appear after probe'],
   gemini: ['authenticate on gemini.google.com', 'mark done after browser state is saved', 'model ids appear after probe'],
+  mistral: ['authenticate on chat.mistral.ai', 'mark done after browser state is saved', 'model ids appear after probe'],
 }
 function loginOpen(provider: ProviderName) {
   return store.overview?.open_provider_login_sessions.includes(provider) ?? false

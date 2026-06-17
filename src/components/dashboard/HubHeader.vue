@@ -14,6 +14,9 @@ const hub = computed(() => props.overview?.hub ?? null)
 const copied = ref<string | null>(null)
 const isReady = computed(() => props.overview?.runtime.single_runner_ready ?? false)
 const issues = computed(() => props.overview?.runtime.issues ?? [])
+const startupMode = computed(() => props.overview?.startup_config?.mode ?? 'manual')
+const startupServices = computed(() => props.overview?.startup_config?.services ?? [])
+const hubRunning = computed(() => props.overview?.hub.running ?? false)
 const stats = computed(() => [
   ['hub.status', hub.value?.health_status ?? 'booting'],
   ['hub.running', hub.value?.running ? 'true' : 'false'],
@@ -54,12 +57,15 @@ function copyText(value: string | null | undefined, label: string) {
 
         <label class="terminal-field search-field">
           <span>grep providers</span>
-          <input v-model="searchValue" type="search" placeholder="qwen, models, errors, login state…" />
+          <input v-model="searchValue" type="search" placeholder="qwen, models, errors, login state..." />
         </label>
 
         <div class="actions">
           <button :disabled="store.isRefreshing" @click.stop="store.refreshOverview()">
-            {{ store.isRefreshing ? 'refreshing…' : './refresh.sh' }}
+            {{ store.isRefreshing ? 'refreshing...' : './refresh.sh' }}
+          </button>
+          <button :disabled="hubRunning || store.isBusy('service:start:hub')" @click.stop="store.startService('hub')">
+            {{ hubRunning ? 'hub online' : (store.isBusy('service:start:hub') ? 'starting hub...' : 'start hub') }}
           </button>
           <button :disabled="!hub?.base_url" @click.stop="copyText(hub?.base_url, 'url')">
             {{ copied === 'url' ? 'copied' : 'copy hub url' }}
@@ -77,7 +83,7 @@ function copyText(value: string | null | undefined, label: string) {
           <strong>{{ label }}</strong>
           <code>{{ value }}</code>
         </div>
-        <pre class="mini-log">{{ JSON.stringify({ base_url: hub?.base_url, openapi_url: hub?.openapi_url, running: hub?.running }, null, 2) }}</pre>
+        <pre class="mini-log">{{ JSON.stringify({ base_url: hub?.base_url, openapi_url: hub?.openapi_url, running: hub?.running, startup_mode: startupMode, startup_services: startupServices }, null, 2) }}</pre>
       </aside>
     </div>
   </header>

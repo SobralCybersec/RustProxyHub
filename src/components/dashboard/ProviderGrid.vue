@@ -1,4 +1,13 @@
 <script setup lang="ts">
+import { HugeiconsIcon } from '@hugeicons/vue'
+import {
+  AiBrain03Icon,
+  AiChat02Icon,
+  AiSearch02Icon,
+  Globe02Icon,
+  MessageCircleCodeIcon,
+  ServerStack03Icon,
+} from '@hugeicons/core-free-icons'
 import type { ProviderName, ProviderOverview } from '@/lib/types'
 import { useStore } from '@/store'
 
@@ -10,6 +19,15 @@ const providerTitles: Record<ProviderName, string> = {
   kimi: 'Kimi Bridge',
   chatgpt: 'ChatGPT Session',
   gemini: 'Gemini Session',
+  mistral: 'Mistral Session',
+}
+const providerIcons = {
+  qwen: AiBrain03Icon,
+  deepseek: AiSearch02Icon,
+  kimi: MessageCircleCodeIcon,
+  chatgpt: AiChat02Icon,
+  gemini: Globe02Icon,
+  mistral: ServerStack03Icon,
 }
 function loginOpen(provider: ProviderName) {
   return store.overview?.open_provider_login_sessions.includes(provider) ?? false
@@ -32,17 +50,23 @@ function formatStarted(value: number | null) {
 
     <article v-for="provider in providers" :key="provider.name" class="provider-row" :data-state="statusTone(provider)">
       <div class="provider-name">
+        <HugeiconsIcon :icon="providerIcons[provider.name]" :size="20" aria-hidden="true" />
         <strong>{{ provider.name }}</strong>
         <small>{{ providerTitles[provider.name] }}</small>
       </div>
       <div>
         <code>{{ provider.login_state.replaceAll('_', ' ') }}</code>
-        <small>{{ provider.health_status }} · started {{ formatStarted(provider.started_at) }}</small>
+        <small>{{ provider.health_status }} - started {{ formatStarted(provider.started_at) }}</small>
       </div>
       <div class="model-count">{{ provider.model_count }}</div>
       <div class="url-cell">{{ provider.base_url || 'no base url' }}</div>
       <div class="row-actions">
-        <button :disabled="store.isBusy(`login:start:${provider.name}`)" @click.stop="store.startProviderLogin(provider.name)">
+        <button @click.stop="store.copyAgentSetup(provider.name, 'pi')">set pi</button>
+        <button @click.stop="store.copyAgentSetup(provider.name, 'claude')">set claude</button>
+        <button v-if="!provider.running" :disabled="store.isBusy(`service:start:${provider.name}`)" @click.stop="store.startService(provider.name)">
+          start
+        </button>
+        <button v-else :disabled="store.isBusy(`login:start:${provider.name}`)" @click.stop="store.startProviderLogin(provider.name)">
           {{ loginOpen(provider.name) ? 'reopen' : 'login' }}
         </button>
         <button :disabled="!loginOpen(provider.name)" @click.stop="store.stopProviderLogin(provider.name)">done</button>
@@ -108,7 +132,14 @@ input, textarea, select { user-select: text; }
 .provider-row[data-state='idle']::before { content: '[OFF]'; color: #6f8b76; }
 .provider-row[data-state='warn']::before { content: '[WRN]'; color: #ffd37d; }
 .provider-row[data-state='ok']::before { content: '[ OK]'; color: #b9ffd0; }
+.provider-name {
+  display: grid;
+  grid-template-columns: 1.4rem minmax(0, 1fr);
+  gap: 0 .45rem;
+  align-items: center;
+}
 .provider-name strong { display: block; color: #e8fff0; text-transform: uppercase; }
+.provider-name small { grid-column: 2; }
 .provider-name small,
 .provider-row small { display: block; color: rgba(190, 255, 203, .66); margin-top: .18rem; }
 code { color: #a9ffd0; }

@@ -1,6 +1,6 @@
 import type { DashboardOverview, ProviderName, ProviderOverview, RuntimeDiagnostics } from '@/lib/types'
 
-const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini']
+const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral']
 
 function makeRuntime(overrides: Partial<RuntimeDiagnostics> = {}): RuntimeDiagnostics {
   return {
@@ -39,6 +39,10 @@ export function makeOverview(overrides: Partial<DashboardOverview> = {}): Dashbo
     app_data_dir: 'C:/Users/test/AppData/Local/RustProxyHub',
     helper_dir: runtime.helper_dir ?? 'C:/bundle/resources/playwright-bridge',
     runtime,
+    startup_config: {
+      mode: 'manual',
+      services: [],
+    },
     hub: {
       port: 3100,
       base_url: 'http://127.0.0.1:3100',

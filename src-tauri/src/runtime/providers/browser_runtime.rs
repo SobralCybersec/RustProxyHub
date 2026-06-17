@@ -16,6 +16,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
@@ -25,6 +26,7 @@ use uuid::Uuid;
 pub enum BrowserProviderKind {
     Chatgpt,
     Gemini,
+    Mistral,
 }
 
 impl BrowserProviderKind {
@@ -32,6 +34,7 @@ impl BrowserProviderKind {
         match self {
             Self::Chatgpt => "chatgpt",
             Self::Gemini => "gemini",
+            Self::Mistral => "mistral",
         }
     }
 
@@ -39,6 +42,7 @@ impl BrowserProviderKind {
         match self {
             Self::Chatgpt => "chatgpt-web-session",
             Self::Gemini => "gemini-web-session",
+            Self::Mistral => "mistral-web-session",
         }
     }
 
@@ -176,20 +180,92 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
         return *response;
     }
 
-    Json(json!({
+    Json(discover_models(&state).await).into_response()
+}
+
+async fn discover_models(state: &AppState) -> Value {
+    let discovered = tokio::time::timeout(Duration::from_secs(20), async {
+        ensure_headless_ready(state).await?;
+        state
+            .bridge
+            .request::<_, Value>(
+                "list_models",
+                json!({
+                    "fallback_model": state.config.kind.default_model(),
+                }),
+            )
+            .await
+    })
+    .await;
+
+    match discovered {
+        Ok(Ok(payload)) => normalize_model_payload(state, payload, Vec::new()),
+        Ok(Err(err)) => fallback_model_payload(state, vec![err.to_string()]),
+        Err(_) => fallback_model_payload(
+            state,
+            vec![format!(
+                "{} model discovery timed out; using fallback model",
+                state.config.kind.as_str()
+            )],
+        ),
+    }
+}
+
+fn normalize_model_payload(state: &AppState, payload: Value, errors: Vec<String>) -> Value {
+    let mut seen = std::collections::HashSet::new();
+    let mut data = Vec::new();
+    if let Some(items) = payload.get("data").and_then(Value::as_array) {
+        for item in items {
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if id.is_empty() || !seen.insert(id.to_owned()) {
+                continue;
+            }
+            data.push(json!({
+                "id": id,
+                "object": "model",
+                "created": current_timestamp(),
+                "owned_by": state.config.kind.as_str(),
+                "permission": [],
+                "root": id,
+                "parent": Value::Null,
+            }));
+        }
+    }
+
+    if data.is_empty() {
+        return fallback_model_payload(state, errors);
+    }
+
+    json!({
+        "object": "list",
+        "data": data,
+        "errors": errors,
+    })
+}
+
+fn fallback_model_payload(state: &AppState, errors: Vec<String>) -> Value {
+    fallback_model_payload_for(state.config.kind, errors)
+}
+
+fn fallback_model_payload_for(kind: BrowserProviderKind, errors: Vec<String>) -> Value {
+    let fallback = kind.default_model();
+    json!({
         "object": "list",
         "data": [{
-            "id": state.config.kind.default_model(),
+            "id": fallback,
             "object": "model",
             "created": current_timestamp(),
-            "owned_by": state.config.kind.as_str(),
+            "owned_by": kind.as_str(),
             "permission": [],
-            "root": state.config.kind.default_model(),
+            "root": fallback,
             "parent": Value::Null,
         }],
-        "errors": [],
-    }))
-    .into_response()
+        "errors": errors,
+    })
 }
 
 async fn chat_completions(
@@ -462,4 +538,40 @@ fn sse_json(value: Value) -> Bytes {
 
 fn sse_done() -> Bytes {
     Bytes::from("data: [DONE]\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fallback_model_payload_for, BrowserProviderKind};
+    use serde_json::Value;
+
+    #[test]
+    fn browser_model_fallback_uses_provider_default() {
+        let payload = fallback_model_payload_for(
+            BrowserProviderKind::Mistral,
+            vec!["discovery failed".to_owned()],
+        );
+
+        let first = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .expect("fallback model item");
+        assert_eq!(
+            first.get("id").and_then(Value::as_str),
+            Some("mistral-web-session")
+        );
+        assert_eq!(
+            first.get("owned_by").and_then(Value::as_str),
+            Some("mistral")
+        );
+        assert_eq!(
+            payload
+                .get("errors")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+            Some("discovery failed")
+        );
+    }
 }

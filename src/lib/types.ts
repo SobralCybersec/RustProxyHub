@@ -1,4 +1,4 @@
-export type ProviderName = 'qwen' | 'deepseek' | 'kimi' | 'chatgpt' | 'gemini'
+export type ProviderName = 'qwen' | 'deepseek' | 'kimi' | 'chatgpt' | 'gemini' | 'mistral'
 export type ServiceName = 'hub' | ProviderName
 
 export interface HubConfigResponse {
@@ -39,11 +39,17 @@ export interface RuntimeDiagnostics {
   issues: string[]
 }
 
+export interface StartupConfig {
+  mode: string
+  services: string[]
+}
+
 export interface DashboardOverview {
   generated_at: number
   app_data_dir: string
   helper_dir: string
   runtime: RuntimeDiagnostics
+  startup_config: StartupConfig
   hub: HubOverview
   providers: ProviderOverview[]
   qwen_account_count: number
@@ -76,4 +82,5 @@ export interface BrowserPrefs {
   kimi: string
   chatgpt: string
   gemini: string
+  mistral: string
 }

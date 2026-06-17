@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { useStore } from '@/store'
+import { providerOrder, useStore } from '@/store'
 import { makeOverview } from './factories'
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -25,6 +25,20 @@ describe('store runtime flow', () => {
     expect(store.overview).toBeNull()
     expect(store.error).toBe('overview offline')
     expect(store.isRefreshing).toBe(false)
+  })
+
+  it('keeps browser provider ordering and default browser prefs', () => {
+    const store = useStore()
+
+    expect(providerOrder).toEqual(['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral'])
+    expect(store.browserPrefs).toEqual({
+      qwen: 'msedge',
+      deepseek: 'msedge',
+      kimi: 'msedge',
+      chatgpt: 'msedge',
+      gemini: 'msedge',
+      mistral: 'msedge',
+    })
   })
 
   it('blocks workbench requests when runtime preflight failed', async () => {

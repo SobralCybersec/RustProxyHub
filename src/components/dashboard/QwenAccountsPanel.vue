@@ -21,7 +21,7 @@ function sessionOpen(accountId: string) {
         <input v-model="store.qwenPassword" type="password" placeholder="optional seeded login" />
       </label>
       <button type="submit" :disabled="store.isBusy('qwen-account:add')">
-        {{ store.isBusy('qwen-account:add') ? 'saving…' : 'save account' }}
+        {{ store.isBusy('qwen-account:add') ? 'saving...' : 'save account' }}
       </button>
     </form>
 
@@ -29,7 +29,7 @@ function sessionOpen(accountId: string) {
       <article v-for="account in store.filteredQwenAccounts" :key="account.id" class="account-row">
         <div>
           <strong>{{ account.email }}</strong>
-          <small>{{ account.id }} · {{ account.has_password ? 'password seeded' : 'manual profile only' }}</small>
+          <small>{{ account.id }} - {{ account.has_password ? 'password seeded' : 'manual profile only' }}</small>
         </div>
         <span :class="{ live: sessionOpen(account.id) }">{{ sessionOpen(account.id) ? '[ profile open ]' : '[ saved ]' }}</span>
         <div class="actions">

@@ -307,6 +307,8 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     Json(json!({
         "object": "list",
         "data": [
+            { "id": "kimi-k2.6", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
+            { "id": "kimi-k2.6-thinking", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
             { "id": "k2d6", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
             { "id": "k2d6-thinking", "object": "model", "created": current_timestamp(), "owned_by": "kimi" }
         ]
@@ -917,6 +919,18 @@ fn tool_call_from_parsed(parsed: crate::proxy_core::ParsedToolCall) -> MessageTo
 fn model_scenario(model_id: &str) -> KimiModelConfig {
     let clean_model = model_id.replace("-no-thinking", "");
     match clean_model.as_str() {
+        "kimi-k2.6" => KimiModelConfig {
+            scenario: "SCENARIO_K2D5".to_owned(),
+            thinking: false,
+            kimi_plus_id: None,
+            agent_mode: None,
+        },
+        "kimi-k2.6-thinking" => KimiModelConfig {
+            scenario: "SCENARIO_K2D5".to_owned(),
+            thinking: true,
+            kimi_plus_id: None,
+            agent_mode: None,
+        },
         "k2d6" => KimiModelConfig {
             scenario: "SCENARIO_K2D5".to_owned(),
             thinking: false,
