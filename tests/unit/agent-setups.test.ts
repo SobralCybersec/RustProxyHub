@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildClaudeSetup, buildPiSetup } from '@/lib/agent-setups'
+import { buildClaudeSetup, buildKiloSetup, buildPiSetup } from '@/lib/agent-setups'
 import type { ProviderOverview } from '@/lib/types'
 
 function makeProvider(overrides: Partial<ProviderOverview> = {}): ProviderOverview {
@@ -34,13 +34,29 @@ describe('agent setup helpers', () => {
     expect(setup.content).toContain('"id": "chatgpt-web-session"')
   })
 
-  it('builds an honest Claude note for OpenAI-compatible localhost providers', () => {
-    const setup = buildClaudeSetup(makeProvider({ name: 'kimi', base_url: 'http://127.0.0.1:3002' }))
+  it('includes researched GLM fallbacks for zai when discovery is empty', () => {
+    const setup = buildPiSetup(makeProvider({ name: 'zai', base_url: 'http://127.0.0.1:3006', models: [] }))
 
-    expect(setup.supported).toBe(false)
+    expect(setup.content).toContain('"id": "glm-5.2"')
+    expect(setup.content).toContain('"id": "glm-5.1"')
+  })
+
+  it('builds a Claude settings snippet for browser-backed Anthropic compatibility', () => {
+    const setup = buildClaudeSetup(makeProvider({ name: 'kimi', base_url: 'http://127.0.0.1:3002', models: ['kimi-k2.6'] }))
+
+    expect(setup.supported).toBe(true)
     expect(setup.target).toBe('~/.claude/settings.json')
-    expect(setup.content).toContain('Claude Code cannot use this endpoint directly.')
-    expect(setup.content).toContain('Anthropic Messages (/v1/messages)')
-    expect(setup.content).toContain('http://127.0.0.1:3002/v1')
+    expect(setup.content).toContain('"ANTHROPIC_BASE_URL": "http://127.0.0.1:3002"')
+    expect(setup.content).toContain('"ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k2.6"')
+  })
+
+  it('builds a Kilo openai-compatible snippet with tool calling enabled', () => {
+    const setup = buildKiloSetup(makeProvider({ name: 'chatgpt', base_url: 'http://127.0.0.1:3003', models: [] }))
+
+    expect(setup.supported).toBe(true)
+    expect(setup.target).toBe('kilo.json')
+    expect(setup.content).toContain('"baseURL": "http://127.0.0.1:3003/v1"')
+    expect(setup.content).toContain('"tool_call": true')
+    expect(setup.content).toContain('chatgpt-web-session')
   })
 })

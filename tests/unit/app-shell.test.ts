@@ -43,37 +43,33 @@ describe('app shell', () => {
     windowControls.close.mockReset()
   })
 
-  it('shows first-run tutorial and stores dismissed state', async () => {
+  it('renders remade shell in portuguese', async () => {
     const wrapper = mountApp()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('Runtime Preflight')
-    await wrapper.get('button.primary-button').trigger('click')
-    await wrapper.get('button.primary-button').trigger('click')
-    await wrapper.get('button.primary-button').trigger('click')
-
-    expect(window.localStorage.getItem('rustproxyhub:tutorial-complete')).toBe('1')
+    expect(wrapper.text()).toContain('Central de comando do RustProxyHub')
+    expect(wrapper.text()).toContain('ATUALIZAR PAINEL')
+    expect(wrapper.text()).toContain('ATIVIDADE')
+    expect(wrapper.text()).toContain('CREDITOS')
   })
 
-  it('reopens tutorial from persistent help control', async () => {
-    window.localStorage.setItem('rustproxyhub:tutorial-complete', '1')
+  it('opens workbench from persistent help control', async () => {
     const wrapper = mountApp()
     await flushPromises()
 
-    expect(wrapper.text()).not.toContain('Runtime Preflight')
-    await wrapper.get('button[aria-label="Open guide"]').trigger('click')
+    expect(wrapper.get('.tab.active').text()).toBe('Todos')
+    await wrapper.get('button[aria-label="Ajuda"]').trigger('click')
 
-    expect(wrapper.text()).toContain('Runtime Preflight')
+    expect(wrapper.get('.tab.active').text()).toBe('Lab')
   })
 
   it('calls mocked Tauri window controls', async () => {
-    window.localStorage.setItem('rustproxyhub:tutorial-complete', '1')
     const wrapper = mountApp()
     await flushPromises()
 
-    await wrapper.get('button[aria-label="Minimize"]').trigger('click')
-    await wrapper.get('button[aria-label="Maximize or restore"]').trigger('click')
-    await wrapper.get('button[aria-label="Close"]').trigger('click')
+    await wrapper.get('button[aria-label="Minimizar"]').trigger('click')
+    await wrapper.get('button[aria-label="Maximizar"]').trigger('click')
+    await wrapper.get('button[aria-label="Fechar"]').trigger('click')
 
     expect(windowControls.minimize).toHaveBeenCalledTimes(1)
     expect(windowControls.toggleMaximize).toHaveBeenCalledTimes(1)
