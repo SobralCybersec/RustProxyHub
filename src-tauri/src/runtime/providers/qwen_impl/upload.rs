@@ -94,8 +94,12 @@ pub async fn prepare_multimodal_uploads(
     let mut files = Vec::new();
     for item in items {
         let payload = if item.url.starts_with("http://") || item.url.starts_with("https://") {
+            // ponytail: SSRF guard closes IP-literal + metadata-host probes.
+            // DNS-rebinding (public hostname resolving to a private IP) still possible;
+            // close later with a resolving connector if a client ever abuses it.
+            let parsed = crate::proxy_core::url_is_safe_for_fetch(&item.url)?;
             let response = client
-                .get(&item.url)
+                .get(parsed)
                 .send()
                 .await
                 .with_context(|| format!("failed to download {}", item.url))?;
@@ -106,12 +110,27 @@ pub async fn prepare_multimodal_uploads(
                     response.status()
                 ));
             }
+            // Refuse oversized downloads before reading the body into memory.
+            const MAX_DOWNLOAD_BYTES: usize = 100 * 1024 * 1024;
+            if let Some(len) = response.content_length() {
+                if len as usize > MAX_DOWNLOAD_BYTES {
+                    return Err(anyhow!(
+                        "remote file too large: {len} bytes exceeds {MAX_DOWNLOAD_BYTES} byte limit"
+                    ));
+                }
+            }
             let content_type = response
                 .headers()
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_owned);
             let bytes = response.bytes().await?.to_vec();
+            if bytes.len() > MAX_DOWNLOAD_BYTES {
+                return Err(anyhow!(
+                    "remote file too large: {} bytes exceeds {MAX_DOWNLOAD_BYTES} byte limit",
+                    bytes.len()
+                ));
+            }
             let filename = filename_from_url(&item.url, &item.kind, content_type.as_deref());
             upload_bytes_to_qwen(
                 client,
@@ -371,7 +390,11 @@ fn decode_data_url(data_url: &str, kind: &str) -> Result<(String, Vec<u8>, Strin
     Ok((
         mime.to_owned(),
         bytes,
-        format!("{stem}_{}.{}", crate::proxy_core::current_timestamp(), extension),
+        format!(
+            "{stem}_{}.{}",
+            crate::proxy_core::current_timestamp(),
+            extension
+        ),
     ))
 }
 

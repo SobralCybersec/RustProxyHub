@@ -1,9 +1,12 @@
 use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
-use crate::proxy_core::{build_prompt, current_timestamp, usage_from_text, OpenAIRequest};
+use crate::proxy_core::{
+    build_prompt, constant_time_eq, current_timestamp, usage_from_text, FunctionToolDefinition,
+    Message, MessageToolCall, OpenAIRequest, StreamingToolParser, ToolCallFunction, Usage,
+};
 use anyhow::Result;
 use async_stream::stream;
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -18,7 +21,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -27,6 +29,7 @@ pub enum BrowserProviderKind {
     Chatgpt,
     Gemini,
     Mistral,
+    Zai,
 }
 
 impl BrowserProviderKind {
@@ -35,6 +38,7 @@ impl BrowserProviderKind {
             Self::Chatgpt => "chatgpt",
             Self::Gemini => "gemini",
             Self::Mistral => "mistral",
+            Self::Zai => "zai",
         }
     }
 
@@ -43,6 +47,7 @@ impl BrowserProviderKind {
             Self::Chatgpt => "chatgpt-web-session",
             Self::Gemini => "gemini-web-session",
             Self::Mistral => "mistral-web-session",
+            Self::Zai => "glm-5.2",
         }
     }
 
@@ -80,11 +85,19 @@ struct ManualLoginRequest {
 struct BridgeChatResponse {
     text: String,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     conversation_id: Option<String>,
     #[serde(default)]
     warning: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedBrowserOutput {
+    text: String,
+    tool_calls: Vec<MessageToolCall>,
 }
 
 pub async fn serve_browser_provider(config: BrowserProviderServerConfig) -> Result<()> {
@@ -104,9 +117,13 @@ pub async fn serve_browser_provider(config: BrowserProviderServerConfig) -> Resu
         .route("/health", get(health))
         .route("/admin/manual_login", post(admin_manual_login))
         .route("/admin/close_login", post(admin_close_login))
+        .route("/v1", get(v1_root))
         .route("/v1/models", get(models))
+        .route("/v1/models/{model}", get(model_by_id))
         .route("/v1/chat/completions", post(chat_completions))
-        .layer(CorsLayer::permissive())
+        .route("/v1/responses", post(responses))
+        .route("/v1/messages", post(anthropic_messages))
+        .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
         .with_state(state.clone());
 
     let host: IpAddr = state
@@ -131,6 +148,26 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         "provider": state.config.kind.as_str(),
         "web_search_supported": state.config.kind.web_search_supported(),
     }))
+}
+
+async fn v1_root(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    Json(json!({
+        "object": "api",
+        "provider": state.config.kind.as_str(),
+        "base_url": format!("http://{}:{}/v1", state.config.host, state.config.port),
+        "routes": {
+            "models": "/v1/models",
+            "chat_completions": "/v1/chat/completions",
+            "responses": "/v1/responses",
+            "anthropic_messages": "/v1/messages",
+            "anthropic_count_tokens": "/v1/messages/count_tokens",
+        }
+    }))
+    .into_response()
 }
 
 async fn admin_manual_login(
@@ -183,8 +220,34 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     Json(discover_models(&state).await).into_response()
 }
 
+async fn model_by_id(
+    State(state): State<AppState>,
+    Path(model): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    let payload = discover_models(&state).await;
+    let found = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(model.as_str()))
+        })
+        .cloned();
+
+    match found {
+        Some(item) => Json(item).into_response(),
+        None => json_error(StatusCode::NOT_FOUND, "Model not found".to_owned()),
+    }
+}
+
 async fn discover_models(state: &AppState) -> Value {
-    let discovered = tokio::time::timeout(Duration::from_secs(20), async {
+    let discovered = tokio::time::timeout(Duration::from_secs(4), async {
         ensure_headless_ready(state).await?;
         state
             .bridge
@@ -288,6 +351,79 @@ async fn chat_completions(
     }
 }
 
+async fn responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    let request = match openai_responses_to_request(&state, &body) {
+        Ok(request) => request,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+
+    if let Err(err) = ensure_headless_ready(&state).await {
+        return provider_error(&state, err);
+    }
+
+    match request_browser_chat(&state, &request).await {
+        Ok(chat) if request.stream.unwrap_or(false) => stream_openai_response(state, request, chat),
+        Ok(chat) => json_openai_response(state, request, chat),
+        Err(err) => provider_error(&state, err),
+    }
+}
+
+async fn anthropic_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    let request = match anthropic_to_openai_request(&state, &body) {
+        Ok(request) => request,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+
+    if let Err(err) = ensure_headless_ready(&state).await {
+        return provider_error(&state, err);
+    }
+
+    match request_browser_chat(&state, &request).await {
+        Ok(chat) if request.stream.unwrap_or(false) => {
+            stream_anthropic_response(state, request, chat)
+        }
+        Ok(chat) => json_anthropic_response(state, request, chat),
+        Err(err) => provider_error(&state, err),
+    }
+}
+
+async fn anthropic_count_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    let request = match anthropic_to_openai_request(&state, &body) {
+        Ok(request) => request,
+        Err(err) => return json_error(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+    let usage = usage_from_text(&build_prompt(&request), "", false);
+
+    Json(json!({
+        "input_tokens": usage.prompt_tokens
+    }))
+    .into_response()
+}
+
 async fn ensure_headless_ready(state: &AppState) -> Result<()> {
     state
         .bridge
@@ -325,8 +461,14 @@ async fn request_browser_chat(
 fn json_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatResponse) -> Response {
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
-    let usage = usage_from_text(&build_prompt(&body), &chat.text, true);
+    let parsed = parse_browser_output(&body, &chat.text);
+    let usage = usage_from_text(&build_prompt(&body), &parsed.text, true);
     let provider_warnings = build_provider_warnings(&state.config.kind, &body, &chat);
+    let finish_reason = if parsed.tool_calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
 
     Json(json!({
         "id": completion_id,
@@ -337,10 +479,22 @@ fn json_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRespo
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": chat.text,
+                "content": if parsed.tool_calls.is_empty() {
+                    Value::String(parsed.text.clone())
+                } else if parsed.text.trim().is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(parsed.text.clone())
+                },
+                "reasoning_content": chat.reasoning_content,
+                "tool_calls": if parsed.tool_calls.is_empty() {
+                    Value::Null
+                } else {
+                    json!(parsed.tool_calls)
+                },
             },
             "logprobs": Value::Null,
-            "finish_reason": "stop",
+            "finish_reason": finish_reason,
         }],
         "usage": usage,
         "provider_metadata": {
@@ -357,7 +511,14 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
     let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
     let prompt = build_prompt(&body);
     let provider_warnings = build_provider_warnings(&state.config.kind, &body, &chat);
-    let chunks = split_text_chunks(&chat.text, 320);
+    let parsed = parse_browser_output(&body, &chat.text);
+    let chunks = split_text_chunks(&parsed.text, 320);
+    let tool_calls = parsed.tool_calls.clone();
+    let finish_reason = if tool_calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
 
     let stream = stream! {
         yield Ok::<Bytes, std::convert::Infallible>(sse_json(json!({
@@ -367,7 +528,11 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
             "model": model,
             "choices": [{
                 "index": 0,
-                "delta": { "role": "assistant", "content": "" },
+                "delta": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": chat.reasoning_content,
+                },
                 "logprobs": Value::Null,
                 "finish_reason": Value::Null,
             }],
@@ -375,6 +540,9 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
         })));
 
         for chunk in chunks {
+            if chunk.is_empty() {
+                continue;
+            }
             yield Ok(sse_json(json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -383,6 +551,21 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
                 "choices": [{
                     "index": 0,
                     "delta": { "content": chunk },
+                    "logprobs": Value::Null,
+                    "finish_reason": Value::Null,
+                }],
+            })));
+        }
+
+        if !tool_calls.is_empty() {
+            yield Ok(sse_json(json!({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": current_timestamp(),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": { "tool_calls": tool_calls },
                     "logprobs": Value::Null,
                     "finish_reason": Value::Null,
                 }],
@@ -398,15 +581,687 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
                 "index": 0,
                 "delta": {},
                 "logprobs": Value::Null,
-                "finish_reason": "stop",
+                "finish_reason": finish_reason,
             }],
-            "usage": usage_from_text(&prompt, &chat.text, true),
+            "usage": usage_from_text(&prompt, &parsed.text, true),
             "provider_metadata": {
                 "provider": state.config.kind.as_str(),
                 "conversation_id": chat.conversation_id,
             },
         })));
         yield Ok(sse_done());
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONNECTION, "keep-alive"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+fn parse_browser_output(body: &OpenAIRequest, text: &str) -> ParsedBrowserOutput {
+    let Some(_) = body.tools.as_ref() else {
+        return ParsedBrowserOutput {
+            text: text.to_owned(),
+            tool_calls: Vec::new(),
+        };
+    };
+
+    let mut parser = StreamingToolParser::new();
+    let mut parsed = parser.feed(text);
+    let flush = parser.flush();
+    parsed.text.push_str(&flush.text);
+    parsed.tool_calls.extend(flush.tool_calls);
+
+    ParsedBrowserOutput {
+        text: parsed.text.trim().to_owned(),
+        tool_calls: parsed
+            .tool_calls
+            .into_iter()
+            .map(tool_call_from_parsed)
+            .collect(),
+    }
+}
+
+fn tool_call_from_parsed(parsed: crate::proxy_core::ParsedToolCall) -> MessageToolCall {
+    MessageToolCall {
+        id: parsed.id,
+        tool_type: "function".to_owned(),
+        function: ToolCallFunction {
+            name: parsed.name,
+            arguments: parsed.arguments.to_string(),
+        },
+    }
+}
+
+fn coerce_agent_model(kind: BrowserProviderKind, requested: &str) -> String {
+    let trimmed = requested.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("claude")
+        || trimmed.to_ascii_lowercase().starts_with("claude-")
+        || trimmed.to_ascii_lowercase().starts_with("anthropic.")
+    {
+        kind.default_model().to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn openai_responses_to_request(state: &AppState, body: &Value) -> Result<OpenAIRequest> {
+    let model = coerce_agent_model(
+        state.config.kind,
+        body.get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    let mut messages = Vec::new();
+    if let Some(instructions) = body.get("instructions") {
+        let text = value_to_text(instructions);
+        if !text.is_empty() {
+            messages.push(simple_message("system", text));
+        }
+    }
+    messages.extend(response_input_to_messages(body.get("input")));
+
+    Ok(OpenAIRequest {
+        model,
+        messages,
+        stream: body.get("stream").and_then(Value::as_bool),
+        web_search: body.get("web_search").and_then(Value::as_bool),
+        tools: openai_tools_from_value(body.get("tools")),
+        tool_choice: body.get("tool_choice").cloned(),
+        stream_options: None,
+    })
+}
+
+fn anthropic_to_openai_request(state: &AppState, body: &Value) -> Result<OpenAIRequest> {
+    let model = coerce_agent_model(
+        state.config.kind,
+        body.get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    let mut messages = Vec::new();
+
+    if let Some(system) = body.get("system") {
+        let text = value_to_text(system);
+        if !text.is_empty() {
+            messages.push(simple_message("system", text));
+        }
+    }
+
+    let anthropic_messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Anthropic messages array is required"))?;
+    for message in anthropic_messages {
+        messages.extend(anthropic_message_to_openai_messages(message));
+    }
+
+    let tool_choice = anthropic_tool_choice_to_openai(body.get("tool_choice"));
+
+    Ok(OpenAIRequest {
+        model,
+        messages,
+        stream: body.get("stream").and_then(Value::as_bool),
+        web_search: body.get("web_search").and_then(Value::as_bool),
+        tools: anthropic_tools_from_value(body.get("tools")),
+        tool_choice,
+        stream_options: None,
+    })
+}
+
+fn anthropic_tool_choice_to_openai(value: Option<&Value>) -> Option<Value> {
+    match value {
+        Some(Value::Object(map)) if map.get("type").and_then(Value::as_str) == Some("tool") => {
+            map.get("name").and_then(Value::as_str).map(|name| {
+                json!({
+                    "type": "function",
+                    "function": { "name": name }
+                })
+            })
+        }
+        Some(Value::Object(map)) if map.get("type").and_then(Value::as_str) == Some("any") => {
+            Some(json!("required"))
+        }
+        Some(Value::Object(map)) if map.get("type").and_then(Value::as_str) == Some("auto") => {
+            Some(json!("auto"))
+        }
+        Some(Value::String(value)) if value == "any" => Some(json!("required")),
+        Some(Value::String(value)) if value == "auto" || value == "none" => Some(json!(value)),
+        Some(other) => Some(other.clone()),
+        None => None,
+    }
+}
+
+fn anthropic_message_to_openai_messages(message: &Value) -> Vec<Message> {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("user");
+    let content = message.get("content").unwrap_or(&Value::Null);
+    let Some(blocks) = content.as_array() else {
+        return vec![simple_message(role, value_to_text(content))];
+    };
+
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut tool_results = Vec::new();
+
+    for block in blocks {
+        let block_type = block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match block_type {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    text_parts.push(text.to_owned());
+                }
+            }
+            "tool_use" if role == "assistant" => {
+                let Some(name) = block.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("call_{}", Uuid::new_v4()));
+                let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                tool_calls.push(MessageToolCall {
+                    id,
+                    tool_type: "function".to_owned(),
+                    function: ToolCallFunction {
+                        name: name.to_owned(),
+                        arguments: input.to_string(),
+                    },
+                });
+            }
+            "tool_result" => {
+                let Some(tool_call_id) = block
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                let result_content = block
+                    .get("content")
+                    .map(value_to_text)
+                    .unwrap_or_else(String::new);
+                tool_results.push(Message {
+                    role: "tool".to_owned(),
+                    content: Some(Value::String(result_content)),
+                    tool_calls: None,
+                    tool_call_id: Some(tool_call_id),
+                    name: None,
+                    reasoning_content: None,
+                });
+            }
+            _ => {
+                let text = value_to_text(block);
+                if !text.is_empty() {
+                    text_parts.push(text);
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let text = text_parts.join("\n");
+    if role == "assistant" && (!text.is_empty() || !tool_calls.is_empty()) {
+        out.push(Message {
+            role: "assistant".to_owned(),
+            content: (!text.is_empty()).then_some(Value::String(text)),
+            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+        });
+    } else if !text.is_empty() {
+        out.push(simple_message(role, text));
+    }
+    out.extend(tool_results);
+
+    if out.is_empty() {
+        out.push(simple_message(role, value_to_text(content)));
+    }
+    out
+}
+
+fn response_input_to_messages(input: Option<&Value>) -> Vec<Message> {
+    match input {
+        None => Vec::new(),
+        Some(Value::String(text)) => vec![simple_message("user", text.clone())],
+        Some(Value::Array(items)) => items
+            .iter()
+            .flat_map(response_input_item_to_messages)
+            .collect(),
+        Some(value) => vec![simple_message("user", value_to_text(value))],
+    }
+}
+
+fn response_input_item_to_messages(item: &Value) -> Vec<Message> {
+    match item.get("type").and_then(Value::as_str) {
+        Some("function_call") => {
+            let Some(name) = item.get("name").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            let id = item
+                .get("call_id")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("call_{}", Uuid::new_v4()));
+            let arguments = item
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}))
+                .to_string();
+            vec![Message {
+                role: "assistant".to_owned(),
+                content: None,
+                tool_calls: Some(vec![MessageToolCall {
+                    id,
+                    tool_type: "function".to_owned(),
+                    function: ToolCallFunction {
+                        name: name.to_owned(),
+                        arguments,
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            }]
+        }
+        Some("function_call_output") => {
+            let Some(tool_call_id) = item
+                .get("call_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            else {
+                return Vec::new();
+            };
+            vec![Message {
+                role: "tool".to_owned(),
+                content: Some(Value::String(
+                    item.get("output").map(value_to_text).unwrap_or_default(),
+                )),
+                tool_calls: None,
+                tool_call_id: Some(tool_call_id),
+                name: None,
+                reasoning_content: None,
+            }]
+        }
+        _ => {
+            let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
+            let text = item
+                .get("content")
+                .map(value_to_text)
+                .unwrap_or_else(|| value_to_text(item));
+            vec![simple_message(role, text)]
+        }
+    }
+}
+
+fn simple_message(role: &str, text: String) -> Message {
+    Message {
+        role: role.to_owned(),
+        content: Some(Value::String(text)),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        reasoning_content: None,
+    }
+}
+
+fn openai_tools_from_value(value: Option<&Value>) -> Option<Vec<FunctionToolDefinition>> {
+    let items = value?.as_array()?;
+    let tools = items
+        .iter()
+        .filter_map(|item| {
+            if item.get("function").is_some() {
+                return serde_json::from_value(item.clone()).ok();
+            }
+
+            let tool_type = item.get("type").and_then(Value::as_str)?;
+            if tool_type != "function" {
+                return None;
+            }
+            let name = item.get("name").and_then(Value::as_str)?.to_owned();
+            Some(FunctionToolDefinition {
+                tool_type: "function".to_owned(),
+                function: crate::proxy_core::FunctionToolSpec {
+                    name,
+                    description: item
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    parameters: item.get("parameters").cloned(),
+                    strict: item.get("strict").and_then(Value::as_bool),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    Some(tools)
+}
+
+fn anthropic_tools_from_value(value: Option<&Value>) -> Option<Vec<FunctionToolDefinition>> {
+    let items = value?.as_array()?;
+    let tools = items
+        .iter()
+        .filter_map(|item| {
+            let name = item.get("name").and_then(Value::as_str)?.to_owned();
+            Some(FunctionToolDefinition {
+                tool_type: "function".to_owned(),
+                function: crate::proxy_core::FunctionToolSpec {
+                    name,
+                    description: item
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    parameters: item.get("input_schema").cloned(),
+                    strict: None,
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    Some(tools)
+}
+
+fn value_to_text(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Object(map) => {
+                    if let Some(text) = map.get("text").and_then(Value::as_str) {
+                        text.to_owned()
+                    } else if let Some(content) = map.get("content") {
+                        value_to_text(content)
+                    } else {
+                        item.to_string()
+                    }
+                }
+                _ => value_to_text(item),
+            })
+            .filter(|item| !item.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                text.to_owned()
+            } else if let Some(content) = map.get("content") {
+                value_to_text(content)
+            } else {
+                value.to_string()
+            }
+        }
+        other => other.to_string(),
+    }
+}
+
+fn response_usage(usage: &Usage) -> Value {
+    json!({
+        "input_tokens": usage.prompt_tokens,
+        "output_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    })
+}
+
+fn json_openai_response(
+    state: AppState,
+    body: OpenAIRequest,
+    chat: BridgeChatResponse,
+) -> Response {
+    let response_id = format!("resp_{}", Uuid::new_v4().simple());
+    let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
+    let parsed = parse_browser_output(&body, &chat.text);
+    let usage = usage_from_text(&build_prompt(&body), &parsed.text, true);
+    let mut output = Vec::new();
+    if !parsed.text.is_empty() {
+        output.push(json!({
+            "id": format!("msg_{}", Uuid::new_v4().simple()),
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": parsed.text.clone() }]
+        }));
+    }
+    for tool_call in &parsed.tool_calls {
+        output.push(json!({
+            "id": tool_call.id,
+            "type": "function_call",
+            "name": tool_call.function.name,
+            "arguments": tool_call.function.arguments,
+            "call_id": tool_call.id,
+        }));
+    }
+
+    Json(json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": current_timestamp(),
+        "status": "completed",
+        "model": model,
+        "output": output,
+        "output_text": parsed.text,
+        "usage": response_usage(&usage),
+        "provider_metadata": {
+            "provider": state.config.kind.as_str(),
+            "conversation_id": chat.conversation_id,
+        }
+    }))
+    .into_response()
+}
+
+fn stream_openai_response(
+    state: AppState,
+    body: OpenAIRequest,
+    chat: BridgeChatResponse,
+) -> Response {
+    let response_id = format!("resp_{}", Uuid::new_v4().simple());
+    let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
+    let parsed = parse_browser_output(&body, &chat.text);
+    let usage = usage_from_text(&build_prompt(&body), &parsed.text, true);
+    let text = parsed.text.clone();
+    let chunks = split_text_chunks(&text, 320);
+    let tool_calls = parsed.tool_calls.clone();
+
+    let stream = stream! {
+        yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!("event: response.created\ndata: {}\n\n", json!({
+            "id": response_id,
+            "object": "response",
+            "created_at": current_timestamp(),
+            "status": "in_progress",
+            "model": model,
+        }))));
+
+        for chunk in chunks {
+            if chunk.is_empty() {
+                continue;
+            }
+            yield Ok(Bytes::from(format!("event: response.output_text.delta\ndata: {}\n\n", json!({
+                "id": response_id,
+                "delta": chunk,
+            }))));
+        }
+
+        for tool_call in tool_calls {
+            yield Ok(Bytes::from(format!("event: response.output_item.added\ndata: {}\n\n", json!({
+                "id": response_id,
+                "item": {
+                    "id": tool_call.id,
+                    "type": "function_call",
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                    "call_id": tool_call.id,
+                }
+            }))));
+        }
+
+        yield Ok(Bytes::from(format!("event: response.completed\ndata: {}\n\n", json!({
+            "id": response_id,
+            "object": "response",
+            "created_at": current_timestamp(),
+            "status": "completed",
+            "model": model,
+            "output_text": text,
+            "usage": response_usage(&usage),
+            "provider_metadata": {
+                "provider": state.config.kind.as_str(),
+                "conversation_id": chat.conversation_id,
+            }
+        }))));
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONNECTION, "keep-alive"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+fn json_anthropic_response(
+    state: AppState,
+    body: OpenAIRequest,
+    chat: BridgeChatResponse,
+) -> Response {
+    let message_id = format!("msg_{}", Uuid::new_v4().simple());
+    let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
+    let parsed = parse_browser_output(&body, &chat.text);
+    let usage = usage_from_text(&build_prompt(&body), &parsed.text, true);
+    let mut content = Vec::new();
+    if !parsed.text.is_empty() {
+        content.push(json!({ "type": "text", "text": parsed.text.clone() }));
+    }
+    for tool_call in parsed.tool_calls {
+        content.push(json!({
+            "type": "tool_use",
+            "id": tool_call.id,
+            "name": tool_call.function.name,
+            "input": serde_json::from_str::<Value>(&tool_call.function.arguments).unwrap_or_else(|_| json!({ "raw": tool_call.function.arguments })),
+        }));
+    }
+
+    Json(json!({
+        "id": message_id,
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": content,
+        "stop_reason": if content.iter().any(|item| item.get("type").and_then(Value::as_str) == Some("tool_use")) { "tool_use" } else { "end_turn" },
+        "stop_sequence": Value::Null,
+        "usage": {
+            "input_tokens": usage.prompt_tokens,
+            "output_tokens": usage.completion_tokens,
+        },
+        "provider_metadata": {
+            "provider": state.config.kind.as_str(),
+            "conversation_id": chat.conversation_id,
+        }
+    }))
+    .into_response()
+}
+
+fn stream_anthropic_response(
+    _state: AppState,
+    body: OpenAIRequest,
+    chat: BridgeChatResponse,
+) -> Response {
+    let message_id = format!("msg_{}", Uuid::new_v4().simple());
+    let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
+    let parsed = parse_browser_output(&body, &chat.text);
+    let usage = usage_from_text(&build_prompt(&body), &parsed.text, true);
+    let chunks = split_text_chunks(&parsed.text, 320);
+    let tool_calls = parsed.tool_calls.clone();
+    let stop_reason = if tool_calls.is_empty() {
+        "end_turn"
+    } else {
+        "tool_use"
+    };
+
+    // text block occupies index 0 when present; tool blocks follow immediately after
+    let tool_block_start = if parsed.text.is_empty() { 0usize } else { 1 };
+
+    let stream = stream! {
+        yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!("event: message_start\ndata: {}\n\n", json!({
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": Value::Null,
+                "stop_sequence": Value::Null,
+                "usage": { "input_tokens": usage.prompt_tokens, "output_tokens": 0 }
+            }
+        }))));
+
+        if !parsed.text.is_empty() {
+            yield Ok(Bytes::from(format!("event: content_block_start\ndata: {}\n\n", json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "text", "text": "" }
+            }))));
+            for chunk in chunks {
+                if chunk.is_empty() {
+                    continue;
+                }
+                yield Ok(Bytes::from(format!("event: content_block_delta\ndata: {}\n\n", json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": { "type": "text_delta", "text": chunk }
+                }))));
+            }
+            yield Ok(Bytes::from("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"));
+        }
+
+        for (i, tool_call) in tool_calls.iter().enumerate() {
+            let block_index = tool_block_start + i;
+            // spec: content_block_start carries empty input; SDK accumulates from input_json_delta
+            yield Ok(Bytes::from(format!("event: content_block_start\ndata: {}\n\n", json!({
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "input": {},
+                }
+            }))));
+            yield Ok(Bytes::from(format!("event: content_block_delta\ndata: {}\n\n", json!({
+                "type": "content_block_delta",
+                "index": block_index,
+                "delta": { "type": "input_json_delta", "partial_json": tool_call.function.arguments }
+            }))));
+            yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {}\n\n", json!({
+                "type": "content_block_stop",
+                "index": block_index
+            }))));
+        }
+
+        yield Ok(Bytes::from(format!("event: message_delta\ndata: {}\n\n", json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
+            "usage": { "output_tokens": usage.completion_tokens }
+        }))));
+        yield Ok(Bytes::from("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
     };
 
     (
@@ -480,12 +1335,17 @@ fn require_api_key(
         return Ok(());
     };
 
-    let authorized = headers
+    let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
-        == Some(api_key);
+        .map(str::trim);
+    let xkey = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    let authorized = matches!(bearer, Some(provided) if constant_time_eq(provided, api_key))
+        || matches!(xkey, Some(provided) if constant_time_eq(provided, api_key));
 
     if authorized {
         Ok(())
@@ -498,7 +1358,15 @@ fn require_api_key(
 }
 
 fn provider_error(state: &AppState, err: anyhow::Error) -> Response {
+    // ponytail: log full cause server-side; return opaque id to client so upstream
+    // bodies / header fragments never leak. Login-required detection runs on the
+    // internal message before it's dropped.
     let message = err.to_string();
+    let id = uuid::Uuid::new_v4();
+    eprintln!(
+        "[{}] upstream error {id}: {message}",
+        state.config.kind.as_str()
+    );
     let status = if is_login_required_error(&message) {
         StatusCode::UNAUTHORIZED
     } else {
@@ -507,7 +1375,7 @@ fn provider_error(state: &AppState, err: anyhow::Error) -> Response {
 
     json_error(
         status,
-        format!("{} request failed: {}", state.config.kind.as_str(), message),
+        format!("{} upstream error (id={id})", state.config.kind.as_str()),
     )
 }
 
@@ -542,8 +1410,15 @@ fn sse_done() -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_model_payload_for, BrowserProviderKind};
-    use serde_json::Value;
+    use super::{
+        anthropic_message_to_openai_messages, anthropic_tool_choice_to_openai,
+        anthropic_tools_from_value, coerce_agent_model, fallback_model_payload_for,
+        openai_tools_from_value, parse_browser_output, require_api_key, response_input_to_messages,
+        BrowserProviderKind,
+    };
+    use crate::proxy_core::{FunctionToolDefinition, FunctionToolSpec, OpenAIRequest};
+    use axum::http::{header, HeaderMap, HeaderValue};
+    use serde_json::{json, Value};
 
     #[test]
     fn browser_model_fallback_uses_provider_default() {
@@ -573,5 +1448,153 @@ mod tests {
                 .and_then(Value::as_str),
             Some("discovery failed")
         );
+    }
+
+    #[test]
+    fn browser_model_fallback_uses_zai_default() {
+        let payload = fallback_model_payload_for(BrowserProviderKind::Zai, Vec::new());
+
+        let first = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .expect("fallback model item");
+        assert_eq!(first.get("id").and_then(Value::as_str), Some("glm-5.2"));
+        assert_eq!(first.get("owned_by").and_then(Value::as_str), Some("zai"));
+    }
+
+    #[test]
+    fn browser_parser_extracts_tool_calls_from_markup() {
+        let parsed = parse_browser_output(
+            &OpenAIRequest {
+                model: "chatgpt-web-session".to_owned(),
+                messages: Vec::new(),
+                stream: Some(false),
+                web_search: Some(false),
+                tools: Some(vec![FunctionToolDefinition {
+                    tool_type: "function".to_owned(),
+                    function: FunctionToolSpec {
+                        name: "lookup".to_owned(),
+                        description: None,
+                        parameters: None,
+                        strict: None,
+                    },
+                }]),
+                tool_choice: None,
+                stream_options: None,
+            },
+            "before <tool_call>{\"name\":\"lookup\",\"arguments\":{\"id\":7}}</tool_call>",
+        );
+
+        assert_eq!(parsed.text, "before");
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].function.name, "lookup");
+    }
+
+    #[test]
+    fn api_key_accepts_x_api_key_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("local"));
+        assert!(require_api_key(&headers, Some("local")).is_ok());
+
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer nope"),
+        );
+        assert!(require_api_key(&headers, Some("local")).is_ok());
+    }
+
+    #[test]
+    fn claude_model_names_fall_back_to_provider_default() {
+        assert_eq!(
+            coerce_agent_model(BrowserProviderKind::Chatgpt, "claude-sonnet-4-5"),
+            "chatgpt-web-session"
+        );
+    }
+
+    #[test]
+    fn anthropic_tools_convert_to_openai_function_tools() {
+        let tools = anthropic_tools_from_value(Some(&json!([{
+            "name": "read_file",
+            "description": "Read file",
+            "input_schema": { "type": "object" }
+        }])))
+        .expect("tools");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].function.name, "read_file");
+    }
+
+    #[test]
+    fn anthropic_messages_preserve_tool_use_and_tool_results() {
+        let assistant = anthropic_message_to_openai_messages(&json!({
+            "role": "assistant",
+            "content": [
+                { "type": "text", "text": "checking" },
+                { "type": "tool_use", "id": "toolu_1", "name": "read_file", "input": { "path": "Cargo.toml" } }
+            ]
+        }));
+        let user = anthropic_message_to_openai_messages(&json!({
+            "role": "user",
+            "content": [
+                { "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" }
+            ]
+        }));
+
+        assert_eq!(assistant.len(), 1);
+        assert_eq!(assistant[0].role, "assistant");
+        assert_eq!(
+            assistant[0].tool_calls.as_ref().unwrap()[0].function.name,
+            "read_file"
+        );
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0].role, "tool");
+        assert_eq!(user[0].tool_call_id.as_deref(), Some("toolu_1"));
+    }
+
+    #[test]
+    fn anthropic_any_tool_choice_maps_to_openai_required() {
+        assert_eq!(
+            anthropic_tool_choice_to_openai(Some(&json!({ "type": "any" }))),
+            Some(json!("required"))
+        );
+        assert_eq!(
+            anthropic_tool_choice_to_openai(Some(&json!("any"))),
+            Some(json!("required"))
+        );
+    }
+
+    #[test]
+    fn responses_input_preserves_function_call_outputs() {
+        let messages = response_input_to_messages(Some(&json!([
+            { "role": "user", "content": "read it" },
+            { "type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{\"path\":\"Cargo.toml\"}" },
+            { "type": "function_call_output", "call_id": "call_1", "output": "ok" }
+        ])));
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(
+            messages[1].tool_calls.as_ref().unwrap()[0].function.name,
+            "read_file"
+        );
+        assert_eq!(messages[2].role, "tool");
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn responses_flat_function_tools_convert_to_chat_tools() {
+        let tools = openai_tools_from_value(Some(&json!([{
+            "type": "function",
+            "name": "read_file",
+            "description": "Read file",
+            "parameters": { "type": "object" },
+            "strict": true
+        }])))
+        .expect("tools");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].function.name, "read_file");
+        assert_eq!(tools[0].function.strict, Some(true));
     }
 }

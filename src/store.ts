@@ -1,6 +1,8 @@
-import { invoke } from '@tauri-apps/api/core'
 import { acceptHMRUpdate, defineStore } from 'pinia'
-import { buildClaudeSetup, buildPiSetup, type AgentSetupKind } from '@/lib/agent-setups'
+import { buildClaudeSetup, buildKiloSetup, buildPiSetup, type AgentSetupKind } from '@/lib/agent-setups'
+import { invoke, providerOrder } from '@/lib/mock-backend'
+import { DEFAULT_LOCALE, defaultWorkbenchPrompt, translate, type UiLocale } from '@/lib/ui-i18n'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 import type {
   BrowserPrefs,
   DashboardOverview,
@@ -11,10 +13,15 @@ import type {
   QwenAccountSummary,
 } from '@/lib/types'
 
-const versionString =
-  import.meta.env.MODE === 'development' ? `${import.meta.env.VITE_APP_VERSION}-dev` : import.meta.env.VITE_APP_VERSION
+export { providerOrder }
 
-export const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral']
+const localeStorageKey = 'rustproxyhub.locale'
+
+function loadLocale(): UiLocale {
+  if (typeof window === 'undefined') return DEFAULT_LOCALE
+  const stored = window.localStorage.getItem(localeStorageKey)
+  return stored === 'en' || stored === 'pt-BR' ? stored : DEFAULT_LOCALE
+}
 
 const defaultBrowserPrefs: BrowserPrefs = {
   qwen: 'msedge',
@@ -23,6 +30,7 @@ const defaultBrowserPrefs: BrowserPrefs = {
   chatgpt: 'msedge',
   gemini: 'msedge',
   mistral: 'msedge',
+  zai: 'msedge',
 }
 
 type BusyMap = Record<string, boolean>
@@ -40,7 +48,6 @@ async function copyText(value: string) {
     await navigator.clipboard.writeText(value)
     return
   }
-
   const textarea = document.createElement('textarea')
   textarea.value = value
   textarea.setAttribute('readonly', 'true')
@@ -54,8 +61,8 @@ async function copyText(value: string) {
 
 export const useStore = defineStore('main', {
   state: () => ({
-    debug: import.meta.env.MODE === 'development',
-    version: versionString,
+    locale: loadLocale() as UiLocale,
+    version: '1.0.0',
     isInitialized: false,
     isRefreshing: false,
     error: '',
@@ -69,10 +76,10 @@ export const useStore = defineStore('main', {
     browserPrefs: structuredClone(defaultBrowserPrefs) as BrowserPrefs,
     busy: {} as BusyMap,
     refreshTimer: null as number | null,
+    unlistenDashboard: null as UnlistenFn | null,
     qwenEmail: '',
-    qwenPassword: '',
     workbenchModel: '',
-    workbenchPrompt: 'Say hello from RustProxyHub and report which provider answered.',
+    workbenchPrompt: defaultWorkbenchPrompt(loadLocale()),
     workbenchWebSearch: false,
     workbenchResponse: '',
   }),
@@ -93,7 +100,6 @@ export const useStore = defineStore('main', {
       const providers = this.overview?.providers ?? []
       const query = this.searchQuery.trim().toLowerCase()
       if (!query) return providers
-
       return providers.filter((provider) => {
         const haystack = [
           provider.name,
@@ -111,17 +117,18 @@ export const useStore = defineStore('main', {
 
     hubModelOptions(): string[] {
       const providers = this.overview?.providers ?? []
-      const models = providers.flatMap((provider) => provider.models.map((model) => formatHubModel(provider.name, model)))
+      const models = providers.flatMap((provider) =>
+        provider.models.map((model) => formatHubModel(provider.name, model)),
+      )
       return Array.from(new Set(models))
     },
 
     filteredQwenAccounts(): QwenAccountSummary[] {
       const query = this.searchQuery.trim().toLowerCase()
       if (!query) return this.qwenAccounts
-
-      return this.qwenAccounts.filter((account) => {
-        return [account.email, account.id, account.created_at ?? ''].join(' ').toLowerCase().includes(query)
-      })
+      return this.qwenAccounts.filter((account) =>
+        [account.email, account.id, account.created_at ?? ''].join(' ').toLowerCase().includes(query),
+      )
     },
 
     activeProviderDetails(state): ProviderDetails | null {
@@ -133,7 +140,14 @@ export const useStore = defineStore('main', {
     },
 
     openLoginCount(state): number {
-      return (state.overview?.open_provider_login_sessions.length ?? 0) + (state.overview?.open_qwen_account_login_sessions.length ?? 0)
+      return (
+        (state.overview?.open_provider_login_sessions.length ?? 0) +
+        (state.overview?.open_qwen_account_login_sessions.length ?? 0)
+      )
+    },
+
+    localeCode(state): string {
+      return state.locale === 'en' ? 'en-US' : 'pt-BR'
     },
 
     runtimeReady(state): boolean {
@@ -146,6 +160,20 @@ export const useStore = defineStore('main', {
   },
 
   actions: {
+    t(key: string, params?: Record<string, string | number>) {
+      return translate(this.locale, key, params)
+    },
+
+    setLocale(locale: UiLocale) {
+      const previousLocale = this.locale
+      const previousDefaultPrompt = defaultWorkbenchPrompt(previousLocale)
+      this.locale = locale
+      window.localStorage.setItem(localeStorageKey, locale)
+      if (!this.workbenchPrompt.trim() || this.workbenchPrompt === previousDefaultPrompt) {
+        this.workbenchPrompt = defaultWorkbenchPrompt(locale)
+      }
+    },
+
     setBusy(key: string, value: boolean) {
       this.busy[key] = value
     },
@@ -180,11 +208,11 @@ export const useStore = defineStore('main', {
       }
     },
 
-    async refreshOverview() {
+    async refreshOverview(silent = false) {
       if (this.isRefreshing) return
       this.isRefreshing = true
       try {
-        this.notice = ''
+        if (!silent) this.notice = ''
         this.overview = await invoke<DashboardOverview>('dashboard_overview')
       } catch (error) {
         this.error = describeError(error)
@@ -212,12 +240,36 @@ export const useStore = defineStore('main', {
       await this.refreshOverview()
       this.syncWorkbenchModel()
       await this.loadQwenAccounts()
+
+      // Real Tauri: subscribe to push events from Rust for zero-latency dashboard updates.
+      // Mock/dev mode: falls back to polling below.
+      if ('__TAURI_INTERNALS__' in window) {
+        try {
+          const { listen } = await import('@tauri-apps/api/event')
+          this.unlistenDashboard = await listen<DashboardOverview>('dashboard:update', (event) => {
+            this.overview = event.payload
+            this.syncWorkbenchModel()
+          })
+        } catch {
+          // not in a Tauri context — polling fallback handles it
+        }
+      }
+
+      // Fallback poll: drives mock-backend telemetry and covers gaps in SSE (e.g. log rotation).
+      this.refreshTimer = window.setInterval(() => {
+        if (!this.unlistenDashboard) void this.refreshOverview(true)
+        if (this.activeDrawer) void this.refreshProviderLogs(this.activeDrawer).catch(() => {})
+      }, 3000)
     },
 
     disposeApp() {
       if (this.refreshTimer != null) {
         window.clearInterval(this.refreshTimer)
         this.refreshTimer = null
+      }
+      if (this.unlistenDashboard != null) {
+        this.unlistenDashboard()
+        this.unlistenDashboard = null
       }
     },
 
@@ -232,22 +284,18 @@ export const useStore = defineStore('main', {
       this.activeDrawer = null
     },
 
-    async addQwenAccount() {
+    async addQwenAccount(password: string) {
       const email = this.qwenEmail.trim()
       if (!email) {
-        this.error = 'Email is required.'
+        this.error = this.t('store.emailRequired')
         return
       }
-
+      // ponytail: password passed as arg, never stored in reactive state.
       await this.runTask('qwen-account:add', async () => {
         this.qwenAccounts = await invoke<QwenAccountSummary[]>('add_qwen_account', {
-          request: {
-            email,
-            password: this.qwenPassword,
-          },
+          request: { email, password },
         })
         this.qwenEmail = ''
-        this.qwenPassword = ''
         await this.refreshOverview()
       })
     },
@@ -262,10 +310,7 @@ export const useStore = defineStore('main', {
     async startProviderLogin(provider: ProviderName) {
       await this.runTask(`login:start:${provider}`, async () => {
         await invoke<string[]>('start_provider_login_session', {
-          request: {
-            provider,
-            browser: this.browserPrefs[provider],
-          },
+          request: { provider, browser: this.browserPrefs[provider] },
         })
         await this.refreshOverview()
       })
@@ -281,10 +326,7 @@ export const useStore = defineStore('main', {
     async startQwenAccountLogin(accountId: string) {
       await this.runTask(`login:qwen-account:start:${accountId}`, async () => {
         await invoke<string[]>('start_qwen_account_login_session', {
-          request: {
-            account_id: accountId,
-            browser: this.browserPrefs.qwen,
-          },
+          request: { account_id: accountId, browser: this.browserPrefs.qwen },
         })
         await this.refreshOverview()
       })
@@ -311,46 +353,53 @@ export const useStore = defineStore('main', {
         this.error = `Provider ${providerName} is not loaded yet.`
         return
       }
-
-      const setup = agent === 'pi' ? buildPiSetup(provider) : buildClaudeSetup(provider)
+      const setup =
+        agent === 'pi'
+          ? buildPiSetup(provider)
+          : agent === 'kilo'
+            ? buildKiloSetup(provider)
+            : buildClaudeSetup(provider)
       await copyText(setup.content)
       this.error = ''
-      this.notice = `${agent === 'pi' ? 'Pi' : 'Claude'} setup copied for ${providerName}. Target: ${setup.target}`
+      this.notice = this.t('store.copiedSetup', {
+        agent: agent === 'pi' ? 'Pi' : agent === 'kilo' ? 'Kilo' : 'Claude',
+        provider: providerName,
+        target: setup.target,
+      })
     },
 
     async runWorkbench() {
       const model = this.workbenchModel.trim()
       const prompt = this.workbenchPrompt.trim()
       if (!this.runtimeReady) {
-        this.error = this.runtimeIssues[0] ?? 'Runtime preflight is blocking startup.'
+        this.error = this.runtimeIssues[0] ?? this.t('store.runtimeBlocking')
         return
       }
       if (this.openLoginCount > 0) {
-        this.error = 'Close active login session before running workbench request.'
+        this.error = this.t('store.closeLoginBeforeWorkbench')
         return
       }
       if (!this.overview?.hub.running) {
-        this.error = 'Start hub service before running workbench request.'
+        this.error = this.t('store.startHubBeforeWorkbench')
         return
       }
       if (!model) {
-        this.error = 'Choose a prefixed hub model first.'
+        this.error = this.t('store.chooseModel')
         return
       }
       if (!prompt) {
-        this.error = 'Prompt is required.'
+        this.error = this.t('store.promptRequired')
         return
       }
-
       await this.runTask('workbench:run', async () => {
         const response = await invoke<unknown>('run_workbench_request', {
-          request: {
-            model,
-            prompt,
-            web_search: this.workbenchWebSearch,
-          },
+          request: { model, prompt, web_search: this.workbenchWebSearch },
         })
-        this.workbenchResponse = JSON.stringify(response ?? { error: 'Workbench returned null response.' }, null, 2)
+        this.workbenchResponse = JSON.stringify(
+          response ?? { error: this.t('store.nullWorkbenchResponse') },
+          null,
+          2,
+        )
         await this.refreshOverview()
         this.syncWorkbenchModel()
       })

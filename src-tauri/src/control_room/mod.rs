@@ -1,25 +1,26 @@
 mod qwen_accounts;
 mod runtime;
 
+use crate::proxy_core::{current_timestamp, is_safe_account_id};
 use crate::runtime::{
     build_embedded_config, serve_browser_provider, serve_deepseek, serve_hub, serve_kimi,
     serve_qwen, BrowserProviderKind, BrowserProviderServerConfig, DeepseekServiceConfig,
     HubServiceConfig, KimiServiceConfig, ProviderConfig,
 };
 use anyhow::{anyhow, Context, Result};
+use futures_util::future::join_all;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    env,
-    fs,
+    env, fs,
     future::Future,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use self::{
@@ -41,6 +42,7 @@ const KIMI_PORT: u16 = 3002;
 const CHATGPT_PORT: u16 = 3003;
 const GEMINI_PORT: u16 = 3004;
 const MISTRAL_PORT: u16 = 3005;
+const ZAI_PORT: u16 = 3006;
 const DEFAULT_BROWSER: &str = "msedge";
 const LOG_LIMIT: usize = 240;
 
@@ -64,7 +66,8 @@ struct ControlState {
     logs: Arc<Mutex<HashMap<String, VecDeque<String>>>>,
     open_provider_login_sessions: Arc<Mutex<HashSet<String>>>,
     open_qwen_account_login_sessions: Arc<Mutex<HashSet<String>>>,
-    tasks: Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
+    tasks: Arc<std::sync::Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
+    app_handle: Option<AppHandle>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,8 +143,6 @@ struct ProviderOverview {
 #[derive(Debug, Serialize)]
 struct DashboardOverview {
     generated_at: u64,
-    app_data_dir: String,
-    helper_dir: String,
     runtime: RuntimeDiagnostics,
     startup_config: StartupConfig,
     hub: HubOverview,
@@ -215,8 +216,20 @@ impl ControlState {
             logs: Arc::new(Mutex::new(logs)),
             open_provider_login_sessions: Arc::new(Mutex::new(HashSet::new())),
             open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::new())),
-            tasks: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            app_handle: Some(app.clone()),
         })
+    }
+
+    fn emit_dashboard_update(&self) {
+        let state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            if let (Some(handle), Ok(overview)) =
+                (&state.app_handle, state.build_dashboard_overview().await)
+            {
+                let _ = handle.emit("dashboard:update", &overview);
+            }
+        });
     }
 
     async fn bootstrap(&self) -> Result<()> {
@@ -261,6 +274,7 @@ impl ControlState {
             "chatgpt" => fs::create_dir_all(self.chatgpt_runtime_dir()),
             "gemini" => fs::create_dir_all(self.gemini_runtime_dir()),
             "mistral" => fs::create_dir_all(self.mistral_runtime_dir()),
+            "zai" => fs::create_dir_all(self.zai_runtime_dir()),
             "hub" => fs::create_dir_all(self.hub_runtime_dir()),
             _ => Ok(()),
         };
@@ -269,6 +283,9 @@ impl ControlState {
     fn spawn_service_by_name(&self, name: &str) -> Result<()> {
         let helper_dir = require_helper_dir(&self.runtime)?;
         let node_path = Some(require_node_path(&self.runtime)?);
+        // Gate every embedded provider behind the same key the hub uses, so a local
+        // process can't bypass the hub by hitting 127.0.0.1:3000-3006 directly.
+        let provider_api_key = self.hub_api_key.clone();
 
         match name {
             "qwen" => {
@@ -280,7 +297,7 @@ impl ControlState {
                         build_embedded_config(
                             runtime_dir,
                             QWEN_PORT,
-                            None,
+                            provider_api_key,
                             DEFAULT_BROWSER.to_owned(),
                             true,
                         ),
@@ -294,11 +311,12 @@ impl ControlState {
                 let runtime_dir = self.deepseek_runtime_dir();
                 let helper_dir = helper_dir.clone();
                 let node_path = node_path.clone();
+                let api_key = provider_api_key.clone();
                 self.spawn_service("deepseek".to_owned(), async move {
                     serve_deepseek(DeepseekServiceConfig {
                         host: "127.0.0.1".to_owned(),
                         port: DEEPSEEK_PORT,
-                        api_key: None,
+                        api_key,
                         headless: true,
                         browser: DEFAULT_BROWSER.to_owned(),
                         runtime_dir,
@@ -312,11 +330,12 @@ impl ControlState {
                 let runtime_dir = self.kimi_runtime_dir();
                 let helper_dir = helper_dir.clone();
                 let node_path = node_path.clone();
+                let api_key = provider_api_key.clone();
                 self.spawn_service("kimi".to_owned(), async move {
                     serve_kimi(KimiServiceConfig {
                         host: "127.0.0.1".to_owned(),
                         port: KIMI_PORT,
-                        api_key: None,
+                        api_key,
                         headless: true,
                         browser: DEFAULT_BROWSER.to_owned(),
                         runtime_dir,
@@ -330,12 +349,13 @@ impl ControlState {
                 let runtime_dir = self.chatgpt_runtime_dir();
                 let helper_dir = helper_dir.clone();
                 let node_path = node_path.clone();
+                let api_key = provider_api_key.clone();
                 self.spawn_service("chatgpt".to_owned(), async move {
                     serve_browser_provider(BrowserProviderServerConfig {
                         kind: BrowserProviderKind::Chatgpt,
                         host: "127.0.0.1".to_owned(),
                         port: CHATGPT_PORT,
-                        api_key: None,
+                        api_key,
                         headless: true,
                         browser: DEFAULT_BROWSER.to_owned(),
                         runtime_dir,
@@ -349,12 +369,13 @@ impl ControlState {
                 let runtime_dir = self.gemini_runtime_dir();
                 let helper_dir = helper_dir.clone();
                 let node_path = node_path.clone();
+                let api_key = provider_api_key.clone();
                 self.spawn_service("gemini".to_owned(), async move {
                     serve_browser_provider(BrowserProviderServerConfig {
                         kind: BrowserProviderKind::Gemini,
                         host: "127.0.0.1".to_owned(),
                         port: GEMINI_PORT,
-                        api_key: None,
+                        api_key,
                         headless: true,
                         browser: DEFAULT_BROWSER.to_owned(),
                         runtime_dir,
@@ -368,12 +389,33 @@ impl ControlState {
                 let runtime_dir = self.mistral_runtime_dir();
                 let helper_dir = helper_dir.clone();
                 let node_path = node_path.clone();
+                let api_key = provider_api_key.clone();
                 self.spawn_service("mistral".to_owned(), async move {
                     serve_browser_provider(BrowserProviderServerConfig {
                         kind: BrowserProviderKind::Mistral,
                         host: "127.0.0.1".to_owned(),
                         port: MISTRAL_PORT,
-                        api_key: None,
+                        api_key,
+                        headless: true,
+                        browser: DEFAULT_BROWSER.to_owned(),
+                        runtime_dir,
+                        helper_dir,
+                        node_path,
+                    })
+                    .await
+                });
+            }
+            "zai" => {
+                let runtime_dir = self.zai_runtime_dir();
+                let helper_dir = helper_dir.clone();
+                let node_path = node_path.clone();
+                let api_key = provider_api_key.clone();
+                self.spawn_service("zai".to_owned(), async move {
+                    serve_browser_provider(BrowserProviderServerConfig {
+                        kind: BrowserProviderKind::Zai,
+                        host: "127.0.0.1".to_owned(),
+                        port: ZAI_PORT,
+                        api_key,
                         headless: true,
                         browser: DEFAULT_BROWSER.to_owned(),
                         runtime_dir,
@@ -389,13 +431,26 @@ impl ControlState {
                     serve_hub(HubServiceConfig {
                         host: "127.0.0.1".to_owned(),
                         port: HUB_PORT,
-                        api_key: hub_api_key,
-                        qwen: ProviderConfig::new(provider_base_url("qwen"), None::<String>),
-                        deepseek: ProviderConfig::new(provider_base_url("deepseek"), None::<String>),
-                        kimi: ProviderConfig::new(provider_base_url("kimi"), None::<String>),
-                        chatgpt: ProviderConfig::new(provider_base_url("chatgpt"), None::<String>),
-                        gemini: ProviderConfig::new(provider_base_url("gemini"), None::<String>),
-                        mistral: ProviderConfig::new(provider_base_url("mistral"), None::<String>),
+                        api_key: hub_api_key.clone(),
+                        qwen: ProviderConfig::new(provider_base_url("qwen"), hub_api_key.clone()),
+                        deepseek: ProviderConfig::new(
+                            provider_base_url("deepseek"),
+                            hub_api_key.clone(),
+                        ),
+                        kimi: ProviderConfig::new(provider_base_url("kimi"), hub_api_key.clone()),
+                        chatgpt: ProviderConfig::new(
+                            provider_base_url("chatgpt"),
+                            hub_api_key.clone(),
+                        ),
+                        gemini: ProviderConfig::new(
+                            provider_base_url("gemini"),
+                            hub_api_key.clone(),
+                        ),
+                        mistral: ProviderConfig::new(
+                            provider_base_url("mistral"),
+                            hub_api_key.clone(),
+                        ),
+                        zai: ProviderConfig::new(provider_base_url("zai"), hub_api_key),
                     })
                     .await
                 });
@@ -447,7 +502,7 @@ impl ControlState {
         let state = self.clone();
         let service_name = name;
         let service_name_for_task = service_name.clone();
-        
+
         let handle = tauri::async_runtime::spawn(async move {
             state
                 .mark_service_started(&service_name, format!("starting embedded {service_name}"))
@@ -474,11 +529,16 @@ impl ControlState {
                 }
             }
         });
-        
-        let state_for_map = self.clone();
-        tauri::async_runtime::spawn(async move {
-            state_for_map.tasks.lock().await.insert(service_name_for_task, handle);
-        });
+
+        // ponytail: one lock hold so check+insert are atomic; abort duplicate to keep live handle tracked
+        let mut guard = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        use std::collections::hash_map::Entry;
+        match guard.entry(service_name_for_task) {
+            Entry::Occupied(_) => handle.abort(),
+            Entry::Vacant(e) => {
+                e.insert(handle);
+            }
+        }
     }
 
     async fn mark_service_started(&self, name: &str, message: String) {
@@ -486,10 +546,11 @@ impl ControlState {
             let mut guard = self.statuses.lock().await;
             let entry = guard.entry(name.to_owned()).or_default();
             entry.running = true;
-            entry.started_at = Some(now_ts());
+            entry.started_at = Some(current_timestamp());
             entry.last_error = None;
         }
         self.push_log(name, message).await;
+        self.emit_dashboard_update();
     }
 
     async fn mark_service_stopped(
@@ -509,12 +570,13 @@ impl ControlState {
         if let Some(message) = log_message {
             self.push_log(name, message).await;
         }
+        self.emit_dashboard_update();
     }
 
     async fn push_log(&self, name: &str, message: impl Into<String>) {
         let mut guard = self.logs.lock().await;
         let entry = guard.entry(name.to_owned()).or_default();
-        entry.push_back(format!("[{}] {}", now_ts(), message.into()));
+        entry.push_back(format!("[{}] {}", current_timestamp(), message.into()));
         while entry.len() > LOG_LIMIT {
             entry.pop_front();
         }
@@ -575,30 +637,28 @@ impl ControlState {
         self.providers_root().join("mistral")
     }
 
+    fn zai_runtime_dir(&self) -> PathBuf {
+        self.providers_root().join("zai")
+    }
+
     fn hub_runtime_dir(&self) -> PathBuf {
         self.providers_root().join("hub")
     }
 
     async fn build_dashboard_overview(&self) -> Result<DashboardOverview> {
-        let providers = {
-            let mut items = Vec::new();
-            for provider in provider_names() {
-                items.push(self.provider_overview(provider).await);
-            }
-            items
-        };
+        let providers_future = join_all(
+            provider_names()
+                .into_iter()
+                .map(|provider| self.provider_overview(provider)),
+        );
+        let hub_future = self.hub_overview();
+        let (providers, hub) = tokio::join!(providers_future, hub_future);
 
         Ok(DashboardOverview {
-            generated_at: now_ts(),
-            app_data_dir: self.app_data_dir.display().to_string(),
-            helper_dir: self
-                .runtime
-                .helper_dir
-                .clone()
-                .unwrap_or_else(|| "unavailable".to_owned()),
+            generated_at: current_timestamp(),
             runtime: self.runtime.clone(),
             startup_config: self.startup_config.clone(),
-            hub: self.hub_overview().await,
+            hub,
             providers,
             qwen_account_count: list_qwen_accounts_db(
                 &self.qwen_runtime_dir(),
@@ -663,14 +723,25 @@ impl ControlState {
 
     async fn hub_overview(&self) -> HubOverview {
         let status = self.service_status("hub").await;
-        let health = self
-            .call_json_get(&hub_base_url(), "/health", self.hub_api_key.as_deref())
-            .await
-            .ok();
-        let models = self
-            .call_json_get(&hub_base_url(), "/v1/models", self.hub_api_key.as_deref())
-            .await
-            .ok();
+        if !status.running {
+            return HubOverview {
+                running: status.running,
+                started_at: status.started_at,
+                health_status: "offline".to_owned(),
+                model_count: 0,
+                provider_statuses: Vec::new(),
+                detail: None,
+                config: self.hub_config(),
+            };
+        }
+
+        let base_url = hub_base_url();
+        let (health, models) = tokio::join!(
+            self.call_json_get(&base_url, "/health", self.hub_api_key.as_deref()),
+            self.call_json_get(&base_url, "/v1/models", self.hub_api_key.as_deref()),
+        );
+        let health = health.ok();
+        let models = models.ok();
 
         let detail = health.as_ref().map(|(_, payload)| payload.clone());
         let health_status = health
@@ -710,15 +781,35 @@ impl ControlState {
     async fn provider_overview(&self, name: &'static str) -> ProviderOverview {
         let status = self.service_status(name).await;
         let base_url = provider_base_url(name);
-        let health = self.call_json_get(&base_url, "/health", None).await.ok();
         let open_provider_sessions = self.open_provider_login_sessions.lock().await.clone();
         let open_qwen_account_sessions = self.open_qwen_account_login_sessions.lock().await.clone();
         let login_open = open_provider_sessions.contains(name);
+        if !status.running {
+            return ProviderOverview {
+                name: name.to_owned(),
+                running: false,
+                started_at: status.started_at,
+                base_url,
+                health_status: "offline".to_owned(),
+                login_state: "offline".to_owned(),
+                model_count: 0,
+                models: Vec::new(),
+                web_search_supported: provider_web_search_supported(name),
+                last_error: status.last_error,
+            };
+        }
 
-        let models = if login_open {
-            None
+        let (health, models) = if login_open {
+            (
+                self.call_json_get(&base_url, "/health", None).await.ok(),
+                None,
+            )
         } else {
-            self.call_json_get(&base_url, "/v1/models", None).await.ok()
+            let (health, models) = tokio::join!(
+                self.call_json_get(&base_url, "/health", None),
+                self.call_json_get(&base_url, "/v1/models", None),
+            );
+            (health.ok(), models.ok())
         };
 
         let model_ids = models
@@ -747,7 +838,7 @@ impl ControlState {
 
         let login_state = if login_open {
             "login_open".to_owned()
-        } else if name == "chatgpt" || name == "gemini" || name == "mistral" {
+        } else if name == "chatgpt" || name == "gemini" || name == "mistral" || name == "zai" {
             if model_count > 0 {
                 "authenticated".to_owned()
             } else if status.running {
@@ -792,10 +883,16 @@ async fn start_service(state: State<'_, ControlState>, name: String) -> Result<(
 
 #[tauri::command]
 async fn stop_service(state: State<'_, ControlState>, name: String) -> Result<(), String> {
-    let mut tasks = state.tasks.lock().await;
-    if let Some(handle) = tasks.remove(&name) {
+    let handle = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&name);
+    if let Some(handle) = handle {
         handle.abort();
-        state.mark_service_stopped(&name, Some(format!("service {name} stopped by user")), None).await;
+        state
+            .mark_service_stopped(&name, Some(format!("service {name} stopped by user")), None)
+            .await;
         Ok(())
     } else {
         Err(format!("service {} is not running", name))
@@ -920,7 +1017,10 @@ async fn run_workbench_request(
                 let content_empty = match message.get("content") {
                     Some(Value::String(text)) => text.trim().is_empty(),
                     Some(Value::Null) | None => true,
-                    Some(other) => other.as_array().map(|items| items.is_empty()).unwrap_or(false),
+                    Some(other) => other
+                        .as_array()
+                        .map(|items| items.is_empty())
+                        .unwrap_or(false),
                 };
 
                 if content_empty {
@@ -1005,7 +1105,10 @@ async fn start_provider_login_session(
 
     let mut guard = state.open_provider_login_sessions.lock().await;
     guard.insert(provider.to_owned());
-    Ok(guard.iter().cloned().collect())
+    let result = guard.iter().cloned().collect();
+    drop(guard);
+    state.emit_dashboard_update();
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1025,7 +1128,10 @@ async fn stop_provider_login_session(
 
     let mut guard = state.open_provider_login_sessions.lock().await;
     guard.remove(provider);
-    Ok(guard.iter().cloned().collect())
+    let result = guard.iter().cloned().collect();
+    drop(guard);
+    state.emit_dashboard_update();
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1033,11 +1139,14 @@ async fn start_qwen_account_login_session(
     state: State<'_, ControlState>,
     request: QwenAccountLoginRequest,
 ) -> Result<Vec<String>, String> {
-    if request.account_id.trim().is_empty() {
+    let account_id = request.account_id.trim().to_owned();
+    if account_id.is_empty() {
         return Err("account_id is required".to_owned());
     }
+    if !is_safe_account_id(&account_id) {
+        return Err("account_id must be 1-64 chars of [A-Za-z0-9_-]".to_owned());
+    }
 
-    let account_id = request.account_id;
     let payload = json!({
         "browser": request.browser.unwrap_or_else(|| DEFAULT_BROWSER.to_owned()),
         "account_id": account_id.clone(),
@@ -1064,7 +1173,10 @@ async fn start_qwen_account_login_session(
 
     let mut guard = state.open_qwen_account_login_sessions.lock().await;
     guard.insert(account_id);
-    Ok(guard.iter().cloned().collect())
+    let result = guard.iter().cloned().collect();
+    drop(guard);
+    state.emit_dashboard_update();
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1072,8 +1184,12 @@ async fn stop_qwen_account_login_session(
     state: State<'_, ControlState>,
     account_id: String,
 ) -> Result<Vec<String>, String> {
-    if account_id.trim().is_empty() {
+    let account_id = account_id.trim().to_owned();
+    if account_id.is_empty() {
         return Err("account_id is required".to_owned());
+    }
+    if !is_safe_account_id(&account_id) {
+        return Err("account_id must be 1-64 chars of [A-Za-z0-9_-]".to_owned());
     }
 
     let _ = state
@@ -1087,7 +1203,10 @@ async fn stop_qwen_account_login_session(
 
     let mut guard = state.open_qwen_account_login_sessions.lock().await;
     guard.remove(&account_id);
-    Ok(guard.iter().cloned().collect())
+    let result = guard.iter().cloned().collect();
+    drop(guard);
+    state.emit_dashboard_update();
+    Ok(result)
 }
 
 fn normalize_provider(value: &str) -> Result<&'static str> {
@@ -1098,6 +1217,7 @@ fn normalize_provider(value: &str) -> Result<&'static str> {
         "chatgpt" => Ok("chatgpt"),
         "gemini" => Ok("gemini"),
         "mistral" => Ok("mistral"),
+        "zai" => Ok("zai"),
         other => Err(anyhow!("unsupported provider: {other}")),
     }
 }
@@ -1116,9 +1236,13 @@ fn startup_config_from_env() -> StartupConfig {
         .filter(|value| !value.is_empty());
 
     let Some(configured) = configured else {
+        // Default when RUST_PROXY_START_SERVICES is unset: auto-start the qwen and
+        // deepseek servers so the user doesn't have to launch them by hand. Set
+        // RUST_PROXY_START_SERVICES=manual (or none) to opt out, =all for every
+        // service, or a comma-separated list to pick your own.
         return StartupConfig {
-            mode: "manual".to_owned(),
-            services: Vec::new(),
+            mode: "selected".to_owned(),
+            services: vec!["qwen".to_owned(), "deepseek".to_owned()],
         };
     };
 
@@ -1132,7 +1256,10 @@ fn startup_config_from_env() -> StartupConfig {
     if configured.eq_ignore_ascii_case("all") {
         return StartupConfig {
             mode: "all".to_owned(),
-            services: service_names().iter().map(|name| name.to_string()).collect(),
+            services: service_names()
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
         };
     }
 
@@ -1159,14 +1286,16 @@ fn startup_config_from_env() -> StartupConfig {
     }
 }
 
-fn service_names() -> [&'static str; 7] {
+fn service_names() -> [&'static str; 8] {
     [
-        "hub", "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral",
+        "hub", "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral", "zai",
     ]
 }
 
-fn provider_names() -> [&'static str; 6] {
-    ["qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral"]
+fn provider_names() -> [&'static str; 7] {
+    [
+        "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral", "zai",
+    ]
 }
 
 fn provider_base_url(provider: &str) -> String {
@@ -1177,6 +1306,7 @@ fn provider_base_url(provider: &str) -> String {
         "chatgpt" => CHATGPT_PORT,
         "gemini" => GEMINI_PORT,
         "mistral" => MISTRAL_PORT,
+        "zai" => ZAI_PORT,
         _ => HUB_PORT,
     };
     format!("http://127.0.0.1:{port}")
@@ -1188,13 +1318,6 @@ fn hub_base_url() -> String {
 
 fn provider_web_search_supported(provider: &str) -> bool {
     matches!(provider, "qwen" | "deepseek")
-}
-
-fn now_ts() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1248,8 +1371,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_qwen_account_db, ensure_qwen_db, normalize_provider, provider_base_url,
-        service_names, ControlState, RuntimeDiagnostics, ServiceRuntimeStatus, StartupConfig,
+        add_qwen_account_db, ensure_qwen_db, normalize_provider, provider_base_url, service_names,
+        ControlState, RuntimeDiagnostics, ServiceRuntimeStatus, StartupConfig,
     };
     use std::{
         collections::{HashMap, HashSet, VecDeque},
@@ -1278,11 +1401,13 @@ mod tests {
         assert_eq!(provider_base_url("chatgpt"), "http://127.0.0.1:3003");
         assert_eq!(provider_base_url("gemini"), "http://127.0.0.1:3004");
         assert_eq!(provider_base_url("mistral"), "http://127.0.0.1:3005");
+        assert_eq!(provider_base_url("zai"), "http://127.0.0.1:3006");
     }
 
     #[test]
-    fn provider_normalization_accepts_mistral() {
+    fn provider_normalization_accepts_mistral_and_zai() {
         assert_eq!(normalize_provider(" MISTRAL ").unwrap(), "mistral");
+        assert_eq!(normalize_provider(" ZAI ").unwrap(), "zai");
         assert!(normalize_provider("claude").is_err());
     }
 
@@ -1323,7 +1448,8 @@ mod tests {
             logs: Arc::new(Mutex::new(logs)),
             open_provider_login_sessions: Arc::new(Mutex::new(HashSet::new())),
             open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::new())),
-            tasks: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            app_handle: None,
         };
 
         state.mark_runtime_blocked().await;
@@ -1393,7 +1519,8 @@ mod tests {
             open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::from([String::from(
                 "acct-1",
             )]))),
-            tasks: Arc::new(Mutex::new(HashMap::new())),
+            tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            app_handle: None,
         };
 
         let overview = state.build_dashboard_overview().await.unwrap();

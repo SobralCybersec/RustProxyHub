@@ -4,7 +4,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    fs::{self, OpenOptions},
+    fs::{self, DirBuilder, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::{
@@ -16,6 +16,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, Command},
+    runtime::Handle,
     sync::{oneshot, Mutex},
 };
 
@@ -100,10 +101,10 @@ pub struct PlaywrightBridge {
     request_timeout: Duration,
 }
 
-#[derive(Clone)]
 struct BridgeProcess {
     pid: u32,
     stdin: Arc<Mutex<ChildStdin>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 #[async_trait]
@@ -256,13 +257,16 @@ impl PlaywrightBridge {
             return Ok(Arc::clone(&process.stdin));
         }
 
-        let mut child = Command::new(self.node_path.as_ref())
+        let mut command = Command::new(self.node_path.as_ref());
+        command
             // Use relative entrypoint once cwd is set to avoid Windows drive-letter parsing edge cases.
             .arg("index.mjs")
             .current_dir(self.helper_dir.as_ref())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command
             .spawn()
             .context("failed to start Playwright bridge helper")?;
         let child_id = child.id().unwrap_or_default();
@@ -290,16 +294,33 @@ impl PlaywrightBridge {
             .stderr
             .take()
             .ok_or_else(|| anyhow!("helper stderr unavailable"))?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         self.spawn_stdout_reader(stdout);
         self.spawn_stderr_reader(stderr);
-        self.spawn_exit_waiter(child, child_id);
+        self.spawn_exit_waiter(child, child_id, shutdown_rx);
 
         *guard = Some(BridgeProcess {
             pid: child_id,
             stdin: Arc::clone(&stdin),
+            shutdown_tx: Some(shutdown_tx),
         });
         Ok(stdin)
+    }
+
+    async fn signal_process_shutdown(&self) -> bool {
+        let shutdown_tx = {
+            let mut guard = self.process.lock().await;
+            guard
+                .as_mut()
+                .and_then(|process| process.shutdown_tx.take())
+        };
+        if let Some(tx) = shutdown_tx {
+            let _ = tx.send(());
+            true
+        } else {
+            false
+        }
     }
 
     fn spawn_stdout_reader(&self, stdout: tokio::process::ChildStdout) {
@@ -386,40 +407,86 @@ impl PlaywrightBridge {
         });
     }
 
-    fn spawn_exit_waiter(&self, mut child: tokio::process::Child, child_id: u32) {
+    fn spawn_exit_waiter(
+        &self,
+        mut child: tokio::process::Child,
+        child_id: u32,
+        mut shutdown_rx: oneshot::Receiver<()>,
+    ) {
         let log_for_exit = Arc::clone(&self.log_path);
         let pending_for_exit = Arc::clone(&self.pending);
         let process_for_exit = Arc::clone(&self.process);
         let initialized_for_exit = Arc::clone(&self.initialized);
 
         tokio::spawn(async move {
-            match child.wait().await {
-                Ok(status) => {
+            let expected_shutdown = tokio::select! {
+                result = child.wait() => {
+                    match result {
+                        Ok(status) => {
+                            append_bridge_log(
+                                log_for_exit.as_ref(),
+                                format!("process exit pid={child_id} status={status}"),
+                            );
+                        }
+                        Err(err) => {
+                            append_bridge_log(
+                                log_for_exit.as_ref(),
+                                format!("process wait error pid={child_id}: {err}"),
+                            );
+                        }
+                    }
+                    false
+                }
+                _ = &mut shutdown_rx => {
                     append_bridge_log(
                         log_for_exit.as_ref(),
-                        format!("process exit pid={child_id} status={status}"),
+                        format!("shutdown signal pid={child_id}"),
                     );
+                    if let Err(err) = child.kill().await {
+                        append_bridge_log(
+                            log_for_exit.as_ref(),
+                            format!("process kill error pid={child_id}: {err}"),
+                        );
+                    }
+                    match child.wait().await {
+                        Ok(status) => {
+                            append_bridge_log(
+                                log_for_exit.as_ref(),
+                                format!("process exit after shutdown pid={child_id} status={status}"),
+                            );
+                        }
+                        Err(err) => {
+                            append_bridge_log(
+                                log_for_exit.as_ref(),
+                                format!("process wait after shutdown error pid={child_id}: {err}"),
+                            );
+                        }
+                    }
+                    true
                 }
-                Err(err) => {
-                    append_bridge_log(
-                        log_for_exit.as_ref(),
-                        format!("process wait error pid={child_id}: {err}"),
-                    );
-                }
-            }
+            };
 
             let mut process = process_for_exit.lock().await;
             if process.as_ref().map(|item| item.pid) == Some(child_id) {
                 *process = None;
                 *initialized_for_exit.lock().await = false;
             }
+            drop(process);
 
             let mut pending = pending_for_exit.lock().await;
-            for (_, sender) in pending.drain() {
-                let _ = sender.send(Err(anyhow!(
+            let error_message = if expected_shutdown {
+                format!(
+                    "helper process shut down; inspect {}",
+                    log_for_exit.display()
+                )
+            } else {
+                format!(
                     "helper process exited unexpectedly; inspect {}",
                     log_for_exit.display()
-                )));
+                )
+            };
+            for (_, sender) in pending.drain() {
+                let _ = sender.send(Err(anyhow!(error_message.clone())));
             }
         });
     }
@@ -475,12 +542,74 @@ impl BrowserBridge for PlaywrightBridge {
             return Ok(());
         }
 
-        let result = self
-            .request_raw::<_, Value>("shutdown", serde_json::json!({}))
-            .await
-            .map(|_| ());
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.request_raw::<_, Value>("shutdown", serde_json::json!({})),
+        )
+        .await;
         *self.initialized.lock().await = false;
-        result
+        match result {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(err)) => {
+                self.signal_process_shutdown().await;
+                Err(err)
+            }
+            Err(_) => {
+                self.signal_process_shutdown().await;
+                Err(anyhow!(
+                    "helper shutdown timed out; inspect {}",
+                    self.log_path.display()
+                ))
+            }
+        }
+    }
+}
+
+impl Drop for PlaywrightBridge {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.process) != 1 {
+            return;
+        }
+
+        if let Ok(mut process) = self.process.try_lock() {
+            let shutdown_tx = process
+                .as_mut()
+                .and_then(|bridge_process| bridge_process.shutdown_tx.take());
+            drop(process);
+            if let Some(tx) = shutdown_tx {
+                append_bridge_log(
+                    self.log_path.as_ref(),
+                    "drop signaled helper shutdown".to_owned(),
+                );
+                let _ = tx.send(());
+            }
+            if let Ok(mut initialized) = self.initialized.try_lock() {
+                *initialized = false;
+            }
+            return;
+        }
+
+        if let Ok(handle) = Handle::try_current() {
+            let process = Arc::clone(&self.process);
+            let initialized = Arc::clone(&self.initialized);
+            let log_path = Arc::clone(&self.log_path);
+            handle.spawn(async move {
+                let shutdown_tx = {
+                    let mut guard = process.lock().await;
+                    guard
+                        .as_mut()
+                        .and_then(|bridge_process| bridge_process.shutdown_tx.take())
+                };
+                if let Some(tx) = shutdown_tx {
+                    append_bridge_log(
+                        log_path.as_ref(),
+                        "drop scheduled helper shutdown".to_owned(),
+                    );
+                    let _ = tx.send(());
+                }
+                *initialized.lock().await = false;
+            });
+        }
     }
 }
 
@@ -508,23 +637,99 @@ fn normalize_spawn_path(path: PathBuf) -> PathBuf {
 }
 
 fn bridge_log_path(provider: &str) -> Result<PathBuf> {
+    // ponytail: logs live in the OS temp dir for portability. Secured by:
+    //   - dir created 0700 (owner-only)
+    //   - refuse existing symlinks (symlink-attack guard)
+    //   - log file opened 0600
+    //   - secret-bearing stderr lines scrubbed before write
+    // Upgrade path: move under app_data_dir when a path is threaded through.
     let dir = std::env::temp_dir().join("rustproxyhub-playwright");
-    fs::create_dir_all(&dir)?;
+    secure_create_dir(&dir)?;
     Ok(dir.join(format!("{provider}-bridge.log")))
+}
+
+fn secure_create_dir(dir: &Path) -> Result<()> {
+    if dir.exists() {
+        let meta = fs::symlink_metadata(dir)
+            .with_context(|| format!("failed to stat {}", dir.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(anyhow!(
+                "refusing to use log dir {}: symlink detected (possible attack)",
+                dir.display()
+            ));
+        }
+        // Already exists (possibly created by another provider's bridge); trust it.
+        return Ok(());
+    }
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .with_context(|| format!("failed to create log dir {}", dir.display()))?;
+    Ok(())
 }
 
 fn reset_bridge_log(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        secure_create_dir(parent)?;
     }
-    fs::write(path, b"")?;
+    // Refuse to truncate a symlink (avoids clobbering a victim file via symlink).
+    if path.exists() {
+        let meta = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            return Err(anyhow!(
+                "refusing to reset log {}: symlink detected (possible attack)",
+                path.display()
+            ));
+        }
+    }
+    let mut file = open_secure_log(path)?;
+    file.write_all(b"")?;
     Ok(())
+}
+
+fn open_secure_log(path: &Path) -> Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .with_context(|| format!("failed to open log {}", path.display()))
+}
+
+/// Strip lines that look like they carry capture/cookie/auth material, so a chatty
+/// Playwright helper can't leak session secrets to a world-readable log.
+fn scrub_secret_line(line: &str) -> String {
+    const SENSITIVE: &[&str] = &[
+        "cookie",
+        "set-cookie",
+        "authorization",
+        "bx-v",
+        "bx-umidtoken",
+        "bx-ua",
+        "x-api-key",
+    ];
+    let lower = line.to_ascii_lowercase();
+    if SENSITIVE.iter().any(|needle| lower.contains(needle)) {
+        "[scrubbed: line matched secret pattern]".to_owned()
+    } else {
+        line.to_owned()
+    }
 }
 
 fn append_bridge_log(path: &Path, line: String) {
     let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(file, "{line}")?;
+        let mut file = open_secure_log(path)?;
+        writeln!(file, "{}", scrub_secret_line(&line))?;
         Ok(())
     })();
 

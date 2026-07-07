@@ -2,8 +2,8 @@ use crate::browser_bridge::{
     BrowserBridge, CaptureHeadersParams, InitParams, ManualLoginParams, PlaywrightBridge,
 };
 use crate::proxy_core::{
-    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
-    StreamingToolParser, ToolCallFunction,
+    build_prompt, constant_time_eq, current_timestamp, usage_from_text, MessageToolCall,
+    OpenAIRequest, StreamingToolParser, ToolCallFunction,
 };
 use anyhow::{anyhow, Result};
 use async_stream::stream;
@@ -27,7 +27,6 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 #[cfg(feature = "standalone-provider-cli")]
@@ -150,7 +149,18 @@ fn collect_fragment_events(
 }
 
 fn deepseek_model_type(is_pro: bool) -> &'static str {
-    if is_pro { "expert" } else { "default" }
+    if is_pro {
+        "expert"
+    } else {
+        "default"
+    }
+}
+
+fn deepseek_mode_flags(model_id: &str) -> (bool, bool) {
+    let lower = model_id.trim().to_ascii_lowercase();
+    let is_pro = lower.contains("expert") || lower.contains("pro");
+    let is_thinking = lower.contains("thinking") || lower.contains("deepthink");
+    (is_pro, is_thinking)
 }
 
 fn upsert_deepseek_event(events: &mut Vec<Value>, name: &str, params: Value) {
@@ -170,7 +180,11 @@ fn upsert_deepseek_event(events: &mut Vec<Value>, name: &str, params: Value) {
     }));
 }
 
-fn sync_deepseek_events(payload: &mut serde_json::Map<String, Value>, is_pro: bool, is_thinking: bool) {
+fn sync_deepseek_events(
+    payload: &mut serde_json::Map<String, Value>,
+    is_pro: bool,
+    is_thinking: bool,
+) {
     let sync_events = |events: &mut Vec<Value>| {
         upsert_deepseek_event(
             events,
@@ -196,7 +210,8 @@ fn sync_deepseek_events(payload: &mut serde_json::Map<String, Value>, is_pro: bo
             let Some(group_object) = group.as_object_mut() else {
                 continue;
             };
-            if let Some(group_events) = group_object.get_mut("events").and_then(Value::as_array_mut) {
+            if let Some(group_events) = group_object.get_mut("events").and_then(Value::as_array_mut)
+            {
                 sync_events(group_events);
                 return;
             }
@@ -296,7 +311,6 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
         .route("/admin/close_login", post(admin_close_login))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let host: IpAddr = config
@@ -378,6 +392,17 @@ async fn health() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
 
+async fn ensure_deepseek_ready(state: &AppState) -> Result<()> {
+    state
+        .bridge
+        .init(InitParams {
+            runtime_dir: state.config.runtime_dir.to_string_lossy().to_string(),
+            headless: state.config.headless,
+            browser: state.config.browser.clone(),
+        })
+        .await
+}
+
 async fn admin_manual_login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -423,7 +448,11 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
             { "id": "deepseek-v4-flash", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-flash", "parent": null },
             { "id": "deepseek-v4-flash-thinking", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-flash-thinking", "parent": null },
             { "id": "deepseek-v4-pro", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-pro", "parent": null },
-            { "id": "deepseek-v4-pro-thinking", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-pro-thinking", "parent": null }
+            { "id": "deepseek-v4-pro-thinking", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-pro-thinking", "parent": null },
+            { "id": "deepseek-instant", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-flash", "parent": null },
+            { "id": "deepseek-instant-deepthink", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-flash-thinking", "parent": null },
+            { "id": "deepseek-expert", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-pro", "parent": null },
+            { "id": "deepseek-expert-deepthink", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-pro-thinking", "parent": null }
         ]
     }))
     .into_response()
@@ -440,15 +469,15 @@ async fn chat_completions(
 
     match handle_chat(state, body).await {
         Ok(response) => response,
-        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => bad_gateway_error(err),
     }
 }
 
 async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
-    let final_prompt = build_prompt(&body);
+    ensure_deepseek_ready(&state).await?;
+    let final_prompt = deepen_tool_prompt(build_prompt(&body), &body);
     let is_stream = body.stream.unwrap_or(false);
-    let is_thinking = body.model.contains("thinking");
-    let is_pro = body.model.contains("pro");
+    let (is_pro, is_thinking) = deepseek_mode_flags(&body.model);
     let is_new_session = !body
         .messages
         .iter()
@@ -458,7 +487,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
     let mut response = None;
     let mut ui_session_id = String::new();
 
-    for _ in 0..3 {
+    for attempt in 0..3u32 {
         let captured = match state
             .bridge
             .capture_headers(CaptureHeadersParams {
@@ -470,7 +499,10 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
             Ok(captured) => captured,
             Err(err) => {
                 last_error = Some(anyhow!(err));
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                // exponential backoff + jitter: 250ms, 500ms, 1000ms ± 0-100ms.
+                let base = 250u64 * 2u64.pow(attempt);
+                let jitter = ((attempt * 37) % 100) as u64;
+                tokio::time::sleep(Duration::from_millis(base + jitter)).await;
                 continue;
             }
         };
@@ -553,7 +585,14 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                 break;
             }
             Ok(upstream) => {
-                last_error = Some(anyhow!(upstream.text().await.unwrap_or_default()));
+                // Don't dump full upstream body into the error; log server-side only.
+                let status = upstream.status();
+                let body = upstream.text().await.unwrap_or_default();
+                eprintln!(
+                    "[deepseek] upstream http {status}: {}",
+                    body.chars().take(400).collect::<String>()
+                );
+                last_error = Some(anyhow!("deepseek upstream returned {status}"));
             }
             Err(err) => {
                 last_error = Some(anyhow!(err));
@@ -569,14 +608,16 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
         let mut tool_parser = body.tools.as_ref().map(|_| StreamingToolParser::new());
         let mut tool_calls = Vec::new();
         let mut buffer = String::new();
+        let mut offset = 0usize;
         let mut bytes_stream = response.bytes_stream();
 
         while let Some(chunk) = bytes_stream.next().await {
             let chunk = chunk?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(idx) = buffer.find('\n') {
-                let line = buffer[..idx].trim().to_owned();
-                buffer = buffer[idx + 1..].to_owned();
+            while let Some(rel) = buffer[offset..].find('\n') {
+                let end = offset + rel;
+                let line = buffer[offset..end].trim().to_owned();
+                offset = end + 1;
                 if let Some(data) = line.strip_prefix("data: ") {
                     process_deepseek_line(
                         data,
@@ -589,6 +630,8 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                     .await?;
                 }
             }
+            buffer.drain(..offset);
+            offset = 0;
         }
 
         if let Some(parser) = &mut tool_parser {
@@ -647,15 +690,17 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
         let mut tool_parser = body.tools.as_ref().map(|_| StreamingToolParser::new());
         let mut tool_index = 0usize;
         let mut buffer = String::new();
+        let mut offset = 0usize;
         let mut bytes_stream = response.bytes_stream();
 
         while let Some(chunk) = bytes_stream.next().await {
             match chunk {
                 Ok(chunk) => {
                     buffer.push_str(&String::from_utf8_lossy(&chunk));
-                    while let Some(idx) = buffer.find('\n') {
-                        let line = buffer[..idx].trim().to_owned();
-                        buffer = buffer[idx + 1..].to_owned();
+                    while let Some(rel) = buffer[offset..].find('\n') {
+                        let end = offset + rel;
+                        let line = buffer[offset..end].trim().to_owned();
+                        offset = end + 1;
                         if let Some(data) = line.strip_prefix("data: ") {
                             match collect_deepseek_events(data, &ui_session_id, &session_parents, &mut parse_state, &mut tool_parser).await {
                                 Ok(events) => {
@@ -718,6 +763,8 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                             }
                         }
                     }
+                    buffer.drain(..offset);
+                    offset = 0;
                 }
                 Err(err) => {
                     yield Ok(sse_json(json!({
@@ -782,6 +829,40 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
     };
 
     Ok(stream_response(stream))
+}
+
+fn deepen_tool_prompt(base_prompt: String, body: &OpenAIRequest) -> String {
+    if body.tools.is_none() {
+        return base_prompt;
+    }
+
+    let mut prefix = String::from(
+        "DEEPSEEK TOOL MODE\n\
+These tools are real and executable in this session.\n\
+If user asks to test tools, inspect workspace/files, read code, write code, grep, glob, run commands, or understand repository state, do not answer in prose.\n\
+You must respond with one or more <tool_call>...</tool_call> blocks only.\n\
+Never say tools are unavailable, pasted text, unsupported, or not accessible from this session.\n",
+    );
+
+    if body.tool_choice.as_ref().and_then(Value::as_str) == Some("required") {
+        prefix.push_str(
+            "tool_choice is required. You must call one or more tools before any normal text.\n",
+        );
+    }
+
+    if let Some(name) = body
+        .tool_choice
+        .as_ref()
+        .and_then(|value| value.get("function"))
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+    {
+        prefix.push_str(&format!(
+            "You must call tool \"{name}\" in your next response.\n"
+        ));
+    }
+
+    format!("{prefix}\n{base_prompt}")
 }
 
 async fn process_deepseek_line(
@@ -952,18 +1033,28 @@ fn require_api_key(
             .flatten()
     });
 
-    if provided == Some(api_key) {
-        Ok(())
-    } else {
-        Err(Box::new(json_error(
+    match provided {
+        Some(provided) if constant_time_eq(provided, api_key) => Ok(()),
+        _ => Err(Box::new(json_error(
             StatusCode::UNAUTHORIZED,
             "Unauthorized".to_owned(),
-        )))
+        ))),
     }
 }
 
 fn json_error(status: StatusCode, message: String) -> Response {
     (status, Json(json!({ "error": { "message": message } }))).into_response()
+}
+
+/// Map an upstream/internal error to a generic 502 with an opaque id; log the real
+/// cause server-side so upstream bodies / header fragments never reach the client.
+fn bad_gateway_error(err: impl std::fmt::Display) -> Response {
+    let id = Uuid::new_v4();
+    eprintln!("[deepseek] upstream error {id}: {err}");
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        format!("upstream provider error (id={id})"),
+    )
 }
 
 fn sse_json(value: Value) -> Bytes {
@@ -990,7 +1081,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        build_deepseek_payload, collect_fragment_events, DeepSeekParseState, ParsedEvent,
+        build_deepseek_payload, collect_fragment_events, deepseek_mode_flags, DeepSeekParseState,
+        ParsedEvent,
     };
     use crate::proxy_core::StreamingToolParser;
     use serde_json::json;
@@ -1072,7 +1164,51 @@ mod tests {
 
         assert_eq!(payload["model_type"], "default");
         assert_eq!(payload["events"][0]["events"][0]["params"], "default");
-        assert_eq!(payload["events"][0]["events"][1]["event"], "thinkingSwitchToggled");
+        assert_eq!(
+            payload["events"][0]["events"][1]["event"],
+            "thinkingSwitchToggled"
+        );
         assert_eq!(payload["events"][0]["events"][1]["params"], false);
+    }
+
+    #[test]
+    fn deepseek_mode_flags_support_instant_expert_and_deepthink_aliases() {
+        assert_eq!(deepseek_mode_flags("deepseek-v4-flash"), (false, false));
+        assert_eq!(deepseek_mode_flags("deepseek-v4-pro"), (true, false));
+        assert_eq!(
+            deepseek_mode_flags("deepseek-v4-flash-thinking"),
+            (false, true)
+        );
+        assert_eq!(
+            deepseek_mode_flags("deepseek-v4-pro-thinking"),
+            (true, true)
+        );
+        assert_eq!(deepseek_mode_flags("deepseek-instant"), (false, false));
+        assert_eq!(deepseek_mode_flags("deepseek-expert"), (true, false));
+        assert_eq!(
+            deepseek_mode_flags("deepseek-instant-deepthink"),
+            (false, true)
+        );
+        assert_eq!(
+            deepseek_mode_flags("deepseek-expert-deepthink"),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_pro_payload_uses_expert_model_type() {
+        let (is_pro, is_thinking) = deepseek_mode_flags("deepseek-v4-pro");
+        let payload = build_deepseek_payload(
+            None,
+            "READY",
+            "session-v4-pro",
+            None,
+            is_pro,
+            is_thinking,
+            false,
+        );
+
+        assert_eq!(payload["model_type"], "expert");
+        assert_eq!(payload["thinking_enabled"], false);
     }
 }

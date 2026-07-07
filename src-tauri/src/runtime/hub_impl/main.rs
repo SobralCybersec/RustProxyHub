@@ -1,3 +1,4 @@
+use crate::proxy_core::{constant_time_eq, OpenAIRequest};
 use anyhow::{anyhow, Result};
 use axum::{
     body::Body,
@@ -8,15 +9,13 @@ use axum::{
     Json, Router,
 };
 use bytes::Bytes;
-use futures_util::TryStreamExt;
-use crate::proxy_core::OpenAIRequest;
+use futures_util::{future::join_all, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
-use tower_http::cors::CorsLayer;
 
 #[cfg(feature = "standalone-provider-cli")]
 use clap::{Parser, Subcommand};
@@ -60,6 +59,7 @@ struct AppConfig {
     chatgpt: ProviderConfig,
     gemini: ProviderConfig,
     mistral: ProviderConfig,
+    zai: ProviderConfig,
 }
 
 #[derive(Clone)]
@@ -73,6 +73,7 @@ pub struct HubServiceConfig {
     pub chatgpt: ProviderConfig,
     pub gemini: ProviderConfig,
     pub mistral: ProviderConfig,
+    pub zai: ProviderConfig,
 }
 
 #[derive(Clone)]
@@ -90,6 +91,7 @@ enum ProviderName {
     Chatgpt,
     Gemini,
     Mistral,
+    Zai,
 }
 
 impl ProviderName {
@@ -101,23 +103,24 @@ impl ProviderName {
             Self::Chatgpt => "chatgpt",
             Self::Gemini => "gemini",
             Self::Mistral => "mistral",
+            Self::Zai => "zai",
         }
     }
 }
 
-const PROVIDER_ORDER: [ProviderName; 6] = [
+const PROVIDER_ORDER: [ProviderName; 7] = [
     ProviderName::Qwen,
     ProviderName::Deepseek,
     ProviderName::Kimi,
     ProviderName::Chatgpt,
     ProviderName::Gemini,
     ProviderName::Mistral,
+    ProviderName::Zai,
 ];
 
 #[derive(Debug, Serialize)]
 struct ProviderHealth {
     provider: ProviderName,
-    base_url: String,
     healthy: bool,
     status_code: Option<u16>,
     detail: Option<Value>,
@@ -165,14 +168,22 @@ async fn run_server(config: AppConfig) -> Result<()> {
         .route("/v1/models/{model}", get(model_by_id))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/chat/completions/stop", post(chat_completions_stop))
+        .route("/v1/responses", post(responses))
+        .route("/v1/messages", post(anthropic_messages))
+        .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
         .route("/v1/upload", post(upload))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let host: IpAddr = config
         .host
         .parse()
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let is_localhost = host.is_loopback();
+    if !is_localhost && config.api_key.as_deref().map(str::is_empty).unwrap_or(true) {
+        return Err(anyhow!(
+            "refusing to start hub on non-loopback host {host} without API_KEY set; set API_KEY or bind to 127.0.0.1/localhost"
+        ));
+    }
     let addr = SocketAddr::new(host, config.port);
     println!("proxy-hub hub listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -219,6 +230,13 @@ fn load_config() -> AppConfig {
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
         },
+        zai: ProviderConfig {
+            base_url: std::env::var("ZAI_BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3006".to_owned()),
+            api_key: std::env::var("ZAI_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        },
         deepseek: ProviderConfig {
             base_url: std::env::var("DEEPSEEK_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3001".to_owned()),
@@ -241,14 +259,17 @@ async fn root(State(state): State<AppState>) -> impl IntoResponse {
         "name": "RustProxyHub",
         "status": "ok",
         "openapi": format!("http://127.0.0.1:{}/openapi.json", state.config.port),
-        "routes": {
-            "health": "/health",
-            "providers": "/providers",
-            "models": "/v1/models",
-            "chat": "/v1/chat/completions",
-            "stop": "/v1/chat/completions/stop",
-            "upload": "/v1/upload",
-        }
+            "routes": {
+                "health": "/health",
+                "providers": "/providers",
+                "models": "/v1/models",
+                "chat": "/v1/chat/completions",
+                "responses": "/v1/responses",
+                "messages": "/v1/messages",
+                "count_tokens": "/v1/messages/count_tokens",
+                "stop": "/v1/chat/completions/stop",
+                "upload": "/v1/upload",
+            }
     }))
 }
 
@@ -277,7 +298,7 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
 
     match fetch_merged_models(&state).await {
         Ok(payload) => Json(payload).into_response(),
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, err.to_string()),
+        Err(err) => bad_gateway_error(&err),
     }
 }
 
@@ -308,7 +329,7 @@ async fn model_by_id(
                 None => json_error(StatusCode::NOT_FOUND, "Model not found".to_owned()),
             }
         }
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, err.to_string()),
+        Err(err) => bad_gateway_error(&err),
     }
 }
 
@@ -335,7 +356,7 @@ async fn chat_completions(
         .await
         {
             Ok(response) => response,
-            Err(err) => json_error(StatusCode::BAD_GATEWAY, err.to_string()),
+            Err(err) => bad_gateway_error(&err),
         };
     }
 
@@ -349,7 +370,7 @@ async fn chat_completions(
     .await
     {
         Ok(response) => response,
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, err.to_string()),
+        Err(err) => bad_gateway_error(&err),
     }
 }
 
@@ -373,7 +394,55 @@ async fn chat_completions_stop(
     .await
     {
         Ok(response) => response,
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, err.to_string()),
+        Err(err) => bad_gateway_error(&err),
+    }
+}
+
+async fn responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    proxy_model_json(&state, body, "/v1/responses").await
+}
+
+async fn anthropic_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    proxy_model_json(&state, body, "/v1/messages").await
+}
+
+async fn anthropic_count_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    let routed = normalize_json_model(body);
+    match proxy_json_post(
+        &state,
+        routed.provider,
+        "/v1/messages/count_tokens",
+        &routed.payload,
+        None,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => bad_gateway_error(&err),
     }
 }
 
@@ -394,13 +463,40 @@ async fn upload(State(state): State<AppState>, headers: HeaderMap, body: Bytes) 
 
     match proxy_bytes_post(&state, ProviderName::Qwen, "/v1/upload", content_type, body).await {
         Ok(response) => response,
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, err.to_string()),
+        Err(err) => bad_gateway_error(&err),
+    }
+}
+
+async fn proxy_model_json(state: &AppState, body: Value, path: &str) -> Response {
+    let routed = normalize_json_model(body);
+    if routed
+        .payload
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return match proxy_stream_post(state, routed.provider, path, &routed.payload).await {
+            Ok(response) => response,
+            Err(err) => bad_gateway_error(&err),
+        };
+    }
+
+    match proxy_json_post(
+        state,
+        routed.provider,
+        path,
+        &routed.payload,
+        routed.original_model,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => bad_gateway_error(&err),
     }
 }
 
 async fn provider_health_checks(state: &AppState) -> Vec<ProviderHealth> {
-    let mut results = Vec::new();
-    for provider in PROVIDER_ORDER {
+    join_all(PROVIDER_ORDER.into_iter().map(|provider| async move {
         let config = state.provider_config(provider);
         let response = provider_request(&state.client, config, Method::GET, "/health")
             .send()
@@ -410,34 +506,37 @@ async fn provider_health_checks(state: &AppState) -> Vec<ProviderHealth> {
             Ok(response) => {
                 let status = response.status();
                 let detail = response.json::<Value>().await.ok();
-                results.push(ProviderHealth {
+                ProviderHealth {
                     provider,
-                    base_url: config.base_url.clone(),
                     healthy: status.is_success(),
                     status_code: Some(status.as_u16()),
                     detail,
-                });
+                }
             }
-            Err(err) => results.push(ProviderHealth {
+            Err(_err) => ProviderHealth {
                 provider,
-                base_url: config.base_url.clone(),
                 healthy: false,
                 status_code: None,
-                detail: Some(json!({ "error": err.to_string() })),
-            }),
+                detail: Some(json!({ "error": "upstream health check failed" })),
+            },
         }
-    }
-    results
+    }))
+    .await
 }
 
 async fn fetch_merged_models(state: &AppState) -> Result<Value> {
     let mut data = Vec::new();
     let mut errors = Vec::new();
 
-    for provider in PROVIDER_ORDER {
-        match fetch_provider_models(state, provider).await {
-            Ok(mut items) => data.append(&mut items),
-            Err(err) => errors.push(json!({
+    for result in
+        join_all(PROVIDER_ORDER.into_iter().map(|provider| async move {
+            (provider, fetch_provider_models(state, provider).await)
+        }))
+        .await
+    {
+        match result {
+            (_provider, Ok(mut items)) => data.append(&mut items),
+            (provider, Err(err)) => errors.push(json!({
                 "provider": provider.as_str(),
                 "message": err.to_string(),
             })),
@@ -518,13 +617,14 @@ async fn proxy_json_post<T: serde::Serialize>(
 
     let status = response.status();
     let bytes = response.bytes().await?;
-    let mut value = serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| {
-        json!({
-            "error": {
-                "message": String::from_utf8_lossy(&bytes).to_string()
-            }
-        })
-    });
+    let mut value = serde_json::from_slice::<Value>(&bytes).map_err(|_| {
+        // Don't echo raw upstream body to the client; log server-side only.
+        anyhow::anyhow!(
+            "upstream returned non-JSON body ({} bytes): {:?}",
+            bytes.len(),
+            String::from_utf8_lossy(&bytes)
+        )
+    })?;
 
     if let Some(model) = override_model.as_deref() {
         if let Some(object) = value.as_object_mut() {
@@ -632,13 +732,12 @@ fn require_api_key(headers: &HeaderMap, api_key: Option<&str>) -> Result<(), Box
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if provided == Some(api_key) {
-        Ok(())
-    } else {
-        Err(Box::new(json_error(
+    match provided {
+        Some(provided) if constant_time_eq(provided, api_key) => Ok(()),
+        _ => Err(Box::new(json_error(
             StatusCode::UNAUTHORIZED,
             "Missing or invalid Authorization header".to_owned(),
-        )))
+        ))),
     }
 }
 
@@ -646,10 +745,53 @@ fn json_error(status: StatusCode, message: String) -> Response {
     (status, Json(json!({ "error": { "message": message } }))).into_response()
 }
 
+/// Map an upstream error to a generic 502 with an opaque id; log the real cause server-side
+/// so internal base URLs / IPs / path fragments never reach the client.
+fn bad_gateway_error(err: impl std::fmt::Display) -> Response {
+    let id = uuid::Uuid::new_v4();
+    eprintln!("[hub] upstream error {id}: {err}");
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        format!("upstream provider error (id={id})"),
+    )
+}
+
 #[derive(Clone)]
 struct RoutedModel {
     provider: ProviderName,
     model: String,
+}
+
+struct RoutedJson {
+    provider: ProviderName,
+    payload: Value,
+    original_model: Option<String>,
+}
+
+fn normalize_json_model(mut payload: Value) -> RoutedJson {
+    let original_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let routed = original_model
+        .as_deref()
+        .map(normalize_prefixed_model)
+        .unwrap_or_else(|| RoutedModel {
+            provider: ProviderName::Chatgpt,
+            model: String::new(),
+        });
+
+    if !routed.model.is_empty() {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("model".to_owned(), Value::String(routed.model));
+        }
+    }
+
+    RoutedJson {
+        provider: routed.provider,
+        payload,
+        original_model,
+    }
 }
 
 fn normalize_prefixed_model(model: &str) -> RoutedModel {
@@ -662,6 +804,7 @@ fn normalize_prefixed_model(model: &str) -> RoutedModel {
             "chatgpt" => ProviderName::Chatgpt,
             "gemini" => ProviderName::Gemini,
             "mistral" => ProviderName::Mistral,
+            "zai" => ProviderName::Zai,
             _ => infer_provider(trimmed),
         };
         return RoutedModel {
@@ -689,11 +832,15 @@ fn infer_provider(model: &str) -> ProviderName {
         || lower.starts_with("codestral")
     {
         ProviderName::Mistral
+    } else if lower.starts_with("glm") || lower.starts_with("autoglm") || lower.starts_with("zai") {
+        ProviderName::Zai
     } else if lower.starts_with("gpt")
         || lower.starts_with("o1")
         || lower.starts_with("o3")
         || lower.starts_with("o4")
         || lower.starts_with("chatgpt")
+        || lower.starts_with("claude")
+        || lower.starts_with("anthropic.")
     {
         ProviderName::Chatgpt
     } else {
@@ -710,6 +857,7 @@ impl AppState {
             ProviderName::Chatgpt => &self.config.chatgpt,
             ProviderName::Gemini => &self.config.gemini,
             ProviderName::Mistral => &self.config.mistral,
+            ProviderName::Zai => &self.config.zai,
         }
     }
 }
@@ -725,6 +873,7 @@ pub async fn serve_embedded(config: HubServiceConfig) -> Result<()> {
         chatgpt: config.chatgpt,
         gemini: config.gemini,
         mistral: config.mistral,
+        zai: config.zai,
     })
     .await
 }
@@ -874,6 +1023,63 @@ fn openapi_document(config: &AppConfig) -> Value {
                     }
                 }
             },
+            "/v1/responses": {
+                "post": {
+                    "summary": "Route one OpenAI Responses request to the matching upstream provider",
+                    "security": [{ "BearerAuth": [] }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "type": "object" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": { "description": "Responses API payload or SSE stream" },
+                        "401": { "description": "Unauthorized" },
+                        "502": { "description": "Upstream proxy error" }
+                    }
+                }
+            },
+            "/v1/messages": {
+                "post": {
+                    "summary": "Route one Anthropic Messages request to the matching upstream provider",
+                    "security": [{ "BearerAuth": [] }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "type": "object" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": { "description": "Anthropic message payload or SSE stream" },
+                        "401": { "description": "Unauthorized" },
+                        "502": { "description": "Upstream proxy error" }
+                    }
+                }
+            },
+            "/v1/messages/count_tokens": {
+                "post": {
+                    "summary": "Route one Anthropic token-count request to the matching upstream provider",
+                    "security": [{ "BearerAuth": [] }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "type": "object" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": { "description": "Anthropic token count payload" },
+                        "401": { "description": "Unauthorized" },
+                        "502": { "description": "Upstream proxy error" }
+                    }
+                }
+            },
             "/v1/chat/completions/stop": {
                 "post": {
                     "summary": "Forward a stop request to the Qwen proxy",
@@ -922,7 +1128,10 @@ fn openapi_document(config: &AppConfig) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_provider, normalize_prefixed_model, tag_provider_models, ProviderName};
+    use super::{
+        infer_provider, normalize_json_model, normalize_prefixed_model, tag_provider_models,
+        ProviderName,
+    };
     use serde_json::{json, Value};
 
     #[test]
@@ -933,6 +1142,13 @@ mod tests {
     }
 
     #[test]
+    fn routes_prefixed_zai_models_to_zai() {
+        let routed = normalize_prefixed_model("zai:glm-5.2");
+        assert_eq!(routed.provider, ProviderName::Zai);
+        assert_eq!(routed.model, "glm-5.2");
+    }
+
+    #[test]
     fn infers_mistral_family_models() {
         assert_eq!(infer_provider("mistral-medium"), ProviderName::Mistral);
         assert_eq!(infer_provider("magistral-medium"), ProviderName::Mistral);
@@ -940,8 +1156,44 @@ mod tests {
     }
 
     #[test]
+    fn infers_glm_family_models_to_zai() {
+        assert_eq!(infer_provider("glm-5.2"), ProviderName::Zai);
+        assert_eq!(infer_provider("autoglm-agent"), ProviderName::Zai);
+    }
+
+    #[test]
+    fn infers_claude_family_models_to_browser_provider() {
+        assert_eq!(infer_provider("claude-sonnet-4-5"), ProviderName::Chatgpt);
+        assert_eq!(
+            infer_provider("anthropic.claude-sonnet-4"),
+            ProviderName::Chatgpt
+        );
+    }
+
+    #[test]
+    fn normalizes_prefixed_json_model_payloads() {
+        let routed = normalize_json_model(json!({
+            "model": "mistral:mistral-large-latest",
+            "input": "hello"
+        }));
+
+        assert_eq!(routed.provider, ProviderName::Mistral);
+        assert_eq!(
+            routed.original_model.as_deref(),
+            Some("mistral:mistral-large-latest")
+        );
+        assert_eq!(
+            routed.payload.get("model").and_then(Value::as_str),
+            Some("mistral-large-latest")
+        );
+    }
+
+    #[test]
     fn model_merge_tags_provider_and_skips_invalid_items() {
-        let items = vec![json!({ "id": "mistral-web-session" }), Value::String("bad".to_owned())];
+        let items = vec![
+            json!({ "id": "mistral-web-session" }),
+            Value::String("bad".to_owned()),
+        ];
 
         let tagged = tag_provider_models(items, ProviderName::Mistral);
 

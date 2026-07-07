@@ -80,7 +80,8 @@ pub fn build_embedded_config(
     let db_path = data_dir.join("qwenproxy.db");
 
     AppConfig {
-        host: env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
+        // Default to loopback; non-loopback requires API_KEY (enforced in run_server).
+        host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_owned()),
         port,
         api_key,
         headless,

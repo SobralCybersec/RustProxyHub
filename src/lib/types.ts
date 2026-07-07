@@ -1,4 +1,4 @@
-export type ProviderName = 'qwen' | 'deepseek' | 'kimi' | 'chatgpt' | 'gemini' | 'mistral'
+export type ProviderName = 'qwen' | 'deepseek' | 'kimi' | 'chatgpt' | 'gemini' | 'mistral' | 'zai'
 export type ServiceName = 'hub' | ProviderName
 
 export interface HubConfigResponse {
@@ -28,12 +28,15 @@ export interface ProviderOverview {
   models: string[]
   web_search_supported: boolean
   last_error: string | null
+  // Live telemetry (provided by the mock backend)
+  latency_ms?: number
+  rpm?: number
+  error_rate?: number
+  uptime_pct?: number
+  tokens?: number
 }
 
 export interface RuntimeDiagnostics {
-  node_path: string | null
-  node_source: string | null
-  helper_dir: string | null
   edge_available: boolean
   single_runner_ready: boolean
   issues: string[]
@@ -46,8 +49,6 @@ export interface StartupConfig {
 
 export interface DashboardOverview {
   generated_at: number
-  app_data_dir: string
-  helper_dir: string
   runtime: RuntimeDiagnostics
   startup_config: StartupConfig
   hub: HubOverview
@@ -55,6 +56,9 @@ export interface DashboardOverview {
   qwen_account_count: number
   open_provider_login_sessions: ProviderName[]
   open_qwen_account_login_sessions: string[]
+  // Live telemetry series (provided by the mock backend)
+  throughput_series?: number[]
+  latency_series?: number[]
 }
 
 export interface QwenAccountSummary {
@@ -83,4 +87,5 @@ export interface BrowserPrefs {
   chatgpt: string
   gemini: string
   mistral: string
+  zai: string
 }

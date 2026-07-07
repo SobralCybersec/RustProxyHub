@@ -1,6 +1,6 @@
 import type { ProviderName, ProviderOverview } from '@/lib/types'
 
-export type AgentSetupKind = 'pi' | 'claude'
+export type AgentSetupKind = 'pi' | 'claude' | 'kilo'
 
 export interface AgentSetup {
   supported: boolean
@@ -16,10 +16,15 @@ const fallbackModels: Record<ProviderName, string[]> = {
   chatgpt: ['chatgpt-web-session'],
   gemini: ['gemini-web-session'],
   mistral: ['mistral-web-session'],
+  zai: ['glm-5.2', 'glm-5.1', 'glm-5-turbo'],
 }
 
 function providerModels(provider: ProviderOverview) {
   return provider.models.length ? provider.models : fallbackModels[provider.name]
+}
+
+function primaryModel(provider: ProviderOverview) {
+  return providerModels(provider)[0]
 }
 
 export function buildPiSetup(provider: ProviderOverview): AgentSetup {
@@ -34,7 +39,7 @@ export function buildPiSetup(provider: ProviderOverview): AgentSetup {
           [`rustproxyhub-${provider.name}`]: {
             baseUrl: `${provider.base_url}/v1`,
             api: 'openai-completions',
-            apiKey: 'local',
+            apiKey: '<set-your-RUST_PROXY_HUB_API_KEY>',
             models,
           },
         },
@@ -46,37 +51,55 @@ export function buildPiSetup(provider: ProviderOverview): AgentSetup {
 }
 
 export function buildClaudeSetup(provider: ProviderOverview): AgentSetup {
+  const model = primaryModel(provider)
   return {
-    supported: false,
+    supported: true,
     target: '~/.claude/settings.json',
-    summary: `Claude Code note for ${provider.name} -> ${provider.base_url}`,
-    content: [
-      `RustProxyHub provider: ${provider.name}`,
-      `Local endpoint: ${provider.base_url}/v1`,
-      '',
-      'Claude Code cannot use this endpoint directly.',
-      'Reason: Claude Code gateway support requires Anthropic Messages (/v1/messages), Bedrock, or Vertex formats.',
-      'RustProxyHub currently exposes OpenAI-compatible chat completions (/v1/chat/completions).',
-      '',
-      'Working options:',
-      '1. Use Pi with this provider endpoint directly.',
-      '2. Put an Anthropic-format gateway in front of a Claude-capable backend, then set:',
-      '',
-      JSON.stringify(
-        {
-          env: {
-            ANTHROPIC_BASE_URL: 'https://your-anthropic-gateway.example.com',
-            CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+    summary: `Claude Code settings snippet for ${provider.name} -> ${provider.base_url}`,
+    content: JSON.stringify(
+      {
+        env: {
+          ANTHROPIC_BASE_URL: provider.base_url,
+          ANTHROPIC_AUTH_TOKEN: '<set-your-RUST_PROXY_HUB_API_KEY>',
+          ANTHROPIC_API_KEY: '<set-your-RUST_PROXY_HUB_API_KEY>',
+          ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+          ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+        },
+      },
+      null,
+      2,
+    ),
+  }
+}
+
+export function buildKiloSetup(provider: ProviderOverview): AgentSetup {
+  const model = primaryModel(provider)
+  return {
+    supported: true,
+    target: 'kilo.json',
+    summary: `Kilo openai-compatible snippet for ${provider.name} -> ${provider.base_url}`,
+    content: JSON.stringify(
+      {
+        model: `openai-compatible/${model}`,
+        provider: {
+          'openai-compatible': {
+            options: {
+              apiKey: '<set-your-RUST_PROXY_HUB_API_KEY>',
+              baseURL: `${provider.base_url}/v1`,
+            },
+            models: {
+              [model]: {
+                name: `${provider.name} ${model}`,
+                tool_call: true,
+              },
+            },
           },
         },
-        null,
-        2,
-      ),
-      '',
-      'Docs:',
-      'https://code.claude.com/docs/en/llm-gateway',
-      'https://code.claude.com/docs/en/env-vars',
-      'https://code.claude.com/docs/en/mcp',
-    ].join('\n'),
+      },
+      null,
+      2,
+    ),
   }
 }

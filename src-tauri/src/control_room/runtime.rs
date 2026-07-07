@@ -14,8 +14,13 @@ const EDGE_CANDIDATES: [&str; 4] = [
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct RuntimeDiagnostics {
+    // ponytail: path strings redacted from the webview payload (H6 info-disclosure).
+    // Fields stay usable internally and in tests; only IPC serialization skips them.
+    #[serde(skip)]
     pub node_path: Option<String>,
+    #[serde(skip)]
     pub node_source: Option<String>,
+    #[serde(skip)]
     pub helper_dir: Option<String>,
     pub edge_available: bool,
     pub single_runner_ready: bool,
@@ -29,7 +34,10 @@ pub struct ResolvedRuntimePaths {
     pub node_source: Option<String>,
 }
 
-pub fn resolve_helper_dir_from(resource_dir: Option<&Path>, workspace_root: &Path) -> Option<PathBuf> {
+pub fn resolve_helper_dir_from(
+    resource_dir: Option<&Path>,
+    workspace_root: &Path,
+) -> Option<PathBuf> {
     if let Some(resource_dir) = resource_dir {
         let direct = resource_dir.join("playwright-bridge");
         if direct.exists() {
@@ -68,11 +76,16 @@ pub fn resolve_node_candidates_for_tests(
     candidates
 }
 
-pub fn resolve_runtime_paths(resource_dir: Option<&Path>, workspace_root: &Path) -> ResolvedRuntimePaths {
+pub fn resolve_runtime_paths(
+    resource_dir: Option<&Path>,
+    workspace_root: &Path,
+) -> ResolvedRuntimePaths {
     let helper_dir = resolve_helper_dir_from(resource_dir, workspace_root);
     let node_candidates = resolve_node_candidates_for_tests(resource_dir, workspace_root);
     let node_path = node_candidates.iter().find(|path| path.exists()).cloned();
-    let node_source = node_path.as_ref().map(|path| classify_node_source(path, resource_dir, workspace_root));
+    let node_source = node_path
+        .as_ref()
+        .map(|path| classify_node_source(path, resource_dir, workspace_root));
 
     ResolvedRuntimePaths {
         helper_dir,
@@ -116,7 +129,9 @@ pub fn build_runtime_diagnostics(
         issues.push("Bundled node.exe not found in Tauri resources.".to_owned());
     }
     if !edge_available {
-        issues.push("Microsoft Edge not found. Install Edge to run browser-backed providers.".to_owned());
+        issues.push(
+            "Microsoft Edge not found. Install Edge to run browser-backed providers.".to_owned(),
+        );
     }
     if let Err(err) = ensure_writable_dir(app_data_dir) {
         issues.push(format!(
@@ -126,9 +141,15 @@ pub fn build_runtime_diagnostics(
     }
 
     RuntimeDiagnostics {
-        node_path: resolved.node_path.as_ref().map(|path| path.display().to_string()),
+        node_path: resolved
+            .node_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
         node_source: resolved.node_source,
-        helper_dir: resolved.helper_dir.as_ref().map(|path| path.display().to_string()),
+        helper_dir: resolved
+            .helper_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
         edge_available,
         single_runner_ready: issues.is_empty(),
         issues,
@@ -215,17 +236,38 @@ mod tests {
     #[test]
     fn resolves_dev_layout_paths() {
         let root = temp_dir("dev-layout");
-        touch(&root.join("src-tauri").join("resources").join("playwright-bridge").join("index.mjs"));
-        touch(&root.join("src-tauri").join("resources").join("node").join("node.exe"));
+        touch(
+            &root
+                .join("src-tauri")
+                .join("resources")
+                .join("playwright-bridge")
+                .join("index.mjs"),
+        );
+        touch(
+            &root
+                .join("src-tauri")
+                .join("resources")
+                .join("node")
+                .join("node.exe"),
+        );
 
         let resolved = resolve_runtime_paths(None, &root);
         assert_eq!(
             resolved.helper_dir,
-            Some(root.join("src-tauri").join("resources").join("playwright-bridge"))
+            Some(
+                root.join("src-tauri")
+                    .join("resources")
+                    .join("playwright-bridge")
+            )
         );
         assert_eq!(
             resolved.node_path,
-            Some(root.join("src-tauri").join("resources").join("node").join("node.exe"))
+            Some(
+                root.join("src-tauri")
+                    .join("resources")
+                    .join("node")
+                    .join("node.exe")
+            )
         );
         assert_eq!(resolved.node_source.as_deref(), Some("dev-resource"));
     }
@@ -242,7 +284,10 @@ mod tests {
             resolved.helper_dir,
             Some(resources.join("playwright-bridge"))
         );
-        assert_eq!(resolved.node_path, Some(resources.join("node").join("node.exe")));
+        assert_eq!(
+            resolved.node_path,
+            Some(resources.join("node").join("node.exe"))
+        );
         assert_eq!(resolved.node_source.as_deref(), Some("bundled-resource"));
     }
 
@@ -250,7 +295,12 @@ mod tests {
     fn resolves_portable_bundle_layout_paths() {
         let root = temp_dir("portable-layout");
         let resources = root.join("portable");
-        touch(&resources.join("resources").join("playwright-bridge").join("index.mjs"));
+        touch(
+            &resources
+                .join("resources")
+                .join("playwright-bridge")
+                .join("index.mjs"),
+        );
         touch(&resources.join("resources").join("node").join("node.exe"));
 
         let resolved = resolve_runtime_paths(Some(&resources), &root);
@@ -270,7 +320,13 @@ mod tests {
         let root = temp_dir("helper-path");
         let resources = root.join("bundle");
         touch(&resources.join("playwright-bridge").join("index.mjs"));
-        touch(&root.join("src-tauri").join("resources").join("playwright-bridge").join("index.mjs"));
+        touch(
+            &root
+                .join("src-tauri")
+                .join("resources")
+                .join("playwright-bridge")
+                .join("index.mjs"),
+        );
 
         assert_eq!(
             resolve_helper_dir_from(Some(&resources), &root),
@@ -288,7 +344,10 @@ mod tests {
             vec![
                 resources.join("node").join("node.exe"),
                 resources.join("resources").join("node").join("node.exe"),
-                root.join("src-tauri").join("resources").join("node").join("node.exe"),
+                root.join("src-tauri")
+                    .join("resources")
+                    .join("node")
+                    .join("node.exe"),
             ]
         );
     }
@@ -300,8 +359,17 @@ mod tests {
         let diagnostics = build_runtime_diagnostics(None, &root, &app_data, false);
 
         assert!(!diagnostics.single_runner_ready);
-        assert!(diagnostics.issues.iter().any(|issue| issue.contains("playwright bridge")));
-        assert!(diagnostics.issues.iter().any(|issue| issue.contains("node.exe")));
-        assert!(diagnostics.issues.iter().any(|issue| issue.contains("Microsoft Edge")));
+        assert!(diagnostics
+            .issues
+            .iter()
+            .any(|issue| issue.contains("playwright bridge")));
+        assert!(diagnostics
+            .issues
+            .iter()
+            .any(|issue| issue.contains("node.exe")));
+        assert!(diagnostics
+            .issues
+            .iter()
+            .any(|issue| issue.contains("Microsoft Edge")));
     }
 }

@@ -24,7 +24,7 @@
     "security": {
       "csp": {
         "default-src": "'self' customprotocol: asset:",
-        "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:*",
+        "connect-src": "ipc: http://ipc.localhost http://127.0.0.1:3100 http://localhost:3100",
         "font-src": "'self'",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
         "style-src": "'unsafe-inline' 'self'"

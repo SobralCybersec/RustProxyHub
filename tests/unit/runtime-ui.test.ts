@@ -18,9 +18,6 @@ describe('runtime diagnostics ui', () => {
   it('shows degraded runtime details in the header', () => {
     const overview = makeOverview({
       runtime: {
-        node_path: null,
-        node_source: null,
-        helper_dir: 'C:/bundle/resources/playwright-bridge',
         edge_available: false,
         single_runner_ready: false,
         issues: [
@@ -35,7 +32,7 @@ describe('runtime diagnostics ui', () => {
       global: { plugins: [pinia] },
     })
 
-    expect(wrapper.text()).toContain('single-runner preflight blocked')
+    expect(wrapper.text()).toContain('preflight do single-runner bloqueado')
     expect(wrapper.text()).toContain('Bundled node.exe not found in Tauri resources.')
     expect(wrapper.text()).toContain('Microsoft Edge not found. Install Edge to run browser-backed providers.')
     expect(wrapper.text()).toContain('"startup_mode": "manual"')
@@ -45,9 +42,6 @@ describe('runtime diagnostics ui', () => {
     const store = useStore()
     store.overview = makeOverview({
       runtime: {
-        node_path: null,
-        node_source: null,
-        helper_dir: 'C:/bundle/resources/playwright-bridge',
         edge_available: true,
         single_runner_ready: false,
         issues: ['Bundled node.exe not found in Tauri resources.'],
@@ -62,7 +56,7 @@ describe('runtime diagnostics ui', () => {
     expect(wrapper.get('input[list="hub-model-options"]').element).toHaveProperty('disabled', true)
     expect(wrapper.get('input[type="checkbox"]').element).toHaveProperty('disabled', true)
     expect(wrapper.get('textarea').element).toHaveProperty('disabled', true)
-    const runButton = wrapper.findAll('button').find(button => button.text().includes('run live probe'))
+    const runButton = wrapper.findAll('button').find(button => button.text().includes('rodar probe live'))
     expect(runButton).toBeTruthy()
     expect(runButton!.element).toHaveProperty('disabled', true)
   })
@@ -86,8 +80,8 @@ describe('runtime diagnostics ui', () => {
     })
 
     expect(wrapper.text()).toContain('pilot@example.com')
-    expect(wrapper.text()).toContain('profile open')
-    expect(wrapper.text()).toContain('open profile')
-    expect(wrapper.text()).toContain('remove')
+    expect(wrapper.text()).toContain('perfil aberto')
+    expect(wrapper.text()).toContain('abrir perfil')
+    expect(wrapper.text()).toContain('remover')
   })
 })

@@ -1,14 +1,15 @@
-import { invoke } from '@tauri-apps/api/core'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import * as mockBackend from '@/lib/mock-backend'
 import { providerOrder, useStore } from '@/store'
 import { makeOverview } from './factories'
 
-vi.mock('@tauri-apps/api/core', () => ({
+vi.mock('@/lib/mock-backend', () => ({
   invoke: vi.fn(),
+  providerOrder: ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai'],
 }))
 
-const mockedInvoke = vi.mocked(invoke)
+const mockedInvoke = vi.mocked(mockBackend.invoke)
 
 describe('store runtime flow', () => {
   beforeEach(() => {
@@ -30,7 +31,7 @@ describe('store runtime flow', () => {
   it('keeps browser provider ordering and default browser prefs', () => {
     const store = useStore()
 
-    expect(providerOrder).toEqual(['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral'])
+    expect(providerOrder).toEqual(['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai'])
     expect(store.browserPrefs).toEqual({
       qwen: 'msedge',
       deepseek: 'msedge',
@@ -38,6 +39,7 @@ describe('store runtime flow', () => {
       chatgpt: 'msedge',
       gemini: 'msedge',
       mistral: 'msedge',
+      zai: 'msedge',
     })
   })
 
@@ -45,9 +47,6 @@ describe('store runtime flow', () => {
     const store = useStore()
     store.overview = makeOverview({
       runtime: {
-        node_path: null,
-        node_source: null,
-        helper_dir: 'C:/bundle/resources/playwright-bridge',
         edge_available: true,
         single_runner_ready: false,
         issues: ['Bundled node.exe not found in Tauri resources.'],
@@ -64,7 +63,6 @@ describe('store runtime flow', () => {
     const store = useStore()
     store.overview = makeOverview()
     store.qwenEmail = 'pilot@example.com'
-    store.qwenPassword = 'secret'
 
     mockedInvoke.mockImplementation(async (command) => {
       if (command === 'add_qwen_account') {
@@ -85,7 +83,7 @@ describe('store runtime flow', () => {
       throw new Error(`unexpected invoke: ${String(command)}`)
     })
 
-    await store.addQwenAccount()
+    await store.addQwenAccount('secret')
 
     expect(mockedInvoke).toHaveBeenCalledWith('add_qwen_account', {
       request: {
@@ -96,6 +94,5 @@ describe('store runtime flow', () => {
     expect(store.qwenAccounts).toHaveLength(1)
     expect(store.overview?.qwen_account_count).toBe(1)
     expect(store.qwenEmail).toBe('')
-    expect(store.qwenPassword).toBe('')
   })
 })

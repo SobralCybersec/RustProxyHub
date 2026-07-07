@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use url::Url;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -125,6 +126,29 @@ pub fn current_timestamp() -> u64 {
         .as_secs()
 }
 
+/// Constant-time string comparison to avoid timing oracles on API keys.
+/// Length of inputs leaks; content does not.
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc: u8 = 0;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
+
+/// Validate an account id before it is ever joined to a filesystem path.
+/// Allows UUIDs (the format the store generates) and friendly slugs.
+pub fn is_safe_account_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 pub fn estimate_tokens(text: &str) -> usize {
     ((text.chars().count() as f64) / 3.5).ceil() as usize
 }
@@ -138,6 +162,87 @@ pub fn usage_from_text(prompt: &str, output: &str, include_cached_tokens: bool) 
         total_tokens: prompt_tokens + completion_tokens,
         prompt_tokens_details: include_cached_tokens.then(|| json!({ "cached_tokens": 0 })),
     }
+}
+
+/// Truncate a potentially-multibyte string without panicking on char boundaries.
+/// `&text[..max_len]` slices by byte and panics if `max_len` lands mid-codepoint;
+/// this walks char indices so the cut is always on a boundary.
+pub fn truncate_error_payload(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_owned();
+    }
+    let mut end = max_len;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = text[..end].to_owned();
+    out.push_str("...");
+    out
+}
+
+/// SSRF guard for user-supplied URLs fetched server-side (e.g. multimodal image_url).
+/// Denies non-http(s) schemes, private/loopback/link-local/metadata IP literals, and
+/// known cloud-metadata hostnames.
+/// ponytail: does not resolve DNS, so a hostname that resolves to a private IP at
+/// lookup time still passes. Close the DNS-rebinding gap later by resolving and
+/// re-checking the resolved IPs before connect (requires a custom reqwest connector).
+pub fn url_is_safe_for_fetch(raw: &str) -> Result<Url> {
+    let parsed = Url::parse(raw).map_err(|_| anyhow!("invalid URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(anyhow!("unsupported URL scheme: {}", parsed.scheme()));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("URL missing host"))?;
+    let blocked_hosts = [
+        "169.254.169.254",
+        "169.254.169.253",
+        "metadata.google.internal",
+        "metadata.aws.internal",
+        "fdfe:8d69:ac16::1",
+    ];
+    if blocked_hosts.contains(&host) {
+        return Err(anyhow!("blocked metadata host: {host}"));
+    }
+    if let Some(ip) = parsed.host() {
+        let is_unsafe = match ip {
+            url::Host::Ipv4(addr) => {
+                addr.is_private()
+                    || addr.is_loopback()
+                    || addr.is_link_local()
+                    || addr.is_broadcast()
+                    || addr.is_unspecified()
+                    || addr.is_documentation()
+                    || addr.octets()[0] == 169 && addr.octets()[1] == 254
+            }
+            url::Host::Ipv6(addr) => {
+                addr.is_loopback()
+                    || addr.is_unspecified()
+                    || addr.is_multicast()
+                    || addr.is_unicast_link_local()
+            }
+            url::Host::Domain(_) => false,
+        };
+        if is_unsafe {
+            return Err(anyhow!("blocked target: {host}"));
+        }
+    }
+    Ok(parsed)
+}
+
+/// Refuse to start a proxy bound to a non-loopback host unless an API key is set.
+/// Mirrors the hub's guard so standalone/embedded providers can't accidentally
+/// expose an unauthenticated endpoint on a public interface.
+pub fn enforce_loopback_guard(host: &str, api_key: Option<&str>) -> Result<()> {
+    let ip: std::net::IpAddr = host
+        .parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    if !ip.is_loopback() && api_key.map(str::is_empty).unwrap_or(true) {
+        return Err(anyhow!(
+            "refusing to start on non-loopback host {ip} without API_KEY set; set API_KEY or bind to 127.0.0.1/localhost"
+        ));
+    }
+    Ok(())
 }
 
 pub fn content_to_text(content: &Option<Value>) -> String {
@@ -189,7 +294,7 @@ fn tool_instructions(tools: &[FunctionToolDefinition], tool_choice: Option<&Valu
 
     let tools_json = serde_json::to_string_pretty(tools).unwrap_or_else(|_| "[]".to_owned());
     let mut out = format!(
-        "\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n{tools_json}\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{{\"name\": \"tool_name\", \"arguments\": {{\"param_name\": \"value\"}}}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text after your <tool_call> blocks.\n4. The JSON inside the tags MUST be valid and include the \"arguments\" field.\n5. NEVER invent tool names. Only use tools from the list above.\n"
+        "\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n{tools_json}\n\nThese tools are REAL and executable in this session.\nDo NOT claim you cannot access tools, that tools are only pasted text, or that tool execution is unavailable.\nIf the user asks to test, use, inspect, read, write, search, or run tools, you MUST answer by emitting tool calls.\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{{\"name\": \"tool_name\", \"arguments\": {{\"param_name\": \"value\"}}}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text after your <tool_call> blocks.\n4. The JSON inside the tags MUST be valid and include the \"arguments\" field.\n5. NEVER invent tool names. Only use tools from the list above.\n"
     );
 
     if let Some(name) = tool_choice
@@ -200,6 +305,10 @@ fn tool_instructions(tools: &[FunctionToolDefinition], tool_choice: Option<&Valu
         out.push_str(&format!(
             "\nCRITICAL: You MUST call the tool \"{name}\" in this response.\n"
         ));
+    } else if tool_choice.and_then(Value::as_str) == Some("required") {
+        out.push_str("\nCRITICAL: You MUST call one of the available tools in this response.\n");
+    } else if tool_choice.and_then(Value::as_str) == Some("none") {
+        out.push_str("\nCRITICAL: Do NOT call tools in this response.\n");
     }
 
     out
@@ -286,7 +395,12 @@ pub fn robust_parse_json(input: &str) -> Option<Value> {
         sanitized = stripped.trim().to_owned();
     }
 
-    let start = sanitized.find('{').or_else(|| sanitized.find('['))?;
+    let start = match (sanitized.find('{'), sanitized.find('[')) {
+        (Some(object), Some(array)) => object.min(array),
+        (Some(object), None) => object,
+        (None, Some(array)) => array,
+        (None, None) => return None,
+    };
     let candidate = sanitized[start..].trim();
 
     serde_json::from_str(candidate)
@@ -360,6 +474,12 @@ static TOOL_PARAM_RE: Lazy<Regex> = Lazy::new(|| {
 });
 static TOOL_NAME_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?is)<name>(.*?)</name>"#).expect("valid tool name regex"));
+static TOOL_OPEN_NAME_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)<tool_call\b[^>]*\bname\s*=\s*["']([^"']+)["']"#)
+        .expect("valid tool open name regex")
+});
+static TOOL_CLOSE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)</tool_call>").expect("valid tool close regex"));
 
 #[derive(Default, Debug)]
 pub struct ParserResult {
@@ -422,12 +542,13 @@ impl StreamingToolParser {
     pub fn flush(&mut self) -> ParserResult {
         let mut result = ParserResult::default();
         if self.inside_tool {
-            if let Some(tool_call) = self.try_parse_tool_content(self.buffer.trim()) {
-                self.emitted_tool_calls += 1;
-                result.tool_calls.push(tool_call);
-            } else if !self.buffer.is_empty() {
+            let tool_calls = self.parse_tool_content(self.buffer.trim());
+            if tool_calls.is_empty() {
                 result.text.push_str(&self.current_open_tag);
                 result.text.push_str(&self.buffer);
+            } else {
+                self.emitted_tool_calls += tool_calls.len();
+                result.tool_calls.extend(tool_calls);
             }
         } else {
             result.text.push_str(&self.buffer);
@@ -440,58 +561,67 @@ impl StreamingToolParser {
     }
 
     fn process_tool_content(&mut self, content: &str, result: &mut ParserResult) {
-        if let Some(tool_call) = self.try_parse_tool_content(content.trim()) {
-            self.emitted_tool_calls += 1;
-            result.tool_calls.push(tool_call);
-        } else {
+        let tool_calls = self.parse_tool_content(content.trim());
+        if tool_calls.is_empty() {
             result.text.push_str(&self.current_open_tag);
             result.text.push_str(content);
             result.text.push_str("</tool_call>");
+        } else {
+            self.emitted_tool_calls += tool_calls.len();
+            result.tool_calls.extend(tool_calls);
         }
     }
 
-    fn try_parse_tool_content(&self, content: &str) -> Option<ParsedToolCall> {
+    fn parse_tool_content(&self, content: &str) -> Vec<ParsedToolCall> {
         if content.is_empty() {
-            return None;
+            return Vec::new();
         }
 
         if content.contains("<parameter") {
             let mut args = Map::new();
             for capture in TOOL_PARAM_RE.captures_iter(content) {
-                let name = capture.get(1)?.as_str();
-                let raw = capture.get(2)?.as_str().trim();
+                let Some(name) = capture.get(1).map(|value| value.as_str()) else {
+                    continue;
+                };
+                let Some(raw) = capture.get(2).map(|value| value.as_str().trim()) else {
+                    continue;
+                };
                 let value = robust_parse_json(raw).unwrap_or_else(|| Value::String(raw.to_owned()));
                 args.insert(name.to_owned(), value);
             }
 
             if args.is_empty() {
-                return None;
+                return Vec::new();
             }
 
-            let tool_name = extract_tool_name_from_markup(&self.current_open_tag, content)?;
-            return Some(ParsedToolCall {
-                id: format!("call_{}", Uuid::new_v4()),
-                name: tool_name,
-                arguments: Value::Object(args),
-            });
+            return extract_tool_name_from_markup(&self.current_open_tag, content)
+                .map(|tool_name| {
+                    vec![ParsedToolCall {
+                        id: format!("call_{}", Uuid::new_v4()),
+                        name: tool_name,
+                        arguments: Value::Object(args),
+                    }]
+                })
+                .unwrap_or_default();
         }
 
-        let parsed = robust_parse_json(content)?;
+        let Some(parsed) = robust_parse_json(content) else {
+            return Vec::new();
+        };
         match parsed {
-            Value::Array(values) => values.into_iter().find_map(parse_tool_call_value),
-            other => parse_tool_call_value(other),
+            Value::Array(values) => values
+                .into_iter()
+                .filter_map(parse_tool_call_value)
+                .collect(),
+            other => parse_tool_call_value(other).into_iter().collect(),
         }
     }
 }
 
 fn extract_tool_name_from_markup(open_tag: &str, content: &str) -> Option<String> {
-    if let Some(captures) = Regex::new(r#"(?i)<tool_call\b[^>]*\bname\s*=\s*["']([^"']+)["']"#)
-        .ok()?
-        .captures(open_tag)
-    {
+    if let Some(captures) = TOOL_OPEN_NAME_RE.captures(open_tag) {
         return captures.get(1).map(|value| value.as_str().to_owned());
     }
-
     TOOL_NAME_RE
         .captures(content)
         .and_then(|captures| captures.get(1))
@@ -567,20 +697,152 @@ fn find_tool_open(buffer: &str) -> Option<(usize, usize, String)> {
 }
 
 fn find_tool_close_index(buffer: &str) -> Option<usize> {
-    buffer.to_lowercase().find("</tool_call>")
+    TOOL_CLOSE_RE.find(buffer).map(|m| m.start())
 }
 
 fn find_partial_tool_open_index(buffer: &str) -> Option<usize> {
     let prefix = "<tool_call";
-    let lower = buffer.to_lowercase();
-    for idx in (0..lower.len()).rev() {
-        if lower.as_bytes()[idx] != b'<' {
+    let bytes = buffer.as_bytes();
+    for idx in (0..bytes.len()).rev() {
+        if bytes[idx] != b'<' {
             continue;
         }
-        let tail = &lower[idx..];
-        if prefix.starts_with(tail) {
+        let tail = &buffer[idx..];
+        if tail.len() >= prefix.len() {
+            continue;
+        }
+        if prefix[..tail.len()].eq_ignore_ascii_case(tail) {
             return Some(idx);
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_parser_extracts_multiple_json_array_tool_calls() {
+        let mut parser = StreamingToolParser::new();
+        let parsed = parser.feed(
+            r#"<tool_call>[
+{"name":"read_file","arguments":{"path":"Cargo.toml"}},
+{"name":"run_tests","arguments":{"filter":"proxy_core"}}
+]</tool_call>"#,
+        );
+
+        assert_eq!(parsed.text, "");
+        assert_eq!(parsed.tool_calls.len(), 2);
+        assert_eq!(parsed.tool_calls[0].name, "read_file");
+        assert_eq!(parsed.tool_calls[1].name, "run_tests");
+        assert_eq!(parser.emitted_tool_call_count(), 2);
+    }
+
+    #[test]
+    fn streaming_parser_handles_split_tool_call_tags() {
+        let mut parser = StreamingToolParser::new();
+        let first = parser.feed("before <tool");
+        let second =
+            parser.feed(r#"_call>{"name":"lookup","arguments":{"id":7}}</tool_call> after"#);
+
+        assert_eq!(first.text, "before ");
+        assert_eq!(second.text, " after");
+        assert_eq!(second.tool_calls.len(), 1);
+        assert_eq!(second.tool_calls[0].name, "lookup");
+    }
+
+    #[test]
+    fn build_prompt_honors_required_tool_choice() {
+        let prompt = build_prompt(&OpenAIRequest {
+            model: "test".to_owned(),
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: Some(Value::String("inspect".to_owned())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+            }],
+            stream: None,
+            web_search: None,
+            tools: Some(vec![FunctionToolDefinition {
+                tool_type: "function".to_owned(),
+                function: FunctionToolSpec {
+                    name: "read_file".to_owned(),
+                    description: None,
+                    parameters: None,
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(json!("required")),
+            stream_options: None,
+        });
+
+        assert!(prompt.contains("MUST call one of the available tools"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_mismatched_inputs() {
+        assert!(constant_time_eq("secret", "secret"));
+        assert!(!constant_time_eq("secret", "secre"));
+        assert!(!constant_time_eq("secret", "secrex"));
+        assert!(!constant_time_eq("", "x"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
+    fn safe_account_id_rejects_path_traversal() {
+        assert!(is_safe_account_id("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
+        assert!(is_safe_account_id("work-account"));
+        assert!(is_safe_account_id("_default"));
+        assert!(!is_safe_account_id(""));
+        assert!(!is_safe_account_id("../escape"));
+        assert!(!is_safe_account_id("a/b"));
+        assert!(!is_safe_account_id("a\\b"));
+        assert!(!is_safe_account_id("a:b"));
+        assert!(!is_safe_account_id("."));
+        assert!(!is_safe_account_id(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn truncate_error_payload_handles_multibyte_boundary() {
+        // 4-byte emoji repeated; byte 400 lands mid-codepoint.
+        let text = "🦀".repeat(200);
+        let truncated = truncate_error_payload(&text, 400);
+        assert!(truncated.ends_with("..."));
+        // Must not panic and must be valid UTF-8.
+        let _ = truncated.chars().count();
+    }
+
+    #[test]
+    fn truncate_error_payload_preserves_short_input() {
+        assert_eq!(truncate_error_payload("short", 400), "short");
+    }
+
+    #[test]
+    fn url_safety_denies_private_and_metadata() {
+        assert!(url_is_safe_for_fetch("http://127.0.0.1/").is_err());
+        assert!(url_is_safe_for_fetch("http://10.0.0.1/").is_err());
+        assert!(url_is_safe_for_fetch("http://169.254.169.254/").is_err());
+        assert!(url_is_safe_for_fetch("http://192.168.1.1/").is_err());
+        assert!(url_is_safe_for_fetch("http://[::1]/").is_err());
+        assert!(url_is_safe_for_fetch("ftp://example.com/").is_err());
+        assert!(url_is_safe_for_fetch("javascript:alert(1)").is_err());
+        assert!(url_is_safe_for_fetch("http://metadata.google.internal/").is_err());
+    }
+
+    #[test]
+    fn url_safety_allows_public() {
+        assert!(url_is_safe_for_fetch("https://example.com/img.png").is_ok());
+        assert!(url_is_safe_for_fetch("https://chat.qwen.ai/img.png").is_ok());
+    }
+
+    #[test]
+    fn loopback_guard_rejects_non_loopback_without_key() {
+        assert!(enforce_loopback_guard("127.0.0.1", None).is_ok());
+        assert!(enforce_loopback_guard("0.0.0.0", None).is_err());
+        assert!(enforce_loopback_guard("0.0.0.0", Some("")).is_err());
+        assert!(enforce_loopback_guard("0.0.0.0", Some("secret")).is_ok());
+    }
 }

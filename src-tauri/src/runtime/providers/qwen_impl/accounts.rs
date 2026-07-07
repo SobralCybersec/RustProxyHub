@@ -13,6 +13,10 @@ use rusqlite::OptionalExtension;
 pub struct QwenAccount {
     pub id: String,
     pub email: String,
+    // ponytail: stored plaintext in the local app-data sqlite; encrypting the column
+    // would need an OS keychain dependency. We at least never serialize it to JSON
+    // so it cannot leak via IPC or admin/status responses.
+    #[serde(skip_serializing)]
     pub password: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
@@ -76,9 +80,25 @@ impl AccountStore {
             }
         }
 
+        // ponytail: passwords are plaintext in sqlite; lock the file to 0600 so
+        // other local users can't read it. Full fix: encrypt the column with an
+        // OS-keychain-backed key (add `keyring` crate when ready).
+        #[cfg(unix)]
+        Self::enforce_db_perms(&db_path);
+
         let store = Self { db_path };
         store.initialize(legacy_json_candidates)?;
         Ok(store)
+    }
+
+    #[cfg(unix)]
+    fn enforce_db_perms(db_path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(db_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = fs::set_permissions(db_path, perms);
+        }
     }
 
     fn open(&self) -> Result<Connection> {
@@ -88,6 +108,9 @@ impl AccountStore {
         connection.pragma_update(None, "busy_timeout", 5000)?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
+        // Re-assert 0600 on every open in case SQLite recreated the file via WAL.
+        #[cfg(unix)]
+        Self::enforce_db_perms(&self.db_path);
         Ok(connection)
     }
 

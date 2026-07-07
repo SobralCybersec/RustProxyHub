@@ -98,14 +98,12 @@ impl Watchdog {
                 metrics
                     .gauge(
                         "memory.heap.used",
-                        system.used_memory().saturating_mul(1024) as f64,
+                        // sysinfo 0.30+ returns bytes; the prior *1024 inflated 1024x.
+                        system.used_memory() as f64,
                     )
                     .await;
                 metrics
-                    .gauge(
-                        "memory.heap.total",
-                        system.total_memory().saturating_mul(1024) as f64,
-                    )
+                    .gauge("memory.heap.total", system.total_memory() as f64)
                     .await;
                 metrics
                     .gauge(

@@ -9,11 +9,12 @@ mod upload;
 mod watchdog;
 
 use crate::browser_bridge::{
-    BrowserBridge, CaptureHeadersParams, CloseAccountParams, ManualLoginParams, PlaywrightBridge,
+    BrowserBridge, CaptureHeadersParams, CloseAccountParams, InitParams, ManualLoginParams,
+    PlaywrightBridge,
 };
 use crate::proxy_core::{
-    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
-    StreamingToolParser, ToolCallFunction,
+    build_prompt, constant_time_eq, current_timestamp, usage_from_text, MessageToolCall,
+    OpenAIRequest, StreamingToolParser, ToolCallFunction,
 };
 use anyhow::{anyhow, Result};
 use async_stream::stream;
@@ -254,7 +255,14 @@ async fn run_server(
 ) -> Result<()> {
     let state = AppState {
         bridge,
-        client: reqwest::Client::builder().build()?,
+        client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(config.chat_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .tcp_nodelay(true)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(16)
+            .build()?,
         config: config.clone(),
         accounts: runtime.accounts,
         account_manager: AccountManager::new(),
@@ -276,12 +284,14 @@ async fn run_server(
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/chat/completions/stop", post(chat_completions_stop))
         .route("/v1/upload", post(upload_file))
+        .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state);
 
     let host: IpAddr = config
         .host
         .parse()
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    crate::proxy_core::enforce_loopback_guard(&config.host, config.api_key.as_deref())?;
     let addr = SocketAddr::new(host, config.port);
     println!("proxy-hub qwen listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -467,6 +477,12 @@ async fn admin_manual_login(
         return *response;
     }
 
+    if let Some(ref account_id) = body.account_id {
+        if !crate::proxy_core::is_safe_account_id(account_id) {
+            return json_error(StatusCode::BAD_REQUEST, "invalid account_id".to_owned());
+        }
+    }
+
     match state
         .bridge
         .manual_login(ManualLoginParams {
@@ -477,7 +493,7 @@ async fn admin_manual_login(
         .await
     {
         Ok(()) => Json(json!({ "ok": true, "provider": "qwen" })).into_response(),
-        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => bad_gateway_error(err),
     }
 }
 
@@ -493,9 +509,12 @@ async fn admin_close_login(
     let Some(account_id) = body.account_id else {
         return match state.bridge.shutdown().await {
             Ok(()) => Json(json!({ "ok": true, "provider": "qwen" })).into_response(),
-            Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            Err(err) => bad_gateway_error(err),
         };
     };
+    if !crate::proxy_core::is_safe_account_id(&account_id) {
+        return json_error(StatusCode::BAD_REQUEST, "invalid account_id".to_owned());
+    }
 
     match state
         .bridge
@@ -503,7 +522,7 @@ async fn admin_close_login(
         .await
     {
         Ok(()) => Json(json!({ "ok": true, "provider": "qwen" })).into_response(),
-        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => bad_gateway_error(err),
     }
 }
 
@@ -625,12 +644,18 @@ async fn chat_completions(
 
     state.metrics.increment("requests.total", 1.0).await;
     let started = std::time::Instant::now();
+    if let Err(err) = ensure_headless_ready(&state).await {
+        state.metrics.increment("requests.errors", 1.0).await;
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
 
     let response = match handle_chat(state.clone(), body).await {
         Ok(response) => response,
         Err(err) => {
             state.metrics.increment("requests.errors", 1.0).await;
-            json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+            // ponytail: other error sites (admin/models/upload) still call json_error
+            // with err.to_string(); migrate them to bad_gateway_error in the DRY pass.
+            bad_gateway_error(err)
         }
     };
 
@@ -720,6 +745,17 @@ async fn fetch_models(state: &AppState) -> Result<Value> {
         )
         .await;
     Ok(payload)
+}
+
+async fn ensure_headless_ready(state: &AppState) -> Result<()> {
+    state
+        .bridge
+        .init(InitParams {
+            runtime_dir: state.config.runtime_dir.to_string_lossy().to_string(),
+            headless: state.config.headless,
+            browser: state.config.browser.clone(),
+        })
+        .await
 }
 
 async fn fallback_models_payload(state: &AppState, warning: String) -> Value {
@@ -1591,7 +1627,7 @@ async fn collect_qwen_events(
         return Ok(Vec::new());
     }
 
-    let Some(content) = delta.get("content").and_then(Value::as_str) else {
+    let Some(content) = extract_qwen_delta_text(delta.get("content")) else {
         return Ok(Vec::new());
     };
 
@@ -1619,6 +1655,55 @@ async fn collect_qwen_events(
     }
 
     Ok(vec![QwenEvent::Text(incremental)])
+}
+
+fn extract_qwen_delta_text(value: Option<&Value>) -> Option<String> {
+    extract_qwen_delta_text_depth(value, 0)
+}
+
+fn extract_qwen_delta_text_depth(value: Option<&Value>, depth: usize) -> Option<String> {
+    // ponytail: cap recursion at 64 to block stack-overflow via pathological upstream JSON.
+    const MAX_DEPTH: usize = 64;
+    let value = value?;
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter_map(|item| extract_qwen_delta_text_depth(Some(item), depth + 1))
+                .collect::<Vec<_>>()
+                .join("");
+            (!text.is_empty()).then_some(text)
+        }
+        Value::Object(map) => {
+            if depth >= MAX_DEPTH {
+                return None;
+            }
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                return Some(text.to_owned());
+            }
+            if let Some(text) = map.get("content").and_then(Value::as_str) {
+                return Some(text.to_owned());
+            }
+            if let Some(text) = map.get("value").and_then(Value::as_str) {
+                return Some(text.to_owned());
+            }
+            if let Some(text) = map
+                .get("answer")
+                .and_then(|answer| extract_qwen_delta_text_depth(Some(answer), depth + 1))
+            {
+                return Some(text);
+            }
+            if let Some(text) = map
+                .get("parts")
+                .and_then(|parts| extract_qwen_delta_text_depth(Some(parts), depth + 1))
+            {
+                return Some(text);
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn tool_call_from_parsed(parsed: crate::proxy_core::ParsedToolCall) -> MessageToolCall {
@@ -1701,11 +1786,7 @@ fn extract_qwen_api_error(body: &Value) -> Option<String> {
 }
 
 fn truncate_error_payload(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        text.to_owned()
-    } else {
-        format!("{}...", &text[..max_len])
-    }
+    crate::proxy_core::truncate_error_payload(text, max_len)
 }
 
 fn normalize_request(request: &OpenAIRequest) -> (OpenAIRequest, Vec<MediaUploadInput>) {
@@ -1831,18 +1912,28 @@ fn require_api_key(headers: &HeaderMap, api_key: Option<&str>) -> Result<(), Box
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if provided == Some(api_key) {
-        Ok(())
-    } else {
-        Err(Box::new(json_error(
+    match provided {
+        Some(provided) if constant_time_eq(provided, api_key) => Ok(()),
+        _ => Err(Box::new(json_error(
             StatusCode::UNAUTHORIZED,
             "Missing or invalid Authorization header".to_owned(),
-        )))
+        ))),
     }
 }
 
 fn json_error(status: StatusCode, message: String) -> Response {
     (status, Json(json!({ "error": { "message": message } }))).into_response()
+}
+
+/// Map an upstream/internal error to a generic 502 with an opaque id; log the real
+/// cause server-side so upstream bodies / header fragments never reach the client.
+fn bad_gateway_error(err: impl std::fmt::Display) -> Response {
+    let id = Uuid::new_v4();
+    eprintln!("[qwen] upstream error {id}: {err}");
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        format!("upstream provider error (id={id})"),
+    )
 }
 
 fn sse_json(value: Value) -> Bytes {
@@ -1966,9 +2057,10 @@ mod tests {
         })
         .to_string();
 
-        let events = collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
-            .await
-            .unwrap();
+        let events =
+            collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+                .await
+                .unwrap();
 
         assert!(matches!(
             events.as_slice(),
@@ -1997,9 +2089,10 @@ mod tests {
         })
         .to_string();
 
-        let events = collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
-            .await
-            .unwrap();
+        let events =
+            collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+                .await
+                .unwrap();
 
         assert!(matches!(
             events.as_slice(),
@@ -2007,5 +2100,69 @@ mod tests {
         ));
         assert_eq!(state.reasoning, "first thought");
         assert!(state.last_full_content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parses_answer_content_array_shape() {
+        let registry = StreamRegistry::new();
+        let mut state = QwenParseState::default();
+        let mut parser = None;
+        let data = json!({
+            "response_id": "resp-1",
+            "choices": [{
+                "delta": {
+                    "content": [
+                        { "type": "text", "text": "visible " },
+                        { "type": "text", "content": "answer" }
+                    ]
+                }
+            }]
+        })
+        .to_string();
+
+        let events =
+            collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+                .await
+                .unwrap();
+
+        assert!(matches!(
+            events.as_slice(),
+            [QwenEvent::Text(text)] if text == "visible answer"
+        ));
+        assert_eq!(state.last_full_content, "visible answer");
+    }
+
+    #[tokio::test]
+    async fn parses_nested_answer_content_object() {
+        let registry = StreamRegistry::new();
+        let mut state = QwenParseState::default();
+        let mut parser = None;
+        let data = json!({
+            "response_id": "resp-1",
+            "choices": [{
+                "delta": {
+                    "content": {
+                        "answer": {
+                            "parts": [
+                                { "text": "nested " },
+                                { "value": "answer" }
+                            ]
+                        }
+                    }
+                }
+            }]
+        })
+        .to_string();
+
+        let events =
+            collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+                .await
+                .unwrap();
+
+        assert!(matches!(
+            events.as_slice(),
+            [QwenEvent::Text(text)] if text == "nested answer"
+        ));
+        assert_eq!(state.last_full_content, "nested answer");
     }
 }

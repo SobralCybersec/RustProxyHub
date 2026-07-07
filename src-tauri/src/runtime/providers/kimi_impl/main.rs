@@ -2,8 +2,8 @@ use crate::browser_bridge::{
     BrowserBridge, CaptureHeadersParams, InitParams, ManualLoginParams, PlaywrightBridge,
 };
 use crate::proxy_core::{
-    build_prompt, current_timestamp, usage_from_text, MessageToolCall, OpenAIRequest,
-    StreamingToolParser, ToolCallFunction,
+    build_prompt, constant_time_eq, current_timestamp, usage_from_text, MessageToolCall,
+    OpenAIRequest, StreamingToolParser, ToolCallFunction,
 };
 use anyhow::{anyhow, Result};
 use async_stream::stream;
@@ -28,7 +28,6 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 #[cfg(feature = "standalone-provider-cli")]
@@ -36,6 +35,13 @@ use crate::browser_bridge::helper_dir_from;
 #[cfg(feature = "standalone-provider-cli")]
 use clap::{Parser, Subcommand};
 
+static PAUSE_MESSAGE_RES: Lazy<[Regex; 3]> = Lazy::new(|| {
+    [
+        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume the task\."#).unwrap(),
+        Regex::new(r#"(?is)Esta tarefa foi pausada porque.*?retomar a tarefa\."#).unwrap(),
+        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume\."#).unwrap(),
+    ]
+});
 static PAUSE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
         Regex::new("(?i)maximum number of tool calls").unwrap(),
@@ -103,22 +109,23 @@ impl ConnectParser {
     fn feed(&mut self, chunk: &[u8]) -> Vec<Value> {
         self.buffer.extend_from_slice(chunk);
         let mut messages = Vec::new();
+        let mut offset = 0;
 
         loop {
-            if self.buffer.len() < 5 {
+            if self.buffer.len() - offset < 5 {
                 break;
             }
-            let flags = self.buffer[0];
-            let length = ((self.buffer[1] as usize) << 24)
-                | ((self.buffer[2] as usize) << 16)
-                | ((self.buffer[3] as usize) << 8)
-                | (self.buffer[4] as usize);
-            if self.buffer.len() < 5 + length {
+            let flags = self.buffer[offset];
+            let length = ((self.buffer[offset + 1] as usize) << 24)
+                | ((self.buffer[offset + 2] as usize) << 16)
+                | ((self.buffer[offset + 3] as usize) << 8)
+                | (self.buffer[offset + 4] as usize);
+            if self.buffer.len() - offset < 5 + length {
                 break;
             }
 
-            let payload = self.buffer[5..5 + length].to_vec();
-            self.buffer.drain(..5 + length);
+            let payload = self.buffer[offset + 5..offset + 5 + length].to_vec();
+            offset += 5 + length;
 
             if flags == 0x00 {
                 if let Ok(text) = String::from_utf8(payload) {
@@ -127,6 +134,10 @@ impl ConnectParser {
                     }
                 }
             }
+        }
+
+        if offset > 0 {
+            self.buffer.drain(..offset);
         }
 
         messages
@@ -183,7 +194,6 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
         .route("/admin/close_login", post(admin_close_login))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let host: IpAddr = config
@@ -327,7 +337,7 @@ async fn chat_completions(
 
     match handle_chat(state, body).await {
         Ok(response) => response,
-        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => bad_gateway_error(err),
     }
 }
 
@@ -989,18 +999,9 @@ fn is_paused_message(text: &str) -> bool {
 }
 
 fn clean_pause_message(text: &str) -> String {
-    let replacements = [
-        r#"(?is)This task paused because Kimi reached.*?resume the task\."#,
-        r#"(?is)Esta tarefa foi pausada porque.*?retomar a tarefa\."#,
-        r#"(?is)This task paused because Kimi reached.*?resume\."#,
-    ];
-
     let mut output = text.to_owned();
-    for replacement in replacements {
-        output = Regex::new(replacement)
-            .unwrap()
-            .replace_all(&output, "")
-            .to_string();
+    for re in PAUSE_MESSAGE_RES.iter() {
+        output = re.replace_all(&output, "").into_owned();
     }
     output.trim().to_owned()
 }
@@ -1013,18 +1014,28 @@ fn require_api_key(headers: &HeaderMap, api_key: Option<&str>) -> Result<(), Box
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if provided == Some(api_key) {
-        Ok(())
-    } else {
-        Err(Box::new(json_error(
+    match provided {
+        Some(provided) if constant_time_eq(provided, api_key) => Ok(()),
+        _ => Err(Box::new(json_error(
             StatusCode::UNAUTHORIZED,
             "Missing or invalid Authorization header".to_owned(),
-        )))
+        ))),
     }
 }
 
 fn json_error(status: StatusCode, message: String) -> Response {
     (status, Json(json!({ "error": { "message": message } }))).into_response()
+}
+
+/// Map an upstream/internal error to a generic 502 with an opaque id; log the real
+/// cause server-side so upstream bodies / header fragments never reach the client.
+fn bad_gateway_error(err: impl std::fmt::Display) -> Response {
+    let id = Uuid::new_v4();
+    eprintln!("[kimi] upstream error {id}: {err}");
+    json_error(
+        StatusCode::BAD_GATEWAY,
+        format!("upstream provider error (id={id})"),
+    )
 }
 
 fn sse_json(value: Value) -> Bytes {

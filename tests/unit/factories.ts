@@ -1,12 +1,9 @@
 import type { DashboardOverview, ProviderName, ProviderOverview, RuntimeDiagnostics } from '@/lib/types'
 
-const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral']
+const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai']
 
 function makeRuntime(overrides: Partial<RuntimeDiagnostics> = {}): RuntimeDiagnostics {
   return {
-    node_path: 'C:/bundle/resources/node/node.exe',
-    node_source: 'bundled-resource',
-    helper_dir: 'C:/bundle/resources/playwright-bridge',
     edge_available: true,
     single_runner_ready: true,
     issues: [],
@@ -15,11 +12,20 @@ function makeRuntime(overrides: Partial<RuntimeDiagnostics> = {}): RuntimeDiagno
 }
 
 function makeProvider(name: ProviderName, overrides: Partial<ProviderOverview> = {}): ProviderOverview {
+  const portByProvider: Record<ProviderName, number> = {
+    qwen: 3000,
+    deepseek: 3001,
+    kimi: 3002,
+    chatgpt: 3003,
+    gemini: 3004,
+    mistral: 3005,
+    zai: 3006,
+  }
   return {
     name,
     running: true,
     started_at: 1_717_171_717,
-    base_url: `http://127.0.0.1:${name === 'qwen' ? '3000' : '3001'}`,
+    base_url: `http://127.0.0.1:${portByProvider[name]}`,
     health_status: 'healthy',
     login_state: 'ready',
     model_count: 1,
@@ -36,8 +42,6 @@ export function makeOverview(overrides: Partial<DashboardOverview> = {}): Dashbo
 
   return {
     generated_at: 1_717_171_717,
-    app_data_dir: 'C:/Users/test/AppData/Local/RustProxyHub',
-    helper_dir: runtime.helper_dir ?? 'C:/bundle/resources/playwright-bridge',
     runtime,
     startup_config: {
       mode: 'manual',

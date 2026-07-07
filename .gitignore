@@ -30,3 +30,31 @@ dist-ssr
 LOCAL_NOTES.md
 .env
 target/
+.vscode/
+
+# Build artifacts
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+*.obj
+*.exe
+*.tmp
+*.swp
+*.swo
+*.orig
+*.rs.bk
+
+# Rust
+src-tauri/target/
+Cargo.lock
+
+# Dead duplicate frontend tree
+*.zip
+src/test/
+
