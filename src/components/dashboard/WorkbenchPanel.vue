@@ -1,396 +1,714 @@
 <script setup lang="ts">
-import { storeToRefs } from 'pinia'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import Chart from 'chart.js/auto'
+import { HugeiconsIcon } from '@hugeicons/vue'
+import {
+  ChartLineData01Icon,
+  CodeCircleIcon,
+  CommandLineIcon,
+  CpuIcon,
+  Database02Icon,
+  DashboardSpeed02Icon,
+  PlayIcon,
+  PulseIcon,
+} from '@hugeicons/core-free-icons'
+import { computed, nextTick, ref, watch } from 'vue'
+import SparkChart from '@/components/dashboard/SparkChart.vue'
+import { burstFromElement, playTone } from '@/effects'
+import { messageAt } from '@/lib/ui-i18n'
 import { useStore } from '@/store'
 
 const store = useStore()
-const { hubModelOptions, overview } = storeToRefs(store)
-type Provider = {
-  name?: string
-  model_count?: number
-  models?: unknown[]
-  health_status?: string
-  login_state?: string
-  base_url?: string
-}
-const runtimeBlocked = computed(() => (overview.value ? !overview.value.runtime.single_runner_ready : false))
-const loginSessionOpen = computed(() => store.openLoginCount > 0)
-const workbenchBlocked = computed(() => runtimeBlocked.value || loginSessionOpen.value)
-const runtimeIssueText = computed(() => overview.value?.runtime.issues.join(' ') ?? '')
-const providers = computed<Provider[]>(() => (store.filteredProviders ?? []) as Provider[])
+const t = (key: string, params?: Record<string, string | number>) => store.t(key, params)
 
-const workbenchModel = computed({
-  get: () => store.workbenchModel,
-  set: (val) => { store.workbenchModel = val },
+type WorkbenchTab = 'terminal' | 'chart' | 'json'
+
+const activeTab = ref<WorkbenchTab>('terminal')
+const command = ref('')
+const terminalEl = ref<HTMLElement | null>(null)
+const lines = ref<string[]>([t('workbench.terminalReady'), t('workbench.helpHint')])
+
+const providers = computed(() => store.filteredProviders)
+const liveProviders = computed(() => providers.value.filter((provider) => provider.running))
+const hubOnline = computed(() => store.overview?.hub.running ?? false)
+const modelOptions = computed(() => store.hubModelOptions)
+const selectedProvider = computed(() => store.workbenchModel.split(':')[0] || t('workbench.noModel'))
+const totalModels = computed(() => providers.value.reduce((sum, provider) => sum + provider.model_count, 0))
+const healthyProviders = computed(() => providers.value.filter((provider) => provider.health_status === 'healthy').length)
+const avgLatency = computed(() => {
+  if (!liveProviders.value.length) return 0
+  return Math.round(liveProviders.value.reduce((sum, provider) => sum + (provider.latency_ms ?? 0), 0) / liveProviders.value.length)
 })
+const throughputSeries = computed(() => store.overview?.throughput_series ?? [])
+const latencySeries = computed(() => store.overview?.latency_series ?? [])
+const responseJson = computed(() => store.workbenchResponse || t('workbench.emptyJson'))
 
-type ConsoleTab = 'terminal' | 'chart' | 'json'
-const activeTab = ref<ConsoleTab>('terminal')
-const terminalInput = ref('')
-const terminalLines = ref<string[]>([
-  'RustProxy probe console initialized.',
-  "Type 'help' to list probe commands.",
+const tabs = computed<Array<{ key: WorkbenchTab; label: string; icon: unknown; hint: string }>>(() => [
+  { key: 'terminal', label: t('workbench.tabs.terminal'), icon: CommandLineIcon, hint: t('workbench.tabHints.terminal') },
+  { key: 'chart', label: t('workbench.tabs.chart'), icon: ChartLineData01Icon, hint: t('workbench.tabHints.chart') },
+  { key: 'json', label: t('workbench.tabs.json'), icon: CodeCircleIcon, hint: t('workbench.tabHints.json') },
 ])
-const commandHistory = ref<string[]>([])
-const historyIndex = ref(-1)
-const terminalInputRef = ref<HTMLInputElement | null>(null)
-const terminalScrollRef = ref<HTMLElement | null>(null)
-const chartCanvas = ref<HTMLCanvasElement | null>(null)
-let providerChart: Chart | null = null
 
-const tabs: Array<{ key: ConsoleTab; label: string; hint: string }> = [
-  { key: 'terminal', label: 'terminal', hint: 'interactive shell' },
-  { key: 'chart', label: 'chartjs', hint: 'provider metrics' },
-  { key: 'json', label: 'response.json', hint: 'hub output' },
-]
-
-const terminalPrefix = computed(() => {
-  const model = store.workbenchModel || 'no-model'
-  return `visitor@rustproxy:${model}$`
-})
-
-const chartLabels = computed(() => providers.value.map((provider: Provider) => provider.name ?? ''))
-const chartModels = computed(() => providers.value.map((provider: Provider) => Number(provider.model_count ?? provider.models?.length ?? 0)))
-const chartHealth = computed(() => providers.value.map((provider: Provider) => provider.health_status === 'ok' ? 1 : 0))
-const totalModels = computed(() => chartModels.value.reduce((sum: number, count: number) => sum + count, 0))
-const healthyProviders = computed(() => chartHealth.value.reduce((sum: number, count: number) => sum + count, 0))
+const healthCards = computed(() => [
+  { key: 'providers', label: t('workbench.providersVisible'), value: String(providers.value.length), icon: PulseIcon },
+  { key: 'models', label: t('workbench.totalModels'), value: String(totalModels.value), icon: CpuIcon },
+  { key: 'healthy', label: t('workbench.healthy'), value: String(healthyProviders.value), icon: Database02Icon },
+  { key: 'latency', label: 'avg latency', value: `${avgLatency.value}ms`, icon: DashboardSpeed02Icon },
+])
 
 function scrollTerminal() {
-  void nextTick(() => terminalScrollRef.value?.scrollTo({ top: terminalScrollRef.value.scrollHeight }))
+  void nextTick(() => {
+    if (terminalEl.value) terminalEl.value.scrollTop = terminalEl.value.scrollHeight
+  })
 }
 
-function writeTerminal(lines: string | string[]) {
-  terminalLines.value.push(...(Array.isArray(lines) ? lines : [lines]))
+function write(line: string | string[]) {
+  if (Array.isArray(line)) lines.value.push(...line)
+  else lines.value.push(line)
+  if (lines.value.length > 90) lines.value = lines.value.slice(-90)
   scrollTerminal()
 }
 
-function focusTerminal() {
-  activeTab.value = 'terminal'
-  void nextTick(() => terminalInputRef.value?.focus())
+function helpLines() {
+  const menu = messageAt(store.locale, 'workbench.helpMenu')
+  return Array.isArray(menu) ? menu.map(String) : [t('workbench.helpHint')]
 }
 
-function providerStatusLines() {
-  if (!providers.value.length) return ['stdout: no providers visible with the current filter.']
-  return providers.value.map((provider: Provider) => {
-    const status = provider.login_state?.replaceAll('_', ' ') ?? provider.health_status ?? 'unknown'
-    const models = provider.model_count ?? provider.models?.length ?? 0
-    return `${String(provider.name ?? '').padEnd(10)} | ${String(status).padEnd(20)} | ${String(models).padStart(3)} models | ${provider.base_url ?? 'no base url'}`
-  })
+function runStatusCommand() {
+  write([
+    `stdout: hub=${hubOnline.value ? 'online' : 'offline'} runtime=${store.runtimeReady ? 'ready' : 'blocked'} provider=${selectedProvider.value}`,
+    `stdout: visible=${providers.value.length} live=${liveProviders.value.length} models=${totalModels.value} open_logins=${store.openLoginCount}`,
+  ])
+  if (store.runtimeIssues.length) write(store.runtimeIssues.map((issue) => `stderr: ${issue}`))
 }
 
-async function executeCommand(rawCommand = terminalInput.value) {
-  const command = rawCommand.trim()
-  if (!command) return
-
-  writeTerminal(`${terminalPrefix.value} ${command}`)
-  commandHistory.value.unshift(command)
-  historyIndex.value = -1
-  terminalInput.value = ''
-
-  if (command === 'clear') {
-    terminalLines.value = []
+function runProvidersCommand() {
+  if (!providers.value.length) {
+    write(t('workbench.noProvidersVisible'))
     return
   }
+  write(
+    providers.value.map(
+      (provider) =>
+        `stdout: ${provider.name.padEnd(8)} ${provider.running ? 'running' : 'stopped'} ${provider.health_status} models=${provider.model_count} latency=${provider.latency_ms ?? 0}ms`,
+    ),
+  )
+}
 
-  if (command === 'help') {
-    writeTerminal([
-      'Available commands:',
-      '  help              show this menu',
-      '  clear             clear terminal output',
-      '  status            print hub/runtime status',
-      '  providers         list visible provider dossiers',
-      '  models            list hub model options',
-      '  prompt <text>     replace the live probe prompt',
-      '  search on|off     toggle normalized web-search flag',
-      '  run               execute the live hub probe',
-      '  charts            open Chart.js metrics',
-      '  json              open the raw response pane',
-    ])
+function runModelsCommand() {
+  if (!modelOptions.value.length) {
+    write(t('workbench.noModelsYet'))
     return
   }
+  write(modelOptions.value.map((model) => `stdout: ${model}`))
+}
 
-  if (command === 'status') {
-    writeTerminal([
-      `hub.running        ${overview.value?.hub.running ? 'true' : 'false'}`,
-      `hub.health         ${overview.value?.hub.health_status ?? 'unknown'}`,
-      `runtime.ready      ${overview.value?.runtime.single_runner_ready ? 'true' : 'false'}`,
-      `open.login.windows ${store.openLoginCount}`,
-      `visible.providers  ${providers.value.length}`,
-    ])
+function setActiveTab(tab: WorkbenchTab) {
+  activeTab.value = tab
+  if (tab === 'chart') write(t('workbench.chartOpened'))
+  if (tab === 'json') write(t('workbench.jsonOpened'))
+}
+
+async function runProbe(event?: MouseEvent) {
+  if (event?.currentTarget instanceof Element) burstFromElement(event.currentTarget, '#ff9500', 18)
+  if (!store.runtimeReady) {
+    write(t('workbench.runtimeBlocked'))
+    playTone('error')
     return
   }
-
-  if (command === 'providers') {
-    writeTerminal(providerStatusLines())
+  if (store.openLoginCount > 0) {
+    write(t('workbench.closeLoginFirst'))
+    playTone('error')
     return
   }
-
-  if (command === 'models') {
-    writeTerminal(hubModelOptions.value.length ? hubModelOptions.value.map((model) => `- ${model}`) : 'stdout: no hub model options discovered yet.')
-    return
-  }
-
-  if (command.startsWith('prompt ')) {
-    store.workbenchPrompt = command.slice('prompt '.length).trim()
-    writeTerminal('stdout: prompt updated')
-    return
-  }
-
-  if (command === 'search on' || command === 'search off') {
-    store.workbenchWebSearch = command.endsWith('on')
-    writeTerminal(`stdout: web search ${store.workbenchWebSearch ? 'enabled' : 'disabled'}`)
-    return
-  }
-
-  if (command === 'charts') {
-    activeTab.value = 'chart'
-    writeTerminal('stdout: opened chartjs pane')
-    return
-  }
-
-  if (command === 'json') {
+  write(t('workbench.running'))
+  playTone('boot')
+  await store.runWorkbench()
+  if (store.error) write(`stderr: ${store.error}`)
+  else {
+    write(t('workbench.finished'))
     activeTab.value = 'json'
-    writeTerminal('stdout: opened response.json pane')
-    return
-  }
-
-  if (command === 'run') {
-    if (workbenchBlocked.value) {
-      writeTerminal(runtimeBlocked.value ? `stderr: runtime blocked: ${runtimeIssueText.value}` : 'stderr: login browser is open. Close it before running a live probe.')
-      return
-    }
-    writeTerminal('stdout: running live hub probe...')
-    try {
-      await store.runWorkbench()
-      writeTerminal('stdout: probe finished. Open response.json for output.')
-    } catch (error) {
-      writeTerminal(`stderr: probe failed: ${error instanceof Error ? error.message : String(error)}`)
-    }
-    return
-  }
-
-  writeTerminal(`stderr: command not found: ${command}. Type 'help' for more information.`)
-}
-
-function handleTerminalKey(event: KeyboardEvent) {
-  if (event.key === 'Enter') {
-    event.preventDefault()
-    void executeCommand()
-    return
-  }
-  if (event.key === 'ArrowUp') {
-    event.preventDefault()
-    if (historyIndex.value + 1 >= commandHistory.value.length) return
-    historyIndex.value += 1
-    terminalInput.value = commandHistory.value[historyIndex.value] ?? ''
-    return
-  }
-  if (event.key === 'ArrowDown') {
-    event.preventDefault()
-    if (historyIndex.value <= 0) {
-      historyIndex.value = -1
-      terminalInput.value = ''
-      return
-    }
-    historyIndex.value -= 1
-    terminalInput.value = commandHistory.value[historyIndex.value] ?? ''
+    playTone('success')
   }
 }
 
-function renderChart() {
-  if (!chartCanvas.value) return
-  const labels = chartLabels.value.length ? chartLabels.value : ['No providers']
-  const models = chartModels.value.length ? chartModels.value : [0]
-  const healthy = chartHealth.value.length ? chartHealth.value : [0]
+async function executeCommand() {
+  const raw = command.value.trim()
+  if (!raw) return
+  write(`operator@rustproxyhub:~$ ${raw}`)
+  command.value = ''
+  const [name = '', ...args] = raw.split(/\s+/)
+  const rest = args.join(' ')
 
-  if (providerChart) {
-    providerChart.data.labels = labels
-    providerChart.data.datasets[0].data = models
-    providerChart.data.datasets[1].data = healthy
-    providerChart.update()
-    return
+  switch (name.toLowerCase()) {
+    case 'help':
+      write(helpLines())
+      break
+    case 'clear':
+      lines.value = []
+      break
+    case 'status':
+      runStatusCommand()
+      break
+    case 'providers':
+      runProvidersCommand()
+      break
+    case 'models':
+      runModelsCommand()
+      break
+    case 'prompt':
+      if (rest) store.workbenchPrompt = rest
+      write(t('workbench.promptUpdated'))
+      break
+    case 'search':
+      store.workbenchWebSearch = rest.toLowerCase() === 'on' || rest.toLowerCase() === 'true'
+      write(store.workbenchWebSearch ? t('workbench.webSearchOn') : t('workbench.webSearchOff'))
+      break
+    case 'run':
+      await runProbe()
+      break
+    case 'charts':
+    case 'chart':
+      setActiveTab('chart')
+      break
+    case 'json':
+      setActiveTab('json')
+      break
+    default:
+      write(t('workbench.notFound', { command: name }))
+      playTone('error')
   }
-
-  providerChart = new Chart(chartCanvas.value, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        { label: 'Models discovered', data: models, borderWidth: 1, xAxisID: 'providerAxis', yAxisID: 'countAxis' },
-        { label: 'Healthy status', data: healthy, borderWidth: 1, type: 'line', tension: 0.25, xAxisID: 'providerAxis', yAxisID: 'countAxis' },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { intersect: false, mode: 'index' },
-      plugins: { legend: { labels: { color: 'lightgreen' } } },
-      scales: {
-        providerAxis: { ticks: { color: 'lightgreen' }, grid: { color: 'rgba(144, 238, 144, 0.14)' } },
-        countAxis: { beginAtZero: true, ticks: { color: 'lightgreen', precision: 0 }, grid: { color: 'rgba(144, 238, 144, 0.14)' } },
-      },
-    },
-  })
 }
 
-watch([chartLabels, chartModels, chartHealth], () => renderChart(), { deep: true })
-watch(activeTab, (tab) => {
-  if (tab === 'chart') void nextTick(renderChart)
-  if (tab === 'terminal') void nextTick(() => terminalInputRef.value?.focus())
-})
+watch(
+  () => store.locale,
+  () => {
+    if (lines.value.length <= 2) lines.value = [t('workbench.terminalReady'), t('workbench.helpHint')]
+  },
+)
 
-onMounted(() => {
-  renderChart()
-  focusTerminal()
-})
-
-onBeforeUnmount(() => {
-  providerChart?.destroy()
-  providerChart = null
-})
+watch(modelOptions, () => store.syncWorkbenchModel(), { immediate: true })
 </script>
 
 <template>
-  <section class="panel workbench-panel terminal-workbench">
-    <div class="terminal-line"><span class="prompt">visitor@rustproxy:~$</span> node probe.ts --interactive</div>
-
-    <nav class="workbench-tabs" aria-label="Workbench tabs">
-      <button v-for="tab in tabs" :key="tab.key" class="workbench-tab" :class="{ active: activeTab === tab.key }" type="button" @click.stop="activeTab = tab.key">
-        <strong>{{ tab.label }}</strong>
-        <span>{{ tab.hint }}</span>
-      </button>
-    </nav>
-
-    <div v-if="runtimeBlocked" class="panel-alert"><strong>stderr:</strong> {{ runtimeIssueText }}</div>
-    <div v-else-if="loginSessionOpen" class="panel-alert"><strong>stderr:</strong> Close active login session before running a live probe.</div>
-
-    <div v-show="activeTab === 'terminal'" class="tab-panel terminal-tab-panel">
-      <div class="terminal-screen" @click.stop="focusTerminal">
-        <div class="terminal-bar"><span>RUSTPROXY://WORKBENCH</span><span>{{ store.workbenchModel || 'no model' }}</span></div>
-        <div ref="terminalScrollRef" class="terminal-output" aria-live="polite">
-          <p v-for="(line, index) in terminalLines" :key="`${line}-${index}`">{{ line }}</p>
-        </div>
-        <label class="terminal-command-line">
-          <span>{{ terminalPrefix }}</span>
-          <input ref="terminalInputRef" v-model="terminalInput" autocomplete="off" spellcheck="false" :disabled="store.isBusy('workbench:run')" @keydown="handleTerminalKey" />
-        </label>
+  <div class="workbench-panel">
+    <header class="panel-head">
+      <div>
+        <span class="eyebrow"><HugeiconsIcon :icon="CommandLineIcon" :size="12" aria-hidden="true" /> {{ t('common.workbench') }}</span>
+        <h2 class="panel-title">{{ t('app.headerTabs.workbench') }}</h2>
       </div>
+      <div class="workbench-status" :class="{ ready: store.runtimeReady && hubOnline, blocked: !store.runtimeReady }">
+        <span class="state-dot" />
+        <span>{{ store.runtimeReady ? (hubOnline ? t('app.stackOperational') : t('app.statusHubPending')) : t('app.stackDiagnosing') }}</span>
+      </div>
+    </header>
 
-      <div class="workbench-grid">
-        <label class="field span-field">
-          <span>Model</span>
-          <input v-model="workbenchModel" list="hub-model-options" placeholder="provider:model-id" :disabled="workbenchBlocked" />
-          <datalist id="hub-model-options">
-            <option v-for="model in hubModelOptions" :key="model" :value="model" />
-          </datalist>
+    <div v-if="!store.runtimeReady && store.runtimeIssues.length" class="panel-alert">
+      {{ store.runtimeIssues[0] }}
+    </div>
+
+    <div class="workbench-grid">
+      <section class="card control-card">
+        <div class="control-row">
+          <label class="field-block">
+            <span>{{ t('workbench.model') }}</span>
+            <input
+              v-model="store.workbenchModel"
+              list="hub-model-options"
+              class="control-input"
+              :disabled="!store.runtimeReady"
+              :placeholder="t('workbench.noModelSelected')"
+            />
+            <datalist id="hub-model-options">
+              <option v-for="model in modelOptions" :key="model" :value="model" />
+            </datalist>
+          </label>
+          <label class="toggle-block">
+            <input v-model="store.workbenchWebSearch" type="checkbox" :disabled="!store.runtimeReady" />
+            <span>{{ t('workbench.webSearch') }}</span>
+          </label>
+        </div>
+
+        <label class="field-block prompt-block">
+          <span>{{ t('workbench.prompt') }}</span>
+          <textarea
+            v-model="store.workbenchPrompt"
+            class="control-input prompt-input"
+            rows="4"
+            :placeholder="t('workbench.promptPlaceholder')"
+            :disabled="!store.runtimeReady"
+          />
         </label>
-        <label class="field toggle-field">
-          <span>Web search</span>
-          <input v-model="store.workbenchWebSearch" type="checkbox" :disabled="workbenchBlocked" />
-        </label>
-        <label class="field span-field prompt-field">
-          <span>Prompt</span>
-          <textarea v-model="store.workbenchPrompt" rows="5" placeholder="Ask for a smoke response and confirm which provider answered." :disabled="workbenchBlocked" />
-        </label>
-        <div class="action-row">
-          <button type="button" @click.stop="executeCommand('status')">status</button>
-          <button type="button" @click.stop="executeCommand('models')">models</button>
-          <button type="button" @click.stop="executeCommand('clear')">clear</button>
-          <button type="button" :disabled="store.isBusy('workbench:run') || workbenchBlocked" @click.stop="executeCommand('run')">
-            {{ store.isBusy('workbench:run') ? 'running...' : 'run live probe' }}
+
+        <div class="control-actions">
+          <button type="button" class="cmd-chip" @click="runStatusCommand">{{ t('workbench.buttons.status') }}</button>
+          <button type="button" class="cmd-chip" @click="runModelsCommand">{{ t('workbench.buttons.models') }}</button>
+          <button type="button" class="cmd-chip" @click="lines = []">{{ t('workbench.buttons.clear') }}</button>
+          <button
+            type="button"
+            class="run-button"
+            :disabled="!store.runtimeReady || store.isBusy('workbench:run')"
+            @click="runProbe($event)"
+          >
+            <HugeiconsIcon :icon="PlayIcon" :size="14" aria-hidden="true" />
+            {{ store.isBusy('workbench:run') ? t('workbench.buttons.running') : t('workbench.buttons.run') }}
           </button>
         </div>
-      </div>
-    </div>
+      </section>
 
-    <div v-show="activeTab === 'chart'" class="tab-panel chart-panel">
-      <div class="chart-summary-grid">
-        <article><span>visible providers</span><strong>{{ providers.length }}</strong></article>
-        <article><span>total models</span><strong>{{ totalModels }}</strong></article>
-        <article><span>healthy</span><strong>{{ healthyProviders }}/{{ providers.length }}</strong></article>
-      </div>
-      <div class="chart-shell">
-        <div class="terminal-bar"><span>PROVIDER METRICS</span><span>Chart.js</span></div>
-        <div class="chart-canvas-wrap"><canvas ref="chartCanvas" aria-label="Provider models and health chart" role="img"></canvas></div>
-      </div>
-    </div>
+      <section class="workbench-main">
+        <div class="workbench-tabs" role="tablist" aria-label="Workbench views">
+          <button
+            v-for="tab in tabs"
+            :id="`workbench-tab-${tab.key}`"
+            :key="tab.key"
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === tab.key"
+            :aria-controls="`workbench-panel-${tab.key}`"
+            class="workbench-tab"
+            :class="{ active: activeTab === tab.key }"
+            @click="setActiveTab(tab.key)"
+          >
+            <HugeiconsIcon :icon="tab.icon" :size="14" aria-hidden="true" />
+            <span>{{ tab.label }}</span>
+            <small>{{ tab.hint }}</small>
+          </button>
+        </div>
 
-    <div v-show="activeTab === 'json'" class="tab-panel json-panel">
-      <div class="json-shell">
-        <div class="terminal-bar"><span>HUB STREAM</span><span>{{ store.workbenchModel || 'no model selected' }}</span></div>
-        <pre>{{ store.workbenchResponse || 'The live JSON response lands here.' }}</pre>
-      </div>
+        <div
+          v-show="activeTab === 'terminal'"
+          id="workbench-panel-terminal"
+          role="tabpanel"
+          aria-labelledby="workbench-tab-terminal"
+          class="card terminal-card"
+        >
+          <div ref="terminalEl" class="terminal-output">
+            <p v-for="(line, index) in lines" :key="`${index}-${line}`" :class="{ error: line.startsWith('stderr'), ok: line.startsWith('stdout') }">
+              {{ line }}
+            </p>
+          </div>
+          <form class="terminal-input-row" @submit.prevent="executeCommand">
+            <span>$</span>
+            <input v-model="command" class="terminal-input" autocomplete="off" spellcheck="false" placeholder="help" />
+          </form>
+        </div>
+
+        <div
+          v-show="activeTab === 'chart'"
+          id="workbench-panel-chart"
+          role="tabpanel"
+          aria-labelledby="workbench-tab-chart"
+          class="card chart-lab-card"
+        >
+          <div class="health-grid">
+            <article v-for="card in healthCards" :key="card.key" class="health-card">
+              <HugeiconsIcon :icon="card.icon" :size="16" aria-hidden="true" />
+              <span>{{ card.label }}</span>
+              <strong>{{ card.value }}</strong>
+            </article>
+          </div>
+
+          <div class="chart-stack">
+            <div class="chart-panel">
+              <div class="chart-title">{{ t('workbench.providerMetrics') }}</div>
+              <SparkChart :values="throughputSeries" :height="86" mode="bars" stroke="rgba(255,149,0,0.7)" />
+            </div>
+            <div class="chart-panel">
+              <div class="chart-title">{{ t('workbench.hubStream') }}</div>
+              <SparkChart :values="latencySeries" :height="86" stroke="#5ce1e6" fill="rgba(92,225,230,0.16)" />
+            </div>
+          </div>
+
+          <div class="provider-table">
+            <div v-for="provider in providers" :key="provider.name" class="provider-row">
+              <span class="provider-dot" :class="{ on: provider.running, warn: provider.health_status === 'degraded' }" />
+              <strong>{{ provider.name }}</strong>
+              <span>{{ provider.model_count }} models</span>
+              <span>{{ provider.running ? `${provider.latency_ms ?? 0}ms` : '--' }}</span>
+              <span>{{ provider.running ? `${(provider.error_rate ?? 0).toFixed(1)}% err` : 'offline' }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-show="activeTab === 'json'"
+          id="workbench-panel-json"
+          role="tabpanel"
+          aria-labelledby="workbench-tab-json"
+          class="card json-card"
+        >
+          <div class="json-head">
+            <span>response.json</span>
+            <span>{{ selectedProvider }}</span>
+          </div>
+          <pre>{{ responseJson }}</pre>
+        </div>
+      </section>
     </div>
-  </section>
+  </div>
 </template>
 
 <style scoped>
-/* hard square terminal reset */
-*,
-*::before,
-*::after {
-  border-radius: 0 !important;
+.workbench-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.2rem;
 }
-
-:deep(*),
-:deep(*::before),
-:deep(*::after) {
-  border-radius: 0 !important;
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
 }
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--font-arcade);
+  font-size: 0.5rem;
+  color: var(--orange);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.panel-title {
+  font-family: var(--font-arcade);
+  font-size: 0.88rem;
+  margin-top: 0.5rem;
+  color: var(--text);
+}
+.workbench-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--line);
+  background: var(--void-2);
+  border-radius: var(--radius-sm);
+  color: var(--muted-strong);
+  padding: 0.45rem 0.7rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--orange);
+  box-shadow: var(--glow-orange);
+}
+.workbench-status.ready {
+  color: var(--cyan);
+  border-color: rgba(92, 225, 230, 0.38);
+}
+.workbench-status.ready .state-dot { background: var(--cyan); box-shadow: var(--glow-cyan); }
+.workbench-status.blocked { color: var(--danger); border-color: rgba(255, 91, 110, 0.35); }
+.workbench-status.blocked .state-dot { background: var(--danger); box-shadow: 0 0 12px rgba(255, 91, 110, 0.35); }
 
-input, textarea, select { user-select: text; }
-
-.terminal-workbench { width: 100%; padding: .9rem; color: lightgreen; }
-.terminal-line { color: #b9ffd0; font-size: 1.2rem; margin-bottom: .75rem; }
-.prompt { color: #7fff9a; margin-right: .45rem; }
-.workbench-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; margin-bottom: .7rem; }
-.workbench-tab {
-  border: 1px solid rgba(144, 238, 144, .42);
-  background: #030903;
-  color: lightgreen;
-  padding: .5rem .65rem;
-  text-align: left;
+.workbench-grid {
+  display: grid;
+  grid-template-columns: minmax(16rem, 0.82fr) minmax(0, 1.35fr);
+  gap: 0.9rem;
+}
+.control-card {
+  padding: 0.95rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+.control-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: end;
+}
+.field-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.field-block > span,
+.toggle-block span {
+  font-size: 0.57rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.control-input,
+.terminal-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--void-2);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 0.58rem 0.62rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+}
+.control-input:focus,
+.terminal-input:focus {
+  outline: none;
+  border-color: var(--orange);
+  box-shadow: inset 0 0 0 1px var(--orange-soft);
+}
+/* restore outline for keyboard focus — :focus above killed it */
+.control-input:focus-visible,
+.terminal-input:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 2px;
+}
+.prompt-input {
+  min-height: 7.5rem;
+  resize: vertical;
+  line-height: 1.45;
+}
+.toggle-block {
+  min-height: 2.2rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.58rem 0.65rem;
+  white-space: nowrap;
+}
+.toggle-block input { accent-color: var(--orange); }
+.control-actions {
+  display: flex;
+  gap: 0.42rem;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+.cmd-chip,
+.run-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.65rem;
   cursor: pointer;
-  font: inherit;
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  transition: all 0.15s ease;
 }
-.workbench-tab.active,
-.workbench-tab:hover { background: rgba(144, 238, 144, .16); }
-.workbench-tab strong,
-.workbench-tab span { display: block; }
-.workbench-tab span { color: rgba(196, 255, 202, .66); }
-.panel-alert { border: 1px solid rgba(255, 82, 82, .55); background: rgba(80,0,0,.2); color: #ffc1c1; padding: .55rem .65rem; margin-bottom: .7rem; }
-.terminal-screen,
-.chart-shell,
-.json-shell { border: 1px solid rgba(144, 238, 144, .42); background: #000; }
-.terminal-bar { display: flex; justify-content: space-between; gap: 1rem; padding: .45rem .65rem; border-bottom: 1px solid rgba(144, 238, 144, .35); background: rgba(144, 238, 144, .12); }
-.terminal-output { min-height: 12rem; max-height: 19rem; overflow: auto; padding: .65rem; }
-.terminal-output p { margin: 0; white-space: pre-wrap; word-break: break-word; }
-.terminal-command-line { display: flex; gap: .5rem; align-items: center; border-top: 1px solid rgba(144, 238, 144, .28); padding: .45rem .65rem; }
-.terminal-command-line span { flex-shrink: 0; }
-.terminal-command-line input { flex: 1; border: 0; background: transparent; color: lightgreen; outline: none; font: inherit; }
-.workbench-grid { display: grid; grid-template-columns: 1fr auto; gap: .65rem; margin-top: .7rem; }
-.field { display: grid; gap: .35rem; }
-.field span { color: #7fff9a; text-transform: uppercase; letter-spacing: .1em; }
-.span-field { grid-column: span 1; }
-.prompt-field { grid-column: 1 / -1; }
-input,
-textarea { border: 1px solid rgba(144, 238, 144, .42); background: #000; color: lightgreen; padding: .6rem; font: inherit; outline: none; }
-textarea { resize: vertical; }
-.action-row { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .4rem; }
-button { border: 1px solid rgba(144, 238, 144, .42); background: #041004; color: lightgreen; padding: .5rem .65rem; cursor: pointer; font: inherit; }
-button:hover { background: rgba(144, 238, 144, .16); }
-button:disabled { opacity: .42; cursor: not-allowed; }
-.chart-summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .55rem; margin-bottom: .7rem; }
-.chart-summary-grid article { border: 1px solid rgba(144, 238, 144, .35); background: #020702; padding: .65rem; }
-.chart-summary-grid span { display: block; color: rgba(196, 255, 202, .72); }
-.chart-summary-grid strong { display: block; color: #dfffe4; font-size: 2rem; font-weight: 400; }
-.chart-canvas-wrap { height: 24rem; padding: .65rem; }
-.json-shell pre { margin: 0; min-height: 22rem; padding: .65rem; overflow: auto; white-space: pre-wrap; word-break: break-word; color: rgba(196, 255, 202, .82); }
-@media (max-width: 760px) {
-  .workbench-tabs,
+.cmd-chip:hover,
+.run-button:hover:not(:disabled) {
+  color: var(--orange);
+  border-color: var(--orange);
+  background: var(--orange-soft);
+}
+.run-button {
+  flex: 1;
+  min-width: 9rem;
+  color: var(--void);
+  border-color: var(--orange);
+  background: var(--orange);
+  font-weight: 800;
+}
+.run-button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.workbench-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.workbench-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.45rem;
+}
+.workbench-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.58rem 0.65rem;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.workbench-tab span {
+  font-family: var(--font-arcade);
+  font-size: 0.54rem;
+  color: inherit;
+}
+.workbench-tab small {
+  color: var(--muted);
+  font-size: 0.52rem;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.workbench-tab.active {
+  color: var(--orange);
+  border-color: var(--orange);
+  background: var(--orange-soft);
+}
+.terminal-card,
+.json-card,
+.chart-lab-card {
+  min-height: 22.5rem;
+}
+.terminal-card {
+  display: flex;
+  flex-direction: column;
+}
+.terminal-output {
+  height: 19rem;
+  overflow: auto;
+  padding: 0.85rem;
+  background:
+    linear-gradient(rgba(255, 149, 0, 0.035) 1px, transparent 1px),
+    var(--void-2);
+  background-size: 100% 22px;
+}
+.terminal-output p {
+  margin: 0 0 0.22rem;
+  color: var(--muted-strong);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.terminal-output p.ok { color: var(--cyan); }
+.terminal-output p.error { color: #ffc1c8; }
+.terminal-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-top: 1px solid var(--line);
+  padding: 0.55rem 0.7rem;
+  color: var(--orange);
+}
+.terminal-input {
+  border: none;
+  background: transparent;
+  padding: 0.25rem 0;
+}
+.terminal-input:focus { box-shadow: none; }
+
+.chart-lab-card,
+.json-card {
+  padding: 0.9rem;
+}
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.45rem;
+  margin-bottom: 0.8rem;
+}
+.health-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  color: var(--muted-strong);
+}
+.health-card svg { color: var(--orange); }
+.health-card span {
+  font-size: 0.52rem;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.health-card strong {
+  font-family: var(--font-arcade);
+  font-size: 0.72rem;
+  color: var(--text);
+}
+.chart-stack {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+.chart-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--void-2);
+  padding: 0.65rem;
+}
+.chart-title,
+.json-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.56rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.55rem;
+}
+.provider-table {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.provider-row {
+  display: grid;
+  grid-template-columns: auto minmax(5rem, 1fr) repeat(3, auto);
+  gap: 0.55rem;
+  align-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  padding: 0.42rem 0.55rem;
+  color: var(--muted-strong);
+  font-size: 0.62rem;
+}
+.provider-row strong {
+  color: var(--text);
+  text-transform: uppercase;
+}
+.provider-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.provider-dot.on { background: var(--cyan); box-shadow: var(--glow-cyan); }
+.provider-dot.warn { background: var(--orange); box-shadow: var(--glow-orange); }
+.json-card pre {
+  margin: 0;
+  height: 20rem;
+  overflow: auto;
+  color: var(--cyan);
+  background: var(--void-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.8rem;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 920px) {
   .workbench-grid,
-  .chart-summary-grid { grid-template-columns: 1fr; }
-  .terminal-command-line { align-items: flex-start; flex-direction: column; }
+  .chart-stack {
+    grid-template-columns: 1fr;
+  }
+  .health-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .control-row,
+  .workbench-tabs,
+  .health-grid,
+  .provider-row {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

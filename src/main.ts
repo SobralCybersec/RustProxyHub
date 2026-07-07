@@ -1,15 +1,10 @@
 import { createPinia } from 'pinia'
 import { createApp } from 'vue'
 import App from './App.vue'
+import { vTilt } from './effects'
 import './assets/main.css'
 
-if (import.meta.env.VITE_ENABLE_VUE_DEVTOOLS === '1') {
-  void import('@vue/devtools').then(({ devtools }) => {
-    devtools.connect('http://localhost', 8098)
-  })
-}
 const app = createApp(App)
-const pinia = createPinia()
-
-app.use(pinia)
+app.use(createPinia())
+app.directive('tilt', vTilt)
 app.mount('#app')
