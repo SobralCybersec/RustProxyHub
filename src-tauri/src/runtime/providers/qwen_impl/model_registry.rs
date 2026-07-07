@@ -115,5 +115,28 @@ impl ModelRegistry {
 }
 
 pub fn normalize_model_id(model_id: &str) -> String {
-    model_id.replace("-no-thinking", "")
+    model_id
+        .trim()
+        .split_once(':')
+        .map(|(_, actual)| actual)
+        .unwrap_or(model_id)
+        .replace("-no-thinking", "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_model_id;
+
+    #[test]
+    fn strips_provider_prefix_and_no_thinking_suffix() {
+        assert_eq!(
+            normalize_model_id("qwen:qwen3.6-max-preview-no-thinking"),
+            "qwen3.6-max-preview"
+        );
+    }
+
+    #[test]
+    fn keeps_bare_model_ids_stable() {
+        assert_eq!(normalize_model_id("qwen3.7-plus"), "qwen3.7-plus");
+    }
 }

@@ -65,12 +65,14 @@ pub fn ensure_qwen_db(qwen_runtime_dir: &Path, workspace_root: &Path) -> Result<
     Ok(db_path)
 }
 
-pub fn list_qwen_accounts(qwen_runtime_dir: &Path, workspace_root: &Path) -> Result<Vec<QwenAccountSummary>> {
+pub fn list_qwen_accounts(
+    qwen_runtime_dir: &Path,
+    workspace_root: &Path,
+) -> Result<Vec<QwenAccountSummary>> {
     let db_path = ensure_qwen_db(qwen_runtime_dir, workspace_root)?;
     let connection = Connection::open(db_path)?;
-    let mut statement = connection.prepare(
-        "SELECT id, email, password, created_at FROM accounts ORDER BY created_at ASC",
-    )?;
+    let mut statement = connection
+        .prepare("SELECT id, email, password, created_at FROM accounts ORDER BY created_at ASC")?;
     let rows = statement.query_map([], |row| {
         Ok(QwenAccountSummary {
             id: row.get(0)?,
@@ -118,7 +120,11 @@ pub fn add_qwen_account(
     Ok(())
 }
 
-pub fn remove_qwen_account(qwen_runtime_dir: &Path, workspace_root: &Path, account_id: &str) -> Result<()> {
+pub fn remove_qwen_account(
+    qwen_runtime_dir: &Path,
+    workspace_root: &Path,
+    account_id: &str,
+) -> Result<()> {
     let db_path = ensure_qwen_db(qwen_runtime_dir, workspace_root)?;
     let connection = Connection::open(db_path)?;
     connection.execute("DELETE FROM accounts WHERE id = ?1", params![account_id])?;
@@ -136,9 +142,8 @@ fn migrate_legacy_accounts_json(connection: &Connection, json_path: &Path) -> Re
 
     let raw = fs::read_to_string(json_path)?;
     let parsed: Vec<LegacyAccount> = serde_json::from_str(&raw).unwrap_or_default();
-    let mut statement = connection.prepare(
-        "INSERT OR IGNORE INTO accounts (id, email, password) VALUES (?1, ?2, ?3)",
-    )?;
+    let mut statement = connection
+        .prepare("INSERT OR IGNORE INTO accounts (id, email, password) VALUES (?1, ?2, ?3)")?;
     for account in parsed {
         if account.email.trim().is_empty() {
             continue;
@@ -188,7 +193,9 @@ mod tests {
         assert!(accounts[0].has_password);
 
         remove_qwen_account(&runtime_dir, &workspace_root, &accounts[0].id).unwrap();
-        assert!(list_qwen_accounts(&runtime_dir, &workspace_root).unwrap().is_empty());
+        assert!(list_qwen_accounts(&runtime_dir, &workspace_root)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

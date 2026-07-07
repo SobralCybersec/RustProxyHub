@@ -22,7 +22,7 @@ standalone-provider-cli = []
 tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
-anyhow = "1"
+anyhow = "1.0.103"
 async-stream = "0.3"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros", "multipart"] }
