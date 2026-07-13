@@ -43,6 +43,7 @@ const CHATGPT_PORT: u16 = 3003;
 const GEMINI_PORT: u16 = 3004;
 const MISTRAL_PORT: u16 = 3005;
 const ZAI_PORT: u16 = 3006;
+const META_PORT: u16 = 3007;
 const DEFAULT_BROWSER: &str = "msedge";
 const LOG_LIMIT: usize = 240;
 
@@ -275,6 +276,7 @@ impl ControlState {
             "gemini" => fs::create_dir_all(self.gemini_runtime_dir()),
             "mistral" => fs::create_dir_all(self.mistral_runtime_dir()),
             "zai" => fs::create_dir_all(self.zai_runtime_dir()),
+            "meta" => fs::create_dir_all(self.meta_runtime_dir()),
             "hub" => fs::create_dir_all(self.hub_runtime_dir()),
             _ => Ok(()),
         };
@@ -425,6 +427,26 @@ impl ControlState {
                     .await
                 });
             }
+            "meta" => {
+                let runtime_dir = self.meta_runtime_dir();
+                let helper_dir = helper_dir.clone();
+                let node_path = node_path.clone();
+                let api_key = provider_api_key.clone();
+                self.spawn_service("meta".to_owned(), async move {
+                    serve_browser_provider(BrowserProviderServerConfig {
+                        kind: BrowserProviderKind::Meta,
+                        host: "127.0.0.1".to_owned(),
+                        port: META_PORT,
+                        api_key,
+                        headless: true,
+                        browser: DEFAULT_BROWSER.to_owned(),
+                        runtime_dir,
+                        helper_dir,
+                        node_path,
+                    })
+                    .await
+                });
+            }
             "hub" => {
                 let hub_api_key = self.hub_api_key.clone();
                 self.spawn_service("hub".to_owned(), async move {
@@ -450,7 +472,8 @@ impl ControlState {
                             provider_base_url("mistral"),
                             hub_api_key.clone(),
                         ),
-                        zai: ProviderConfig::new(provider_base_url("zai"), hub_api_key),
+                        zai: ProviderConfig::new(provider_base_url("zai"), hub_api_key.clone()),
+                        meta: ProviderConfig::new(provider_base_url("meta"), hub_api_key),
                     })
                     .await
                 });
@@ -639,6 +662,10 @@ impl ControlState {
 
     fn zai_runtime_dir(&self) -> PathBuf {
         self.providers_root().join("zai")
+    }
+
+    fn meta_runtime_dir(&self) -> PathBuf {
+        self.providers_root().join("meta")
     }
 
     fn hub_runtime_dir(&self) -> PathBuf {
@@ -838,7 +865,7 @@ impl ControlState {
 
         let login_state = if login_open {
             "login_open".to_owned()
-        } else if name == "chatgpt" || name == "gemini" || name == "mistral" || name == "zai" {
+        } else if name == "chatgpt" || name == "gemini" || name == "mistral" || name == "zai" || name == "meta" {
             if model_count > 0 {
                 "authenticated".to_owned()
             } else if status.running {
@@ -1218,6 +1245,7 @@ fn normalize_provider(value: &str) -> Result<&'static str> {
         "gemini" => Ok("gemini"),
         "mistral" => Ok("mistral"),
         "zai" => Ok("zai"),
+        "meta" => Ok("meta"),
         other => Err(anyhow!("unsupported provider: {other}")),
     }
 }
@@ -1236,13 +1264,13 @@ fn startup_config_from_env() -> StartupConfig {
         .filter(|value| !value.is_empty());
 
     let Some(configured) = configured else {
-        // Default when RUST_PROXY_START_SERVICES is unset: auto-start the qwen and
-        // deepseek servers so the user doesn't have to launch them by hand. Set
-        // RUST_PROXY_START_SERVICES=manual (or none) to opt out, =all for every
-        // service, or a comma-separated list to pick your own.
+        // Default when RUST_PROXY_START_SERVICES is unset: start nothing automatically.
+        // All providers must be started manually from the dashboard.
+        // Set RUST_PROXY_START_SERVICES=all for every service, or a comma-separated
+        // list (e.g. "qwen,kimi") to auto-start specific ones.
         return StartupConfig {
-            mode: "selected".to_owned(),
-            services: vec!["qwen".to_owned(), "deepseek".to_owned()],
+            mode: "manual".to_owned(),
+            services: Vec::new(),
         };
     };
 
@@ -1286,15 +1314,15 @@ fn startup_config_from_env() -> StartupConfig {
     }
 }
 
-fn service_names() -> [&'static str; 8] {
+fn service_names() -> [&'static str; 9] {
     [
-        "hub", "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral", "zai",
+        "hub", "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral", "zai", "meta",
     ]
 }
 
-fn provider_names() -> [&'static str; 7] {
+fn provider_names() -> [&'static str; 8] {
     [
-        "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral", "zai",
+        "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral", "zai", "meta",
     ]
 }
 
@@ -1307,6 +1335,7 @@ fn provider_base_url(provider: &str) -> String {
         "gemini" => GEMINI_PORT,
         "mistral" => MISTRAL_PORT,
         "zai" => ZAI_PORT,
+        "meta" => META_PORT,
         _ => HUB_PORT,
     };
     format!("http://127.0.0.1:{port}")
@@ -1402,12 +1431,14 @@ mod tests {
         assert_eq!(provider_base_url("gemini"), "http://127.0.0.1:3004");
         assert_eq!(provider_base_url("mistral"), "http://127.0.0.1:3005");
         assert_eq!(provider_base_url("zai"), "http://127.0.0.1:3006");
+        assert_eq!(provider_base_url("meta"), "http://127.0.0.1:3007");
     }
 
     #[test]
-    fn provider_normalization_accepts_mistral_and_zai() {
+    fn provider_normalization_accepts_mistral_zai_and_meta() {
         assert_eq!(normalize_provider(" MISTRAL ").unwrap(), "mistral");
         assert_eq!(normalize_provider(" ZAI ").unwrap(), "zai");
+        assert_eq!(normalize_provider(" META ").unwrap(), "meta");
         assert!(normalize_provider("claude").is_err());
     }
 

@@ -11,7 +11,9 @@ const MAX_TILT = 6 // degrees
 
 export const vTilt: Directive<HTMLElement, never> = {
   mounted(el) {
-    el.style.transformStyle = 'preserve-3d'
+    // NOTE: do NOT set transform-style:preserve-3d here — combining it with
+    // overflow:hidden (on .card) breaks hit-testing in Chromium/WebKit webviews.
+    // The tilt only transforms the element itself; no child needs 3D space.
     el.style.transition = 'transform 0.18s ease-out'
 
     const onMove = (event: PointerEvent) => {

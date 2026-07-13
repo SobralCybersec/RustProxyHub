@@ -17,6 +17,7 @@ const fallbackModels: Record<ProviderName, string[]> = {
   gemini: ['gemini-web-session'],
   mistral: ['mistral-web-session'],
   zai: ['glm-5.2', 'glm-5.1', 'glm-5-turbo'],
+  meta: ['meta-ai-web-session'],
 }
 
 function providerModels(provider: ProviderOverview) {

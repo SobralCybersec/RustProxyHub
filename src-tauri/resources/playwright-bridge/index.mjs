@@ -59,6 +59,15 @@ function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true })
 }
 
+// Defense-in-depth: account_id is joined to a filesystem profile path.
+// Reject anything outside [A-Za-z0-9_-]{1,64} before path.resolve sees it.
+const SAFE_ACCOUNT_ID = /^[A-Za-z0-9_-]{1,64}$/
+function assertSafeAccountId(accountId) {
+  if (accountId != null && accountId !== '' && !SAFE_ACCOUNT_ID.test(accountId)) {
+    throw new Error(`unsafe account_id rejected: ${accountId}`)
+  }
+}
+
 function resolveEngine(browser) {
   switch (browser) {
     case 'firefox':
@@ -105,6 +114,20 @@ const state = {
     lastHeadersTime: 0,
   },
   mistral: {
+    context: null,
+    page: null,
+    headless: null,
+    cachedHeaders: null,
+    lastHeadersTime: 0,
+  },
+  zai: {
+    context: null,
+    page: null,
+    headless: null,
+    cachedHeaders: null,
+    lastHeadersTime: 0,
+  },
+  meta: {
     context: null,
     page: null,
     headless: null,
@@ -179,6 +202,10 @@ function modelPattern(provider) {
       return /^(?:gemini|learnlm)[a-z0-9_.:-]*$/i
     case 'mistral':
       return /^(?:mistral|magistral|codestral|vibe|le-chat)[a-z0-9_.:-]*$/i
+    case 'zai':
+      return /^(?:glm|autoglm|zai)[a-z0-9_.:-]*$/i
+    case 'meta':
+      return /^(?:meta(?:-ai)?|llama)[a-z0-9_.:-]*$/i
     default:
       return /^[a-z0-9][a-z0-9_.:-]{1,80}$/i
   }
@@ -210,6 +237,8 @@ function collectModelIds(value, provider, target, depth = 0) {
       chatgpt: /\b(?:gpt|o[0-9]|chatgpt)[a-zA-Z0-9_.:-]{1,80}\b/g,
       gemini: /\b(?:gemini|learnlm)[a-zA-Z0-9_.:-]{1,80}\b/g,
       mistral: /\b(?:mistral|magistral|codestral|vibe|le-chat)[a-zA-Z0-9_.:-]{1,80}\b/g,
+      zai: /\b(?:glm|autoglm|zai)[a-zA-Z0-9_.:-]{1,80}\b/g,
+      meta: /\b(?:meta(?:-ai)?|llama)[a-zA-Z0-9_.:-]{1,80}\b/g,
     }
     for (const match of trimmed.matchAll(directPatterns[provider] || /\b[a-z][a-z0-9_.:-]{1,80}\b/g)) {
       addModelCandidate(target, provider, match[0])
@@ -239,6 +268,44 @@ function modelListResponse(ids, provider, fallbackModel) {
   }
 }
 
+function addKnownChatGPTModels(target) {
+  for (const id of [
+    'gpt-5-3',
+    'gpt-5.5',
+    'gpt-5.5-thinking',
+    'gpt-5',
+    'gpt-4.1',
+    'o3',
+    'o4-mini',
+    'chatgpt-web-session',
+  ]) {
+    addModelCandidate(target, 'chatgpt', id)
+  }
+}
+
+function addKnownZaiModels(target) {
+  for (const id of [
+    'glm-5.2',
+    'glm-5.1',
+    'glm-5',
+    'glm-5-turbo',
+    'glm-4.7',
+    'glm-4.6',
+    'glm-4.5',
+    'glm-4.6v',
+    'glm-4.5v',
+    'autoglm',
+  ]) {
+    addModelCandidate(target, 'zai', id)
+  }
+}
+
+function addKnownMetaModels(target) {
+  for (const id of ['meta-ai-web-session']) {
+    addModelCandidate(target, 'meta', id)
+  }
+}
+
 async function scanPageModelHints(page, provider, endpointPaths = []) {
   const bodies = await page.evaluate(async ({ endpointPaths }) => {
     const out = []
@@ -259,7 +326,7 @@ async function scanPageModelHints(page, provider, endpointPaths = []) {
 
     for (const script of Array.from(document.scripts).slice(0, 80)) {
       const text = script.textContent || ''
-      if (/model|gemini|gpt|mistral|codestral|magistral/i.test(text)) add(text)
+      if (/model|gemini|gpt|mistral|codestral|magistral|glm|autoglm|zai|meta|llama/i.test(text)) add(text)
     }
 
     for (const storage of [window.localStorage, window.sessionStorage]) {
@@ -267,7 +334,7 @@ async function scanPageModelHints(page, provider, endpointPaths = []) {
         for (let index = 0; index < storage.length; index += 1) {
           const key = storage.key(index) || ''
           const value = storage.getItem(key) || ''
-          if (/model|gemini|gpt|mistral|codestral|magistral/i.test(`${key} ${value}`)) {
+          if (/model|gemini|gpt|mistral|codestral|magistral|glm|autoglm|zai|meta|llama/i.test(`${key} ${value}`)) {
             add(`${key} ${value}`)
           }
         }
@@ -320,7 +387,20 @@ async function closeContext(context) {
 
 async function initDeepSeek({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
-  if (state.deepseek.context && state.deepseek.headless === headless) return
+  if (state.deepseek.context && state.deepseek.headless === headless) {
+    try {
+      if (!state.deepseek.page || state.deepseek.page.isClosed()) {
+        state.deepseek.page =
+          state.deepseek.context.pages().find((page) => !page.isClosed()) ||
+          (await state.deepseek.context.newPage())
+      }
+      return
+    } catch {
+      await closeContext(state.deepseek.context).catch(() => {})
+      state.deepseek.context = null
+      state.deepseek.page = null
+    }
+  }
   if (state.deepseek.context) {
     await closeContext(state.deepseek.context)
     state.deepseek.context = null
@@ -614,6 +694,20 @@ function replaceChatGPTMessageContent(content, prompt) {
   }
 }
 
+function compactChatGPTPrompt(prompt, maxChars = 18000) {
+  if (typeof prompt !== 'string') return { text: '', truncated: false }
+  const clean = prompt.trim()
+  if (clean.length <= maxChars) return { text: clean, truncated: false }
+
+  const marker = '\n\n[Earlier conversation trimmed to fit ChatGPT limit]\n\n'
+  const headBudget = Math.min(6000, Math.floor((maxChars - marker.length) * 0.4))
+  const tailBudget = Math.max(2000, maxChars - marker.length - headBudget)
+  return {
+    text: `${clean.slice(0, headBudget)}${marker}${clean.slice(-tailBudget)}`,
+    truncated: true,
+  }
+}
+
 function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch) {
   let payload = null
   try {
@@ -633,6 +727,16 @@ function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch) {
       : {}
 
   nextPayload.model = model
+  delete nextPayload.conversation_id
+  delete nextPayload.conversationId
+  delete nextPayload.current_node
+  delete nextPayload.currentNode
+  delete nextPayload.parent_id
+  delete nextPayload.parentId
+  delete nextPayload.response_id
+  delete nextPayload.responseId
+  delete nextPayload.suggestions
+  delete nextPayload.history_and_training_disabled
   nextPayload.messages = [
     {
       ...templateMessage,
@@ -647,9 +751,7 @@ function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch) {
     },
   ]
 
-  if (!nextPayload.parent_message_id || typeof nextPayload.parent_message_id !== 'string') {
-    nextPayload.parent_message_id = randomUUID()
-  }
+  nextPayload.parent_message_id = 'client-created-root'
   if (!nextPayload.action || typeof nextPayload.action !== 'string') {
     nextPayload.action = 'next'
   }
@@ -697,6 +799,7 @@ async function listChatGPTModels() {
     '/backend-api/f/models',
     '/backend-api/model_slug_availability',
   ])
+  addKnownChatGPTModels(ids)
   if (state.chatgpt.cachedHeaders?.model) addModelCandidate(ids, 'chatgpt', state.chatgpt.cachedHeaders.model)
   return modelListResponse(ids, 'chatgpt', 'chatgpt-web-session')
 }
@@ -709,63 +812,71 @@ async function chatChatGPT({ model, prompt, web_search = false }) {
   const requestHeaders = { ...template.headers }
   delete requestHeaders.cookie
 
-  const payload = buildChatGPTPayloadFromTemplate(
-    template,
-    prompt,
-    ensureSessionText(model, template.model || 'chatgpt-web-session'),
-    web_search,
-  )
-  const requestResult = await page.evaluate(async ({ headers, payload }) => {
-    const response = await fetch('https://chatgpt.com/backend-api/f/conversation', {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify(payload),
-    })
-    const reader = response.body?.getReader()
-    const decoder = new TextDecoder()
-    let raw = ''
-    let conversationId = ''
+  const sendConversation = async (preparedPrompt) => {
+    const payload = buildChatGPTPayloadFromTemplate(
+      template,
+      preparedPrompt.text,
+      ensureSessionText(model, template.model || 'chatgpt-web-session'),
+      web_search,
+    )
+    const requestResult = await page.evaluate(async ({ headers, payload }) => {
+      const response = await fetch('https://chatgpt.com/backend-api/f/conversation', {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify(payload),
+      })
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+      let raw = ''
+      let conversationId = ''
 
-    if (reader) {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        raw += decoder.decode(value, { stream: true })
-        const lines = raw.split('\n')
-        raw = lines.pop() || ''
-        for (const line of lines) {
-          const trimmed = line.trim()
-          if (!trimmed.startsWith('data:')) continue
-          const chunk = trimmed.slice(5).trim()
-          if (!chunk || chunk === '[DONE]') continue
-          try {
-            const parsed = JSON.parse(chunk)
-            conversationId =
-              parsed.conversation_id ||
-              parsed.token?.conversation_id ||
-              parsed.options?.[0]?.conversation_id ||
-              conversationId
-          } catch {}
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          raw += decoder.decode(value, { stream: true })
+          const lines = raw.split('\n')
+          raw = lines.pop() || ''
+          for (const line of lines) {
+            const trimmed = line.trim()
+            if (!trimmed.startsWith('data:')) continue
+            const chunk = trimmed.slice(5).trim()
+            if (!chunk || chunk === '[DONE]') continue
+            try {
+              const parsed = JSON.parse(chunk)
+              conversationId =
+                parsed.conversation_id ||
+                parsed.token?.conversation_id ||
+                parsed.options?.[0]?.conversation_id ||
+                conversationId
+            } catch {}
+          }
         }
       }
-    }
 
-    return {
-      ok: response.ok,
-      status: response.status,
-      conversationId,
-      body: raw,
-    }
-  }, { headers: requestHeaders, payload })
+      return {
+        ok: response.ok,
+        status: response.status,
+        conversationId,
+        body: raw,
+      }
+    }, { headers: requestHeaders, payload })
+    return { payload, requestResult, preparedPrompt }
+  }
 
-  const conversationId = requestResult.conversationId || payload.conversation_id || ''
-  if (!requestResult.ok || !conversationId) {
-    const detail = requestResult.body?.trim()
+  let sent = await sendConversation(compactChatGPTPrompt(prompt, 18000))
+  if (!sent.requestResult.ok && sent.requestResult.status === 413) {
+    sent = await sendConversation(compactChatGPTPrompt(prompt, 9000))
+  }
+
+  const conversationId = sent.requestResult.conversationId || sent.payload.conversation_id || ''
+  if (!sent.requestResult.ok || !conversationId) {
+    const detail = sent.requestResult.body?.trim()
     throw new Error(
       detail
-        ? `ChatGPT upstream request failed with status ${requestResult.status}: ${detail.slice(0, 400)}`
-        : `ChatGPT upstream request failed with status ${requestResult.status}`,
+        ? `ChatGPT upstream request failed with status ${sent.requestResult.status}: ${detail.slice(0, 400)}`
+        : `ChatGPT upstream request failed with status ${sent.requestResult.status}`,
     )
   }
 
@@ -797,11 +908,18 @@ async function chatChatGPT({ model, prompt, web_search = false }) {
 
   return {
     text,
-    model: payload.model,
+    model: sent.payload.model,
     conversation_id: conversationId,
-    warning: web_search
-      ? 'ChatGPT web search toggle not mapped yet. Current web-session defaults were used.'
-      : null,
+    warning: [
+      web_search
+        ? 'ChatGPT web search toggle not mapped yet. Current web-session defaults were used.'
+        : null,
+      sent.preparedPrompt.truncated
+        ? 'Prompt was compacted before ChatGPT send to avoid message_length_exceeds_limit.'
+        : null,
+    ]
+      .filter(Boolean)
+      .join(' | ') || null,
   }
 }
 
@@ -916,6 +1034,7 @@ async function getGeminiBasicHeaders() {
 }
 
 function extractGeminiText(body) {
+  const payloads = []
   for (const rawLine of body.split('\n')) {
     const line = rawLine.replace(/^\)\]\}'/, '').trim()
     if (!line.startsWith('[')) continue
@@ -924,17 +1043,69 @@ function extractGeminiText(body) {
       const payload = envelope?.[0]?.[2]
       if (typeof payload !== 'string') continue
       const decoded = JSON.parse(payload)
-      const text =
-        decoded?.[4]?.[0]?.[1]?.[0] ||
-        decoded?.[4]?.[0]?.[0] ||
-        decoded?.[0]?.[0] ||
-        ''
-      if (typeof text === 'string' && text.trim()) {
-        return text.trim()
-      }
+      payloads.push(decoded)
     } catch {}
   }
 
+  for (let index = payloads.length - 1; index >= 0; index -= 1) {
+    const text = extractGeminiTextFromPayload(payloads[index])
+    if (text) return text
+  }
+
+  return ''
+}
+
+function extractGeminiTextFromPayload(decoded) {
+  const candidates = [
+    decoded?.[4]?.[0]?.[1]?.[0],
+    decoded?.[4]?.[0]?.[0],
+    decoded?.[4]?.[0]?.[1],
+    decoded?.[0]?.[0],
+    extractFirstGeminiText(decoded?.[4]),
+  ]
+
+  for (const candidate of candidates) {
+    const text = normalizeGeminiText(candidate)
+    if (text) return text
+  }
+
+  return ''
+}
+
+function extractFirstGeminiText(value) {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = extractFirstGeminiText(item)
+      if (text) return text
+    }
+    return ''
+  }
+  if (value && typeof value === 'object') {
+    for (const key of ['text', 'content', 'value']) {
+      const text = extractFirstGeminiText(value[key])
+      if (text) return text
+    }
+    for (const child of Object.values(value)) {
+      const text = extractFirstGeminiText(child)
+      if (text) return text
+    }
+  }
+  return ''
+}
+
+function normalizeGeminiText(value) {
+  if (typeof value === 'string') {
+    return value.trim()
+  }
+  if (Array.isArray(value)) {
+    const text = value
+      .map(item => normalizeGeminiText(item))
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+    return text
+  }
   return ''
 }
 
@@ -1155,29 +1326,32 @@ function replacePromptAndModel(value, prompt, model) {
   return { value: visit(value), changedPrompt, changedModel }
 }
 
-function buildMistralBody(template, prompt, model) {
+function buildTemplateBody(template, prompt, model) {
   const contentType = template.headers?.['content-type'] || ''
   if (contentType.includes('application/x-www-form-urlencoded')) {
     const form = new URLSearchParams(template.payload)
     let changed = false
+    let changedModel = false
     for (const [key, value] of [...form.entries()]) {
       if (!changed && /prompt|message|content|text|query|input/i.test(key)) {
         form.set(key, prompt)
         changed = true
       } else if (model && /^model$/i.test(key)) {
         form.set(key, model)
+        changedModel = true
       } else if (!changed && (value.trim().startsWith('{') || value.trim().startsWith('['))) {
         try {
           const replaced = replacePromptAndModel(JSON.parse(value), prompt, model)
           if (replaced.changedPrompt) {
             form.set(key, JSON.stringify(replaced.value))
             changed = true
+            changedModel = changedModel || replaced.changedModel
           }
         } catch {}
       }
     }
     if (!changed) throw new Error('Mistral request template did not expose a usable prompt field')
-    return form.toString()
+    return { body: form.toString(), changedModel }
   }
 
   let parsed
@@ -1188,7 +1362,7 @@ function buildMistralBody(template, prompt, model) {
   }
   const replaced = replacePromptAndModel(parsed, prompt, model)
   if (!replaced.changedPrompt) throw new Error('Mistral request template did not expose a usable prompt field')
-  return JSON.stringify(replaced.value)
+  return { body: JSON.stringify(replaced.value), changedModel: replaced.changedModel }
 }
 
 function collectResponseText(value, out = [], depth = 0, key = '') {
@@ -1247,7 +1421,7 @@ async function chatMistral({ model, prompt, web_search = false }) {
 
   const template = await captureMistralTemplate(true)
   const headers = { ...template.headers }
-  const body = buildMistralBody(template, prompt, model)
+  const prepared = buildTemplateBody(template, prompt, model)
 
   const response = await page.evaluate(async ({ url, headers, body }) => {
     const result = await fetch(url, {
@@ -1261,7 +1435,7 @@ async function chatMistral({ model, prompt, web_search = false }) {
       status: result.status,
       body: await result.text(),
     }
-  }, { url: template.url, headers, body })
+  }, { url: template.url, headers, body: prepared.body })
 
   if (!response.ok) {
     throw new Error(`Mistral upstream request failed with status ${response.status}`)
@@ -1284,6 +1458,478 @@ async function chatMistral({ model, prompt, web_search = false }) {
 async function openMistralLogin({ runtime_dir, browser }) {
   await initMistral({ runtime_dir, headless: false, browser })
   await state.mistral.page.goto('https://chat.mistral.ai/chat', { waitUntil: 'domcontentloaded' })
+}
+
+async function initZai({ runtime_dir, headless, browser }) {
+  process.chdir(runtime_dir)
+  if (state.zai.context && state.zai.headless === headless) return
+  if (state.zai.context) {
+    await closeContext(state.zai.context)
+    state.zai.context = null
+    state.zai.page = null
+    state.zai.cachedHeaders = null
+    state.zai.lastHeadersTime = 0
+  }
+  ensureDir(path.resolve('zai_profile'))
+  const { engine, channel } = resolveEngine(browser)
+  state.zai.context = await engine.launchPersistentContext(path.resolve('zai_profile'), {
+    headless,
+    channel,
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=DevToolsDebuggingRestrictions',
+    ],
+  })
+  await state.zai.context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+  })
+  state.zai.page = await state.zai.context.newPage()
+  state.zai.headless = headless
+}
+
+async function captureZaiTemplate(forceNew = false) {
+  const page = state.zai.page
+  if (!page) throw new Error('Z.AI Playwright not initialized')
+
+  if (!forceNew && state.zai.cachedHeaders && Date.now() - state.zai.lastHeadersTime < 5 * 60 * 1000) {
+    return state.zai.cachedHeaders
+  }
+
+  if (!page.url().includes('chat.z.ai') || forceNew) {
+    await page.goto('https://chat.z.ai/', { waitUntil: 'domcontentloaded' })
+  }
+
+  const inputSelector =
+    'textarea:visible, div[contenteditable="true"]:visible, [data-testid*="composer"] textarea, [role="textbox"]:visible'
+  await page.waitForSelector(inputSelector, { timeout: 30000 }).catch(() => {
+    throw new Error('Timeout waiting for Z.AI chat input. Are you logged in?')
+  })
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timeout waiting for Z.AI request template')), 60000)
+    const routeHandler = async (route, request) => {
+      const url = request.url()
+      const method = request.method()
+      if (method !== 'POST' || !/(?:chat|api)\.z\.ai/i.test(url)) {
+        await route.continue()
+        return
+      }
+
+      const postData = request.postData() || ''
+      const signature = `${url}\n${postData}`
+      if (!/(prompt|message|content|text|query|input|conversation|chat\/completions|responses|glm)/i.test(signature)) {
+        await route.continue()
+        return
+      }
+
+      clearTimeout(timeout)
+      const reqHeaders = request.headers()
+      const headers = {
+        accept: reqHeaders.accept || 'text/event-stream',
+        'accept-language': reqHeaders['accept-language'] || 'en-US,en;q=0.9',
+        'content-type': reqHeaders['content-type'] || 'application/json',
+        origin: reqHeaders.origin || 'https://chat.z.ai',
+        referer: reqHeaders.referer || 'https://chat.z.ai/',
+        'user-agent': reqHeaders['user-agent'] || '',
+        authorization: reqHeaders.authorization || '',
+      }
+
+      state.zai.cachedHeaders = {
+        headers,
+        payload: postData,
+        url,
+      }
+      state.zai.lastHeadersTime = Date.now()
+
+      await route.abort('aborted')
+      await page.unroute('**/*', routeHandler)
+      resolve(state.zai.cachedHeaders)
+    }
+
+    page.route('**/*', routeHandler).then(async () => {
+      await page.focus(inputSelector)
+      await page.fill(inputSelector, '')
+      await page.type(inputSelector, 'a', { delay: 50 })
+      await sleep(1500)
+      let clicked = false
+      for (const selector of [
+        'button[type="submit"]',
+        'button:has(svg)',
+        '[data-testid*="send"]',
+        '[aria-label*="Send"]',
+        '[aria-label*="send"]',
+      ]) {
+        try {
+          const button = await page.$(selector)
+          if (button && await button.isVisible()) {
+            await button.click({ force: true, delay: 50 }).catch(() => {})
+            clicked = true
+            break
+          }
+        } catch {}
+      }
+      if (!clicked) {
+        await page.keyboard.press('Enter')
+      }
+    })
+  })
+}
+
+function extractOpenAIStyleResponse(body) {
+  let text = ''
+  let reasoning = ''
+  let model = ''
+
+  for (const rawLine of body.split('\n')) {
+    const line = rawLine.trim()
+    if (!line.startsWith('data:')) continue
+    const payload = line.slice(5).trim()
+    if (!payload || payload === '[DONE]') continue
+
+    try {
+      const parsed = JSON.parse(payload)
+      model = parsed.model || model
+      const choice = parsed.choices?.[0]
+      const delta = choice?.delta || {}
+      if (typeof delta.reasoning_content === 'string') reasoning += delta.reasoning_content
+      if (typeof delta.content === 'string') text += delta.content
+      if (!text && typeof choice?.message?.content === 'string') text = choice.message.content
+      if (!reasoning && typeof choice?.message?.reasoning_content === 'string') {
+        reasoning = choice.message.reasoning_content
+      }
+    } catch {}
+  }
+
+  if (text || reasoning || model) {
+    return { text: text.trim(), reasoning_content: reasoning.trim() || null, model: model || null }
+  }
+
+  try {
+    const parsed = JSON.parse(body)
+    const choice = parsed.choices?.[0]
+    return {
+      text:
+        choice?.message?.content ||
+        parsed.output_text ||
+        parsed.text ||
+        '',
+      reasoning_content: choice?.message?.reasoning_content || null,
+      model: parsed.model || null,
+    }
+  } catch {}
+
+  return { text: body.trim(), reasoning_content: null, model: null }
+}
+
+async function listZaiModels() {
+  const page = state.zai.page
+  if (!page) throw new Error('Z.AI Playwright not initialized')
+  if (!page.url().includes('chat.z.ai')) {
+    await page.goto('https://chat.z.ai/', { waitUntil: 'domcontentloaded' })
+  }
+
+  await waitForInteractiveSelector(page, [
+    'textarea:visible',
+    'div[contenteditable="true"]:visible',
+    '[role="textbox"]:visible',
+  ])
+
+  const ids = await scanPageModelHintsWithRetries(page, 'zai', [
+    '/api/models',
+    '/api/model',
+    '/api/paas/v4/models',
+  ])
+  addKnownZaiModels(ids)
+  return modelListResponse(ids, 'zai', 'glm-5.2')
+}
+
+async function chatZai({ model, prompt, web_search = false }) {
+  const page = state.zai.page
+  if (!page) throw new Error('Z.AI Playwright not initialized')
+
+  const template = await captureZaiTemplate(true)
+  const headers = { ...template.headers }
+  const prepared = buildTemplateBody(template, prompt, ensureSessionText(model, 'glm-5.2'))
+
+  const response = await page.evaluate(async ({ url, headers, body }) => {
+    const result = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body,
+    })
+    return {
+      ok: result.ok,
+      status: result.status,
+      body: await result.text(),
+    }
+  }, { url: template.url, headers, body: prepared.body })
+
+  if (!response.ok) {
+    throw new Error(`Z.AI upstream request failed with status ${response.status}`)
+  }
+
+  const parsed = extractOpenAIStyleResponse(response.body)
+  if (!parsed.text) {
+    throw new Error('Z.AI response was empty. Confirm session is active and the captured request template is still valid.')
+  }
+
+  const warnings = []
+  if (web_search) {
+    warnings.push('Z.AI web search toggle is not mapped yet. Current web-session defaults were used.')
+  }
+  if (model && !prepared.changedModel) {
+    warnings.push('Z.AI live model switching is best-effort. Captured request template did not expose a writable model field.')
+  }
+
+  return {
+    text: parsed.text,
+    reasoning_content: parsed.reasoning_content,
+    model: ensureSessionText(parsed.model, ensureSessionText(model, 'glm-5.2')),
+    warning: warnings.join(' | ') || null,
+  }
+}
+
+async function openZaiLogin({ runtime_dir, browser }) {
+  await initZai({ runtime_dir, headless: false, browser })
+  await state.zai.page.goto('https://chat.z.ai/', { waitUntil: 'domcontentloaded' })
+}
+
+async function initMeta({ runtime_dir, headless, browser }) {
+  process.chdir(runtime_dir)
+  if (state.meta.context && state.meta.headless === headless) return
+  if (state.meta.context) {
+    await closeContext(state.meta.context)
+    state.meta.context = null
+    state.meta.page = null
+    state.meta.cachedHeaders = null
+    state.meta.lastHeadersTime = 0
+  }
+  ensureDir(path.resolve('meta_profile'))
+  const { engine, channel } = resolveEngine(browser)
+  state.meta.context = await engine.launchPersistentContext(path.resolve('meta_profile'), {
+    headless,
+    channel,
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=DevToolsDebuggingRestrictions',
+    ],
+  })
+  await state.meta.context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
+  })
+  state.meta.page = await state.meta.context.newPage()
+  state.meta.headless = headless
+}
+
+async function captureMetaTemplate(forceNew = false) {
+  const page = state.meta.page
+  if (!page) throw new Error('Meta AI Playwright not initialized')
+
+  if (!forceNew && state.meta.cachedHeaders && Date.now() - state.meta.lastHeadersTime < 5 * 60 * 1000) {
+    return state.meta.cachedHeaders
+  }
+
+  if (!page.url().includes('meta.ai') || forceNew) {
+    await page.goto('https://www.meta.ai/', { waitUntil: 'domcontentloaded' })
+  }
+
+  await waitForInteractiveSelector(page, [
+    'textarea:visible',
+    '[role="textbox"]:visible',
+    'div[contenteditable="true"]:visible',
+    '[aria-label*="Message"]:visible',
+    '[aria-label*="message"]:visible',
+  ]).catch(() => {
+    throw new Error('Timeout waiting for Meta AI chat input. Are you logged in?')
+  })
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timeout waiting for Meta AI request template')), 60000)
+    const routeHandler = async (route, request) => {
+      const url = request.url()
+      const method = request.method()
+      if (method !== 'POST' || !/(?:meta\.ai|graph\.facebook\.com|graph\.meta\.com)/i.test(url)) {
+        await route.continue()
+        return
+      }
+
+      const postData = request.postData() || ''
+      const signature = `${url}\n${postData}`
+      if (!/(prompt|message|content|text|query|input|conversation|chat|llama|meta)/i.test(signature)) {
+        await route.continue()
+        return
+      }
+
+      clearTimeout(timeout)
+      const reqHeaders = request.headers()
+      const headers = {
+        accept: reqHeaders.accept || '*/*',
+        'accept-language': reqHeaders['accept-language'] || 'en-US,en;q=0.9',
+        'content-type': reqHeaders['content-type'] || 'application/json',
+        origin: reqHeaders.origin || 'https://www.meta.ai',
+        referer: reqHeaders.referer || 'https://www.meta.ai/',
+        'user-agent': reqHeaders['user-agent'] || '',
+        authorization: reqHeaders.authorization || '',
+      }
+
+      state.meta.cachedHeaders = {
+        headers,
+        payload: postData,
+        url,
+      }
+      state.meta.lastHeadersTime = Date.now()
+
+      await route.abort('aborted')
+      await page.unroute('**/*', routeHandler)
+      resolve(state.meta.cachedHeaders)
+    }
+
+    page.route('**/*', routeHandler).then(async () => {
+      const selector = await waitForInteractiveSelector(page, [
+        'textarea:visible',
+        '[role="textbox"]:visible',
+        'div[contenteditable="true"]:visible',
+        '[aria-label*="Message"]:visible',
+        '[aria-label*="message"]:visible',
+      ])
+      await page.focus(selector)
+      if (selector.includes('textarea')) {
+        await page.fill(selector, '')
+      }
+      await page.type(selector, 'a', { delay: 50 })
+      await sleep(1500)
+      let clicked = false
+      for (const buttonSelector of [
+        'button[type="submit"]',
+        '[aria-label*="Send"]',
+        '[aria-label*="send"]',
+        '[data-testid*="send"]',
+        'button:has(svg)',
+      ]) {
+        try {
+          const button = await page.$(buttonSelector)
+          if (button && await button.isVisible()) {
+            await button.click({ force: true, delay: 50 }).catch(() => {})
+            clicked = true
+            break
+          }
+        } catch {}
+      }
+      if (!clicked) {
+        await page.keyboard.press('Enter')
+      }
+    })
+  })
+}
+
+function extractFlexibleResponse(body) {
+  const openAIStyle = extractOpenAIStyleResponse(body)
+  if (openAIStyle.text || openAIStyle.reasoning_content || openAIStyle.model) {
+    return openAIStyle
+  }
+
+  const texts = []
+  for (const rawLine of body.split('\n')) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const payload = line.startsWith('data:') ? line.slice(5).trim() : line
+    if (!payload || payload === '[DONE]') continue
+    try {
+      collectResponseText(JSON.parse(payload), texts)
+    } catch {}
+  }
+
+  if (!texts.length) {
+    try {
+      collectResponseText(JSON.parse(body), texts)
+    } catch {}
+  }
+
+  return {
+    text: texts.filter(Boolean).at(-1) || body.trim(),
+    reasoning_content: null,
+    model: null,
+  }
+}
+
+async function listMetaModels() {
+  const page = state.meta.page
+  if (!page) throw new Error('Meta AI Playwright not initialized')
+  if (!page.url().includes('meta.ai')) {
+    await page.goto('https://www.meta.ai/', { waitUntil: 'domcontentloaded' })
+  }
+
+  await waitForInteractiveSelector(page, [
+    'textarea:visible',
+    '[role="textbox"]:visible',
+    'div[contenteditable="true"]:visible',
+  ])
+
+  const ids = await scanPageModelHintsWithRetries(page, 'meta', [
+    '/api/models',
+    '/api/model',
+  ])
+  addKnownMetaModels(ids)
+  return modelListResponse(ids, 'meta', 'meta-ai-web-session')
+}
+
+async function chatMeta({ model, prompt, web_search = false }) {
+  const page = state.meta.page
+  if (!page) throw new Error('Meta AI Playwright not initialized')
+
+  const template = await captureMetaTemplate(true)
+  const headers = { ...template.headers }
+  const prepared = buildTemplateBody(template, prompt, ensureSessionText(model, 'meta-ai-web-session'))
+
+  const response = await page.evaluate(async ({ url, headers, body }) => {
+    const result = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body,
+    })
+    return {
+      ok: result.ok,
+      status: result.status,
+      body: await result.text(),
+    }
+  }, { url: template.url, headers, body: prepared.body })
+
+  if (!response.ok) {
+    throw new Error(`Meta AI upstream request failed with status ${response.status}`)
+  }
+
+  const parsed = extractFlexibleResponse(response.body)
+  if (!parsed.text) {
+    throw new Error('Meta AI response was empty. Confirm session is active and the captured request template is still valid.')
+  }
+
+  const warnings = []
+  if (web_search) {
+    warnings.push('Meta AI web search toggle is not mapped yet. Current web-session defaults were used.')
+  }
+  if (model && !prepared.changedModel) {
+    warnings.push('Meta AI live model switching is best-effort. Captured request template did not expose a writable model field.')
+  }
+
+  return {
+    text: parsed.text,
+    reasoning_content: parsed.reasoning_content,
+    model: ensureSessionText(parsed.model, ensureSessionText(model, 'meta-ai-web-session')),
+    warning: warnings.join(' | ') || null,
+  }
+}
+
+async function openMetaLogin({ runtime_dir, browser }) {
+  await initMeta({ runtime_dir, headless: false, browser })
+  await state.meta.page.goto('https://www.meta.ai/', { waitUntil: 'domcontentloaded' })
 }
 
 async function initKimi({ runtime_dir, headless, browser }) {
@@ -1433,6 +2079,7 @@ async function openKimiLogin({ runtime_dir, browser }) {
 }
 
 async function initQwen({ runtime_dir, headless, browser, account_id = null }) {
+  assertSafeAccountId(account_id)
   process.chdir(runtime_dir)
   const slot = getQwenSlot(account_id)
   if (slot.context && slot.headless === headless) return
@@ -1661,7 +2308,7 @@ async function closeQwenAccount({ account_id = null }) {
 }
 
 async function closeAll() {
-  for (const key of ['deepseek', 'chatgpt', 'gemini', 'mistral', 'kimi', 'qwen']) {
+  for (const key of ['deepseek', 'chatgpt', 'gemini', 'mistral', 'zai', 'meta', 'kimi', 'qwen']) {
     if (state[key].context) {
       await closeContext(state[key].context)
       if (key === 'qwen') {
@@ -1732,6 +2379,26 @@ async function handle(method, provider, params) {
       return listMistralModels()
     case 'mistral:chat':
       return chatMistral(params)
+    case 'zai:init':
+      return initZai(params)
+    case 'zai:capture_headers':
+      return captureZaiTemplate(!!params.force_new)
+    case 'zai:manual_login':
+      return openZaiLogin(params)
+    case 'zai:list_models':
+      return listZaiModels()
+    case 'zai:chat':
+      return chatZai(params)
+    case 'meta:init':
+      return initMeta(params)
+    case 'meta:capture_headers':
+      return captureMetaTemplate(!!params.force_new)
+    case 'meta:manual_login':
+      return openMetaLogin(params)
+    case 'meta:list_models':
+      return listMetaModels()
+    case 'meta:chat':
+      return chatMeta(params)
     case 'kimi:init':
       return initKimi(params)
     case 'kimi:capture_headers':
@@ -1756,6 +2423,8 @@ async function handle(method, provider, params) {
     case 'chatgpt:shutdown':
     case 'gemini:shutdown':
     case 'mistral:shutdown':
+    case 'zai:shutdown':
+    case 'meta:shutdown':
     case 'kimi:shutdown':
     case 'qwen:shutdown':
       await closeAll()

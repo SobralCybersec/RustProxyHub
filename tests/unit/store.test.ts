@@ -6,7 +6,7 @@ import { makeOverview } from './factories'
 
 vi.mock('@/lib/mock-backend', () => ({
   invoke: vi.fn(),
-  providerOrder: ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai'],
+  providerOrder: ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai', 'meta'],
 }))
 
 const mockedInvoke = vi.mocked(mockBackend.invoke)
@@ -31,7 +31,7 @@ describe('store runtime flow', () => {
   it('keeps browser provider ordering and default browser prefs', () => {
     const store = useStore()
 
-    expect(providerOrder).toEqual(['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai'])
+    expect(providerOrder).toEqual(['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai', 'meta'])
     expect(store.browserPrefs).toEqual({
       qwen: 'msedge',
       deepseek: 'msedge',
@@ -40,6 +40,7 @@ describe('store runtime flow', () => {
       gemini: 'msedge',
       mistral: 'msedge',
       zai: 'msedge',
+      meta: 'msedge',
     })
   })
 

@@ -5,6 +5,7 @@ import {
   Globe02Icon,
   Login03Icon,
   Logout03Icon,
+  MetaIcon,
   SecurityCheckIcon,
 } from '@hugeicons/core-free-icons'
 import { computed } from 'vue'
@@ -29,6 +30,9 @@ function guides(name: ProviderName): string[] {
 }
 function setBrowser(name: ProviderName, value: string) {
   store.browserPrefs[name] = value
+}
+function providerIcon(name: ProviderName) {
+  return name === 'meta' ? MetaIcon : Globe02Icon
 }
 
 function onOpen(event: MouseEvent, name: ProviderName) {
@@ -59,7 +63,7 @@ function onDone(name: ProviderName) {
       <article v-for="p in providers" :key="p.name" v-tilt class="card login-card" :class="{ open: isOpen(p.name) }">
         <header class="login-card-head">
           <div class="login-id">
-            <span class="login-avatar"><HugeiconsIcon :icon="Globe02Icon" :size="18" aria-hidden="true" /></span>
+            <span class="login-avatar"><HugeiconsIcon :icon="providerIcon(p.name)" :size="18" aria-hidden="true" /></span>
             <div>
               <h3 class="login-name">{{ p.name }}</h3>
               <span class="login-state" :class="p.login_state">

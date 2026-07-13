@@ -30,6 +30,7 @@ pub enum BrowserProviderKind {
     Gemini,
     Mistral,
     Zai,
+    Meta,
 }
 
 impl BrowserProviderKind {
@@ -39,6 +40,7 @@ impl BrowserProviderKind {
             Self::Gemini => "gemini",
             Self::Mistral => "mistral",
             Self::Zai => "zai",
+            Self::Meta => "meta",
         }
     }
 
@@ -48,6 +50,7 @@ impl BrowserProviderKind {
             Self::Gemini => "gemini-web-session",
             Self::Mistral => "mistral-web-session",
             Self::Zai => "glm-5.2",
+            Self::Meta => "meta-ai-web-session",
         }
     }
 
@@ -73,6 +76,7 @@ pub struct BrowserProviderServerConfig {
 struct AppState {
     bridge: Arc<PlaywrightBridge>,
     config: BrowserProviderServerConfig,
+    models_cache: Arc<tokio::sync::RwLock<Option<(Value, std::time::Instant)>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,7 +116,11 @@ pub async fn serve_browser_provider(config: BrowserProviderServerConfig) -> Resu
         .await?,
     );
 
-    let state = AppState { bridge, config };
+    let state = AppState {
+        bridge,
+        config,
+        models_cache: Arc::new(tokio::sync::RwLock::new(None)),
+    };
     let app = Router::new()
         .route("/health", get(health))
         .route("/admin/manual_login", post(admin_manual_login))
@@ -247,6 +255,24 @@ async fn model_by_id(
 }
 
 async fn discover_models(state: &AppState) -> Value {
+    const TTL: Duration = Duration::from_secs(30);
+
+    // serve fresh cache without hitting the bridge
+    {
+        let cached = state.models_cache.read().await;
+        if let Some((ref val, ts)) = *cached {
+            if ts.elapsed() < TTL {
+                return val.clone();
+            }
+        }
+    }
+
+    // hold stale value so a timeout/error doesn't leave callers empty-handed
+    let stale = {
+        let cached = state.models_cache.read().await;
+        cached.as_ref().map(|(v, _)| v.clone())
+    };
+
     let discovered = tokio::time::timeout(Duration::from_secs(4), async {
         ensure_headless_ready(state).await?;
         state
@@ -262,15 +288,23 @@ async fn discover_models(state: &AppState) -> Value {
     .await;
 
     match discovered {
-        Ok(Ok(payload)) => normalize_model_payload(state, payload, Vec::new()),
-        Ok(Err(err)) => fallback_model_payload(state, vec![err.to_string()]),
-        Err(_) => fallback_model_payload(
-            state,
-            vec![format!(
-                "{} model discovery timed out; using fallback model",
-                state.config.kind.as_str()
-            )],
-        ),
+        Ok(Ok(payload)) => {
+            let result = normalize_model_payload(state, payload, Vec::new());
+            *state.models_cache.write().await = Some((result.clone(), std::time::Instant::now()));
+            result
+        }
+        Ok(Err(err)) => {
+            stale.unwrap_or_else(|| fallback_model_payload(state, vec![err.to_string()]))
+        }
+        Err(_) => stale.unwrap_or_else(|| {
+            fallback_model_payload(
+                state,
+                vec![format!(
+                    "{} model discovery timed out; using fallback model",
+                    state.config.kind.as_str()
+                )],
+            )
+        }),
     }
 }
 
@@ -1461,6 +1495,22 @@ mod tests {
             .expect("fallback model item");
         assert_eq!(first.get("id").and_then(Value::as_str), Some("glm-5.2"));
         assert_eq!(first.get("owned_by").and_then(Value::as_str), Some("zai"));
+    }
+
+    #[test]
+    fn browser_model_fallback_uses_meta_default() {
+        let payload = fallback_model_payload_for(BrowserProviderKind::Meta, Vec::new());
+
+        let first = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .expect("fallback model item");
+        assert_eq!(
+            first.get("id").and_then(Value::as_str),
+            Some("meta-ai-web-session")
+        );
+        assert_eq!(first.get("owned_by").and_then(Value::as_str), Some("meta"));
     }
 
     #[test]

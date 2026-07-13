@@ -1,4 +1,4 @@
-export type ProviderName = 'qwen' | 'deepseek' | 'kimi' | 'chatgpt' | 'gemini' | 'mistral' | 'zai'
+export type ProviderName = 'qwen' | 'deepseek' | 'kimi' | 'chatgpt' | 'gemini' | 'mistral' | 'zai' | 'meta'
 export type ServiceName = 'hub' | ProviderName
 
 export interface HubConfigResponse {
@@ -88,4 +88,5 @@ export interface BrowserPrefs {
   gemini: string
   mistral: string
   zai: string
+  meta: string
 }

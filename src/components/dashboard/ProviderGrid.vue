@@ -2,10 +2,17 @@
 import { HugeiconsIcon } from '@hugeicons/vue'
 import {
   ArrowExpand01Icon,
+  ChatGptIcon,
   CheckmarkBadge01Icon,
   CpuIcon,
+  DeepseekIcon,
+  GoogleGeminiIcon,
+  KimiAiIcon,
   Login03Icon,
+  MetaIcon,
+  MistralIcon,
   PlayIcon,
+  QwenIcon,
   RoboticIcon,
 } from '@hugeicons/core-free-icons'
 import { computed } from 'vue'
@@ -37,6 +44,19 @@ function statusClass(p: ProviderOverview) {
   if (!p.running) return 'idle'
   if (p.health_status === 'degraded') return 'warn'
   return 'ok'
+}
+const PROVIDER_ICONS: Record<ProviderName, unknown> = {
+  chatgpt: ChatGptIcon,
+  deepseek: DeepseekIcon,
+  gemini: GoogleGeminiIcon,
+  kimi: KimiAiIcon,
+  meta: MetaIcon,
+  mistral: MistralIcon,
+  qwen: QwenIcon,
+  zai: RoboticIcon, // no dedicated icon in hugeicons yet
+}
+function providerIcon(name: ProviderName) {
+  return PROVIDER_ICONS[name] ?? RoboticIcon
 }
 // ponytail: deterministic stable curve derived from rpm; no Math.random so the
 // SparkChart watcher stops re-rendering on every parent re-paint.
@@ -96,7 +116,7 @@ function copyAgent(name: ProviderName, agent: 'pi' | 'kilo' | 'claude') {
         <div class="provider-card-glow" aria-hidden="true" />
         <header class="provider-card-head">
           <div class="provider-id">
-            <span class="provider-avatar"><HugeiconsIcon :icon="RoboticIcon" :size="20" aria-hidden="true" /></span>
+            <span class="provider-avatar"><HugeiconsIcon :icon="providerIcon(p.name)" :size="20" aria-hidden="true" /></span>
             <div>
               <h3 class="provider-name">{{ p.name }}</h3>
               <span class="provider-url">{{ p.base_url || t('providers.noBaseUrl') }}</span>

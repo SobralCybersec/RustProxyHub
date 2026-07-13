@@ -1,6 +1,6 @@
 import type { DashboardOverview, ProviderName, ProviderOverview, RuntimeDiagnostics } from '@/lib/types'
 
-const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai']
+const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai', 'meta']
 
 function makeRuntime(overrides: Partial<RuntimeDiagnostics> = {}): RuntimeDiagnostics {
   return {
@@ -20,6 +20,7 @@ function makeProvider(name: ProviderName, overrides: Partial<ProviderOverview> =
     gemini: 3004,
     mistral: 3005,
     zai: 3006,
+    meta: 3007,
   }
   return {
     name,

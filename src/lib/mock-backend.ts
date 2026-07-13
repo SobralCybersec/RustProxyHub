@@ -14,7 +14,7 @@ import type {
  * dashboards show living telemetry instead of static numbers.
  */
 
-export const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai']
+export const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai', 'meta']
 
 const HUB_PORT = 8787
 const HUB_BASE = `http://127.0.0.1:${HUB_PORT}`
@@ -44,6 +44,7 @@ const seedModels: Record<ProviderName, string[]> = {
   gemini: ['gemini-2.5-pro-web', 'gemini-2.5-flash-web', 'gemini-vision-web'],
   mistral: ['mistral-large-web', 'mistral-medium-web', 'codestral-web'],
   zai: ['glm-5.2', 'glm-5.1', 'glm-5-turbo', 'glm-4.6'],
+  meta: ['meta-ai-web-session'],
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -110,6 +111,7 @@ class MockWorld {
       gemini: [],
       mistral: [],
       zai: [],
+      meta: [],
     }
 
     // Seed series

@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustProxyHub: A Guided Walkthrough</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ===== mandatory fixed stage ===== */
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--stage-bg,#010409);}
+.deck-viewport{position:fixed;inset:0;overflow:hidden;background:var(--stage-bg,#010409);}
+.deck-stage{position:absolute;left:0;top:0;width:1920px;height:1080px;overflow:hidden;transform-origin:0 0;background:var(--slide-bg,#0d1117);}
+.slide{position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden;display:block;visibility:hidden;opacity:0;pointer-events:none;background:var(--slide-bg,#0d1117);transition:opacity .4s ease;}
+.slide.active{visibility:visible;opacity:1;pointer-events:auto;z-index:1;}
+img,video,canvas,svg{max-width:100%;max-height:100%;}
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.2s!important;}}
+
+:root{
+  --stage-bg:#010409; --slide-bg:#0d1117;
+  --panel:#161b22; --panel2:#12161d; --border:#30363d; --border-soft:#21262d;
+  --rust:#f74c00; --rust-deep:#ce422b; --text:#e6edf3; --muted:#8b949e; --dim:#838b95;
+  --green:#3fb950; --blue:#58a6ff; --purple:#bc8cff; --yellow:#e3b341;
+  /* syntax */
+  --cm:#8b949e; --str:#a5d6ff; --num:#79c0ff; --kw:#ff7b72; --ty:#ffa657; --fn:#d2a8ff; --cn:#79c0ff; --at:#7ee787;
+}
+*{box-sizing:border-box;}
+.slide{font-family:'JetBrains Mono',monospace;color:var(--text);
+  background:
+    radial-gradient(1200px 700px at 88% -12%, rgba(247,76,0,.09), transparent 60%),
+    linear-gradient(180deg,#0d1117 0%, #0b0e14 100%);}
+.slide::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background-image:linear-gradient(var(--border-soft) 1px,transparent 1px),linear-gradient(90deg,var(--border-soft) 1px,transparent 1px);
+  background-size:64px 64px;opacity:.30;mask-image:radial-gradient(1500px 1000px at 25% 35%,#000 50%,transparent 100%);}
+
+/* chrome */
+.body{position:absolute;inset:0;padding:76px 104px 96px;display:flex;flex-direction:column;}
+.top{display:flex;justify-content:space-between;align-items:center;font-size:18px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);flex:none;}
+.top .brand{color:var(--text);font-weight:700;}
+.top .brand b{color:var(--rust);}
+.top .sec b{color:var(--green);font-weight:600;}
+.foot{position:absolute;left:104px;right:104px;bottom:44px;display:flex;justify-content:space-between;align-items:center;
+  font-size:16px;color:var(--dim);letter-spacing:.08em;border-top:1px solid var(--border-soft);padding-top:18px;}
+.foot b{color:var(--rust);}
+.count{color:var(--muted);}
+
+.head{margin-top:44px;flex:none;}
+.kick{font-size:20px;letter-spacing:.28em;text-transform:uppercase;color:var(--rust);font-weight:700;display:flex;align-items:center;gap:14px;}
+.kick::before{content:"";width:34px;height:3px;background:var(--rust);display:inline-block;}
+.title{font-size:78px;font-weight:800;line-height:1.0;letter-spacing:-.025em;margin:20px 0 0;}
+.title .a{color:var(--rust);}
+.lead{margin-top:20px;font-size:27px;line-height:1.5;color:var(--muted);max-width:1500px;}
+.lead b{color:var(--text);font-weight:500;}
+
+.main{margin-top:40px;flex:1;min-height:0;}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:52px;height:100%;}
+.cols.wide{grid-template-columns:1.25fr 1fr;}
+.cols.lead-left{grid-template-columns:1fr 1.15fr;}
+.col{min-width:0;display:flex;flex-direction:column;gap:22px;}
+
+/* code panel */
+.panel{border:1px solid var(--border);border-radius:11px;background:rgba(18,22,29,.82);overflow:hidden;box-shadow:0 30px 90px rgba(0,0,0,.45);display:flex;flex-direction:column;}
+.panel-head{display:flex;align-items:center;gap:10px;padding:13px 20px;background:var(--panel);border-bottom:1px solid var(--border);flex:none;}
+.dot{width:13px;height:13px;border-radius:50%;}
+.dot.r{background:#ff5f56;}.dot.y{background:#ffbd2e;}.dot.g{background:#27c93f;}
+.panel-title{margin-left:12px;color:var(--muted);font-size:15px;letter-spacing:.05em;}
+.panel-title .path{color:var(--dim);}
+pre.code{margin:0;padding:22px 26px;font-size:19px;line-height:1.62;overflow:hidden;white-space:pre;tab-size:2;}
+pre.code.sm{font-size:17px;line-height:1.55;}
+pre.code.xs{font-size:15.5px;line-height:1.5;}
+.cm{color:var(--cm);font-style:italic;}.str{color:var(--str);}.num{color:var(--num);}
+.kw{color:var(--kw);}.ty{color:var(--ty);}.fn{color:var(--fn);}.cn{color:var(--cn);}.at{color:var(--at);}
+
+/* notes list */
+.notes{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:18px;}
+.notes li{position:relative;padding-left:34px;font-size:23px;line-height:1.42;color:var(--text);}
+.notes li::before{content:"▸";position:absolute;left:0;top:0;color:var(--rust);font-weight:700;}
+.notes li b{color:var(--text);}
+.notes li span{color:var(--muted);}
+.notes.tight li{font-size:21px;gap:12px;}
+
+.subhead{font-size:16px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);font-weight:600;margin-bottom:2px;}
+
+/* cards grid */
+.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:20px;}
+.cards.c3{grid-template-columns:repeat(3,1fr);}
+.card{border:1px solid var(--border);border-left:3px solid var(--rust);border-radius:8px;background:rgba(22,27,34,.55);padding:22px 24px;}
+.card h4{margin:0 0 8px;font-size:22px;color:var(--text);font-weight:700;}
+.card p{margin:0;font-size:18px;line-height:1.4;color:var(--muted);}
+.card .ic{color:var(--rust);font-size:15px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;margin-bottom:10px;}
+
+/* key-value table */
+.kv{width:100%;border-collapse:collapse;font-size:20px;}
+.kv td{padding:14px 6px;border-bottom:1px solid var(--border-soft);vertical-align:top;}
+.kv tr td:first-child{color:var(--rust);white-space:nowrap;padding-right:26px;font-weight:600;}
+.kv tr td:last-child{color:var(--text);}
+.kv .g{color:var(--muted);}
+
+/* provider grid */
+.pgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;}
+.pcell{border:1px solid var(--border);border-radius:8px;background:rgba(22,27,34,.6);padding:18px 20px;}
+.pcell .pn{font-size:23px;font-weight:700;color:var(--text);}
+.pcell .pm{font-size:14px;color:var(--dim);margin-top:4px;letter-spacing:.05em;}
+.pcell .ps{margin-top:12px;font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--green);}
+.pcell .ps.wip{color:var(--yellow);}
+.pcell.wip{border-left:3px solid var(--yellow);}
+.pcell.ok{border-left:3px solid var(--green);}
+
+/* flow diagram */
+.flow{display:flex;align-items:stretch;gap:0;width:100%;}
+.fbox{flex:1;border:1px solid var(--border);border-radius:9px;background:rgba(22,27,34,.6);padding:22px 18px;text-align:center;position:relative;}
+.fbox.accent{border-color:var(--rust);background:rgba(247,76,0,.08);}
+.fbox .ft{font-size:14px;letter-spacing:.12em;text-transform:uppercase;color:var(--rust);font-weight:700;}
+.fbox .fm{font-size:20px;color:var(--text);margin-top:9px;line-height:1.3;}
+.fbox .fs{font-size:14px;color:var(--muted);margin-top:8px;}
+.farrow{flex:none;width:56px;display:flex;align-items:center;justify-content:center;color:var(--rust);font-size:30px;font-weight:700;}
+
+/* stat row */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.stats .st{padding:26px 24px;border-right:1px solid var(--border);}
+.stats .st:last-child{border-right:none;}
+.stats .st .v{font-size:46px;font-weight:800;color:var(--rust);letter-spacing:-.02em;line-height:1;}
+.stats .st .k{font-size:15px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-top:12px;}
+
+/* title slide specifics */
+.t-wrap{position:absolute;inset:0;padding:96px 104px;display:flex;flex-direction:column;}
+.t-hero{margin-top:auto;}
+.t-title{font-size:158px;font-weight:800;line-height:.9;letter-spacing:-.035em;margin:16px 0 0;}
+.t-title .hub{color:var(--rust);}
+.t-sub{margin-top:26px;font-size:30px;color:var(--muted);max-width:1200px;line-height:1.5;}
+.t-sub b{color:var(--text);font-weight:500;}
+.t-term{margin-top:56px;width:940px;}
+.cursor{display:inline-block;width:12px;height:22px;background:var(--rust);vertical-align:-3px;margin-left:3px;animation:bl 1.05s steps(1) infinite;}
+@keyframes bl{50%{opacity:0;}}
+.t-rail{position:absolute;right:104px;top:210px;width:520px;display:flex;flex-direction:column;gap:12px;}
+.chip{display:flex;justify-content:space-between;align-items:center;border:1px solid var(--border);border-left:3px solid var(--rust);background:rgba(22,27,34,.6);padding:15px 20px;font-size:20px;}
+.chip .s{color:var(--green);font-size:14px;letter-spacing:.1em;text-transform:uppercase;}
+.chip .s.wip{color:var(--yellow);}
+
+/* progress */
+.pbar{position:fixed;left:0;bottom:0;height:3px;background:var(--rust);z-index:1000;transition:width .35s ease;}
+.deck-controls{position:fixed;left:50%;bottom:8px;transform:translateX(-50%);z-index:1000;display:flex;gap:3px;}
+/* buttons carry transparent padding so the hit target is ~44px while the dot stays 8px */
+.deck-controls button{width:8px;height:8px;padding:18px 7px;margin:0;border:0;background:transparent;cursor:pointer;-webkit-appearance:none;appearance:none;box-sizing:content-box;position:relative;}
+.deck-controls button::before{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:8px;height:8px;border-radius:50%;background:var(--border);transition:all .2s;}
+.deck-controls button[aria-current="true"]::before{background:var(--rust);width:22px;border-radius:4px;}
+.deck-controls button:focus-visible{outline:2px solid var(--rust);outline-offset:3px;border-radius:4px;}
+:focus-visible{outline:2px solid var(--rust);outline-offset:3px;}
+.sr-only{position:fixed;left:-9999px;width:1px;height:1px;overflow:hidden;}
+
+@media print{
+  html,body{width:1920px;height:auto;overflow:visible;background:#0d1117;}
+  .deck-viewport{position:static;overflow:visible;}
+  .deck-stage{position:static;width:auto;height:auto;transform:none!important;}
+  .slide{position:relative;display:block!important;visibility:visible!important;opacity:1!important;width:1920px;height:1080px;break-after:page;}
+  .pbar,.deck-controls{display:none!important;}
+}
+</style>
+</head>
+<body>
+<div class="deck-viewport">
+  <div class="deck-stage" id="stage">
+
+  <!-- ===== 0 · TITLE ===== -->
+  <section class="slide">
+    <div class="t-wrap">
+      <div class="top">
+        <div class="brand">rust·proxy·<b>hub</b></div>
+        <div class="sec"><span>v<b>2.11.2</b> · tauri 2 · axum 0.8 · 127.0.0.1:<b>3100</b></span></div>
+      </div>
+      <div class="t-term">
+        <div class="panel">
+          <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+            <span class="panel-title">~/rust-proxy-hub : cargo run --release</span></div>
+          <pre class="code" data-lang="shell">$ cargo run --release
+<span class="cm"># one OpenAI-compatible API in front of 7 providers</span>
+▸ serving /v1/chat/completions · /v1/models · /v1/messages
+▸ routing qwen:qwen-32b → healthy · streaming SSE<span class="cursor"></span></pre>
+        </div>
+      </div>
+      <div class="t-hero">
+        <div class="kick">A guided walkthrough</div>
+        <h1 class="t-title">RustProxy<span class="hub">Hub</span></h1>
+        <p class="t-sub">One local API in front of <b>seven</b> LLM providers: a <b>Tauri&nbsp;+&nbsp;Rust</b> backend, a <b>Vue&nbsp;3</b> dashboard, browser-backed sessions, and real-time streaming, bundled into a single desktop app.</p>
+      </div>
+    </div>
+    <div class="t-rail">
+      <div class="chip"><span>Qwen</span><span class="s">healthy</span></div>
+      <div class="chip"><span>ChatGPT · Gemini</span><span class="s">healthy</span></div>
+      <div class="chip"><span>Mistral · DeepSeek · Kimi</span><span class="s">healthy</span></div>
+      <div class="chip"><span>Zai · browser session</span><span class="s wip">in progress</span></div>
+    </div>
+    <div class="foot"><span>github.com/…/RustProxyHub · built with <b>Rust</b></span><span class="count">01 / 15</span></div>
+  </section>
+
+  <!-- ===== 1 · PROBLEM ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>01 · <b>The Problem</b></span></div></div>
+      <div class="head">
+        <div class="kick">Why a hub</div>
+        <h2 class="title">Every provider speaks a <span class="a">different dialect</span></h2>
+        <p class="lead">Seven AI backends means seven SDKs, seven auth schemes, seven streaming quirks. Wiring them into one app is where projects drown.</p>
+      </div>
+      <div class="main">
+        <div class="cols lead-left">
+          <div class="col">
+            <div class="subhead">The friction</div>
+            <ul class="notes">
+              <li><b>API fragmentation</b> <span>:different request shapes, error formats, and token limits per vendor.</span></li>
+              <li><b>Auth sprawl</b> <span>:API keys, OAuth, and browser-only sessions all at once.</span></li>
+              <li><b>Streaming differences</b> <span>:every provider frames SSE and cutoffs its own way.</span></li>
+              <li><b>Deployment weight</b> <span>:separate runtimes, Node processes, and browsers to ship.</span></li>
+            </ul>
+          </div>
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="panel-title">without a hub</span></div>
+              <pre class="code sm" data-lang="ts">import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
+import Anthropic from "@anthropic-ai/sdk";
+<span class="cm">// …plus Qwen, Mistral, DeepSeek, Kimi</span>
+
+<span class="cm">// four SDKs, four auth flows, four</span>
+<span class="cm">// streaming formats, in one client.</span>
+if (model.startsWith("gpt"))      useOpenAI();
+else if (model.startsWith("gem")) useGemini();
+else if (model.startsWith("qwen"))useQwenBrowser();
+<span class="cm">// …and it grows with every provider</span></pre>
+            </div>
+            <p class="lead" style="font-size:22px;margin-top:4px;">RustProxyHub collapses all of it behind <b>one</b> OpenAI-compatible endpoint.</p>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>The fragmentation problem</span><span class="count">02 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 2 · WHAT IT IS ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>02 · <b>Overview</b></span></div></div>
+      <div class="head">
+        <div class="kick">What it is</div>
+        <h2 class="title">A local, <span class="a">OpenAI-compatible</span> proxy hub</h2>
+        <p class="lead">Point any OpenAI-style client at <b>localhost:3100</b>. RustProxyHub routes each request to the right provider, streams the reply back, and shows live health in a desktop dashboard.</p>
+      </div>
+      <div class="main">
+        <div class="cards c3">
+          <div class="card"><div class="ic">unified api</div><h4>One endpoint</h4><p>/v1/chat/completions, /v1/models and /v1/messages: the interface every tool already knows.</p></div>
+          <div class="card"><div class="ic">7 providers</div><h4>Prefix routing</h4><p>qwen: · chatgpt: · gemini: · mistral: · deepseek: · kimi: · zai: pick the backend by model name.</p></div>
+          <div class="card"><div class="ic">streaming</div><h4>SSE passthrough</h4><p>Token-by-token text/event-stream responses relayed straight from the upstream provider.</p></div>
+          <div class="card"><div class="ic">browser-backed</div><h4>Session providers</h4><p>Playwright drives login-only providers like Zai, no public API key required.</p></div>
+          <div class="card"><div class="ic">desktop</div><h4>Single bundle</h4><p>Tauri packages the Rust server, Node bridge and WebView2 UI into one installer.</p></div>
+          <div class="card"><div class="ic">observability</div><h4>Live dashboard</h4><p>Vue 3 + Pinia dashboard pushes provider health and logs in real time, no polling.</p></div>
+        </div>
+      </div>
+      <div class="foot"><span>What RustProxyHub is</span><span class="count">03 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 3 · ARCHITECTURE ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>03 · <b>Architecture</b></span></div></div>
+      <div class="head">
+        <div class="kick">The shape of it</div>
+        <h2 class="title">Three layers, <span class="a">one process</span></h2>
+        <p class="lead">A Vue front-end talks to a Rust core over Tauri commands; the core runs an <b>axum</b> HTTP server that fans requests out to upstream providers over <b>reqwest</b>.</p>
+      </div>
+      <div class="main">
+        <div style="display:flex;flex-direction:column;gap:34px;justify-content:center;height:100%;">
+          <div class="flow">
+            <div class="fbox"><div class="ft">frontend</div><div class="fm">Vue 3 + Pinia dashboard</div><div class="fs">WebView2 · GSAP · Chart.js</div></div>
+            <div class="farrow">→</div>
+            <div class="fbox accent"><div class="ft">tauri core (Rust)</div><div class="fm">control_room + axum server</div><div class="fs">Arc&lt;Mutex&gt; state · :3100</div></div>
+            <div class="farrow">→</div>
+            <div class="fbox"><div class="ft">routing layer</div><div class="fm">normalize_prefixed_model</div><div class="fs">prefix → ProviderName</div></div>
+            <div class="farrow">→</div>
+            <div class="fbox"><div class="ft">upstream</div><div class="fm">7 providers</div><div class="fs">reqwest · SSE · Playwright</div></div>
+          </div>
+          <div class="cols" style="gap:28px;">
+            <table class="kv">
+              <tr><td>Backend</td><td>Rust 2021 · Tauri 2.11.2 · <span class="g">axum 0.8 on tokio</span></td></tr>
+              <tr><td>Frontend</td><td>Vue 3.5 · Pinia 3 · TypeScript · <span class="g">Vite</span></td></tr>
+              <tr><td>Server</td><td>Local axum on <span class="g">127.0.0.1:3100</span></td></tr>
+            </table>
+            <table class="kv">
+              <tr><td>State</td><td>control_room · <span class="g">Arc&lt;Mutex&lt;…&gt;&gt;</span></td></tr>
+              <tr><td>Bridge</td><td>Node + Playwright <span class="g">for session providers</span></td></tr>
+              <tr><td>Transport</td><td>reqwest 0.12 · <span class="g">rustls-tls · stream</span></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Architecture · request → provider</span><span class="count">04 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 4 · UNIFIED API ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>04 · <b>The API Surface</b></span></div></div>
+      <div class="head">
+        <div class="kick">One router</div>
+        <h2 class="title">The <span class="a">axum</span> route table</h2>
+        <p class="lead">Every endpoint is declared in one place. OpenAI, Anthropic-style messages, and health/observability routes share a single typed <b>Router</b>.</p>
+      </div>
+      <div class="main">
+        <div class="cols wide">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">runtime/hub_impl/<span class="path">main.rs</span> · L162</span></div>
+              <pre class="code sm" data-lang="rust">let app = Router::new()
+    .route("/health", get(health))
+    .route("/providers", get(providers))
+    .route("/v1/models", get(models))
+    .route("/v1/chat/completions", post(chat_completions))
+    .route("/v1/chat/completions/stop", post(chat_completions_stop))
+    .route("/v1/responses", post(responses))
+    .route("/v1/messages", post(anthropic_messages))
+    .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
+    .route("/v1/upload", post(upload))
+    .with_state(state);</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="subhead">What each route is for</div>
+            <ul class="notes tight">
+              <li><b>/v1/chat/completions</b> <span>:the primary OpenAI endpoint; streams or buffers.</span></li>
+              <li><b>/v1/messages</b> <span>:Anthropic-style messages + token counting.</span></li>
+              <li><b>/v1/models</b> <span>:merged model list from all healthy providers.</span></li>
+              <li><b>/health · /providers</b> <span>:feed the live dashboard.</span></li>
+              <li><b>/v1/upload</b> <span>:multipart inputs for multimodal requests.</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>The unified API surface</span><span class="count">05 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 5 · ROUTING ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>05 · <b>Routing</b></span></div></div>
+      <div class="head">
+        <div class="kick">Pick a backend</div>
+        <h2 class="title">Routing by <span class="a">model prefix</span></h2>
+        <p class="lead">The part before the colon selects the provider; everything after is the real model id. Unknown prefixes fall back to inference.</p>
+      </div>
+      <div class="main">
+        <div class="cols wide">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">runtime/hub_impl/<span class="path">main.rs</span> · L796</span></div>
+              <pre class="code sm" data-lang="rust">fn normalize_prefixed_model(model: &amp;str) -&gt; RoutedModel {
+    let trimmed = model.trim();
+    if let Some((prefix, actual)) = trimmed.split_once(':') {
+        let provider = match prefix.to_ascii_lowercase().as_str() {
+            "deepseek" =&gt; ProviderName::Deepseek,
+            "kimi"     =&gt; ProviderName::Kimi,
+            "qwen"     =&gt; ProviderName::Qwen,
+            "chatgpt"  =&gt; ProviderName::Chatgpt,
+            "gemini"   =&gt; ProviderName::Gemini,
+            "mistral"  =&gt; ProviderName::Mistral,
+            "zai"      =&gt; ProviderName::Zai,
+            _ =&gt; infer_provider(trimmed),
+        };
+        <span class="cm">// → RoutedModel { provider, model: actual }</span>
+    }
+}</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="subhead">Reading a model id</div>
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="panel-title">example</span></div>
+              <pre class="code" data-lang="text"><span class="cn">qwen</span> : <span class="str">qwen-32b</span>
+ │        └── actual model id
+ └── prefix → ProviderName::Qwen</pre>
+            </div>
+            <ul class="notes tight">
+              <li><b>Case-insensitive</b> <span>:prefixes are lowercased before matching.</span></li>
+              <li><b>Graceful fallback</b> <span>:no known prefix? infer_provider() decides.</span></li>
+              <li><b>Zero-cost</b> <span>:a single split + match, no allocation on the hot path.</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Model-prefix routing</span><span class="count">06 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 6 · PROVIDERS ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>06 · <b>Providers</b></span></div></div>
+      <div class="head">
+        <div class="kick">Seven backends</div>
+        <h2 class="title">One enum, a <span class="a">fixed order</span></h2>
+        <p class="lead">Providers are a closed set: a Rust enum plus a canonical <b>PROVIDER_ORDER</b> that drives health checks, the model list, and dashboard layout.</p>
+      </div>
+      <div class="main">
+        <div class="cols lead-left">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">runtime/hub_impl/<span class="path">main.rs</span> · L87</span></div>
+              <pre class="code sm" data-lang="rust">enum ProviderName {
+    Deepseek, Kimi, Qwen, Chatgpt,
+    Gemini, Mistral, Zai,
+}
+
+const PROVIDER_ORDER: [ProviderName; 7] = [
+    ProviderName::Qwen,    ProviderName::Deepseek,
+    ProviderName::Kimi,    ProviderName::Chatgpt,
+    ProviderName::Gemini,  ProviderName::Mistral,
+    ProviderName::Zai,
+];</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="pgrid" style="grid-template-columns:repeat(2,1fr);">
+              <div class="pcell ok"><div class="pn">Qwen</div><div class="pm">qwen:*</div><div class="ps">api</div></div>
+              <div class="pcell ok"><div class="pn">ChatGPT</div><div class="pm">chatgpt:*</div><div class="ps">api</div></div>
+              <div class="pcell ok"><div class="pn">Gemini</div><div class="pm">gemini:*</div><div class="ps">api</div></div>
+              <div class="pcell ok"><div class="pn">Mistral</div><div class="pm">mistral:*</div><div class="ps">api</div></div>
+              <div class="pcell ok"><div class="pn">DeepSeek</div><div class="pm">deepseek:*</div><div class="ps">api</div></div>
+              <div class="pcell ok"><div class="pn">Kimi</div><div class="pm">kimi:*</div><div class="ps">api</div></div>
+              <div class="pcell wip" style="grid-column:1/span 2;"><div class="pn">Zai</div><div class="pm">zai:* · browser session via Playwright</div><div class="ps wip">in progress</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Supported providers</span><span class="count">07 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 7 · HEALTH ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>07 · <b>Health</b></span></div></div>
+      <div class="head">
+        <div class="kick">Is everyone up?</div>
+        <h2 class="title">Health checks, <span class="a">all at once</span></h2>
+        <p class="lead">Every provider is pinged concurrently with <b>join_all</b>; the results feed both /health and the live dashboard. One slow backend never blocks the rest.</p>
+      </div>
+      <div class="main">
+        <div class="cols wide">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">runtime/hub_impl/<span class="path">main.rs</span> · L498</span></div>
+              <pre class="code sm" data-lang="rust">async fn provider_health_checks(state: &amp;AppState)
+    -&gt; Vec&lt;ProviderHealth&gt; {
+  join_all(PROVIDER_ORDER.into_iter().map(|provider| async move {
+    let config = state.provider_config(provider);
+    let res = provider_request(&amp;state.client, config,
+                               Method::GET, "/health").send().await;
+    match res {
+      Ok(r) =&gt; ProviderHealth {
+        provider, healthy: r.status().is_success(),
+        status_code: Some(r.status().as_u16()),
+        detail: r.json::&lt;Value&gt;().await.ok(),
+      },
+      Err(_) =&gt; ProviderHealth { provider, healthy: false, .. },
+    }
+  })).await
+}</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="subhead">Why it matters</div>
+            <ul class="notes tight">
+              <li><b>Concurrent</b> <span>:join_all fans out all 7 pings in parallel.</span></li>
+              <li><b>Fault-tolerant</b> <span>:an unreachable provider becomes healthy:&nbsp;false, not a crash.</span></li>
+              <li><b>Structured</b> <span>:status code + JSON detail captured per provider.</span></li>
+              <li><b>Ordered</b> <span>:PROVIDER_ORDER keeps the UI stable frame to frame.</span></li>
+            </ul>
+            <div class="stats" style="grid-template-columns:repeat(2,1fr);">
+              <div class="st"><div class="v">7</div><div class="k">parallel pings</div></div>
+              <div class="st"><div class="v">/health</div><div class="k">per provider</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Concurrent health checks</span><span class="count">08 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 8 · STREAMING ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>08 · <b>Streaming</b></span></div></div>
+      <div class="head">
+        <div class="kick">Token by token</div>
+        <h2 class="title">SSE, <span class="a">framed by hand</span></h2>
+        <p class="lead">Responses are streamed as <b>text/event-stream</b>. Each chunk is a <b>data:</b> line; the stream ends with <b>[DONE]</b>, exactly what OpenAI clients expect.</p>
+      </div>
+      <div class="main">
+        <div class="cols wide">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">runtime/providers/qwen_impl/<span class="path">main.rs</span> · L1907</span></div>
+              <pre class="code sm" data-lang="rust">fn sse_json(value: Value) -&gt; Bytes {
+    Bytes::from(format!("data: {}\n\n", value))
+}
+fn sse_done() -&gt; Bytes {
+    Bytes::from("data: [DONE]\n\n")
+}
+
+fn stream_response&lt;S&gt;(stream: S) -&gt; Response
+where S: Stream&lt;Item = Result&lt;Bytes, Infallible&gt;&gt; + Send + 'static {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .header(CACHE_CONTROL, "no-cache, no-transform")
+        .header(CONNECTION, "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(stream))
+        .expect("valid streaming response")
+}</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="subhead">On the wire</div>
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="panel-title">response stream</span></div>
+              <pre class="code sm" data-lang="text"><span class="kw">data:</span> {"choices":[{"delta":{"content":"Hel"}}]}
+<span class="kw">data:</span> {"choices":[{"delta":{"content":"lo"}}]}
+<span class="kw">data:</span> {"choices":[{"delta":{"content":"!"}}]}
+<span class="kw">data:</span> [DONE]</pre>
+            </div>
+            <ul class="notes tight">
+              <li><b>x-accel-buffering: no</b> <span>:defeats proxy buffering for instant tokens.</span></li>
+              <li><b>keep-alive</b> <span>:one connection for the whole generation.</span></li>
+              <li><b>Body::from_stream</b> <span>:backpressure-aware relay from upstream.</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Server-sent event streaming</span><span class="count">09 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 9 · STATE ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>09 · <b>State &amp; Commands</b></span></div></div>
+      <div class="head">
+        <div class="kick">The control room</div>
+        <h2 class="title">Shared state behind <span class="a">Tauri commands</span></h2>
+        <p class="lead">All runtime state lives in one <b>ControlState</b> guarded by <b>Arc&lt;Mutex&gt;</b>. The Vue UI mutates it only through typed <b>#[tauri::command]</b> functions.</p>
+      </div>
+      <div class="main">
+        <div class="cols">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">control_room/<span class="path">mod.rs</span> · L57</span></div>
+              <pre class="code sm" data-lang="rust">struct ControlState {
+    workspace_root: PathBuf,
+    app_data_dir: PathBuf,
+    runtime: RuntimeDiagnostics,
+    client: reqwest::Client,
+    hub_api_key: Option&lt;String&gt;,
+    statuses: Arc&lt;Mutex&lt;HashMap&lt;String, ServiceRuntimeStatus&gt;&gt;&gt;,
+    logs: Arc&lt;Mutex&lt;HashMap&lt;String, VecDeque&lt;String&gt;&gt;&gt;&gt;,
+    tasks: Arc&lt;Mutex&lt;HashMap&lt;String, JoinHandle&lt;()&gt;&gt;&gt;&gt;,
+    app_handle: Option&lt;AppHandle&gt;,
+}</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">control_room/<span class="path">mod.rs</span> · L860</span></div>
+              <pre class="code sm" data-lang="rust">#[tauri::command]
+async fn start_service(
+    state: State&lt;'_, ControlState&gt;, name: String,
+) -&gt; Result&lt;(), String&gt; {
+    let name = normalize_service_name(&amp;name)
+        .map_err(|e| e.to_string())?;
+    if state.service_status(name).await.running {
+        return Err(format!("{} already running", name));
+    }
+    state.ensure_service_dir(name);
+    state.spawn_service_by_name(name)
+        .map_err(|e| e.to_string())
+}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>State management &amp; Tauri commands</span><span class="count">10 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 10 · FRONTEND ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>10 · <b>Frontend</b></span></div></div>
+      <div class="head">
+        <div class="kick">The dashboard</div>
+        <h2 class="title">A <span class="a">Pinia</span> store mirrors the core</h2>
+        <p class="lead">The Vue front-end keeps one reactive store. Tauri events stream provider overviews, details and logs into it, and the UI just renders whatever the Rust core reports.</p>
+      </div>
+      <div class="main">
+        <div class="cols wide">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">src/<span class="path">store.ts</span> · L62</span></div>
+              <pre class="code sm" data-lang="ts">export const useStore = defineStore('main', {
+  state: () =&gt; ({
+    locale: loadLocale() as UiLocale,
+    isInitialized: false,
+    isRefreshing: false,
+    overview: null as DashboardOverview | null,
+    providerDetails: {} as Partial&lt;Record&lt;ProviderName, ProviderDetails&gt;&gt;,
+    providerLogs: {} as Partial&lt;Record&lt;ProviderName | 'hub', string[]&gt;&gt;,
+    qwenAccounts: [] as QwenAccountSummary[],
+    activeDrawer: null as ProviderName | null,
+    refreshTimer: null as number | null,
+  }),
+})</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="subhead">Frontend stack</div>
+            <table class="kv">
+              <tr><td>Vue 3.5</td><td>reactive dashboard <span class="g">in WebView2</span></td></tr>
+              <tr><td>Pinia 3</td><td>single source of truth <span class="g">for provider state</span></td></tr>
+              <tr><td>@tauri-apps/api</td><td>commands + event <span class="g">listeners</span></td></tr>
+              <tr><td>GSAP · anime</td><td>dashboard motion</td></tr>
+              <tr><td>Chart.js · three</td><td>metrics &amp; visuals</td></tr>
+            </table>
+            <ul class="notes tight">
+              <li><b>Event-driven</b> <span>:unlistenDashboard wires live pushes, not polling.</span></li>
+              <li><b>Typed end-to-end</b> <span>:ProviderName shared with the Rust enum.</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Frontend dashboard</span><span class="count">11 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 11 · PACKAGING ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>11 · <b>Packaging</b></span></div></div>
+      <div class="head">
+        <div class="kick">Ship one file</div>
+        <h2 class="title">Tuned for a <span class="a">small, single</span> binary</h2>
+        <p class="lead">The release profile optimizes for size and strips everything; Tauri then bundles the Rust server, Node bridge and Playwright runtime into one Windows installer.</p>
+      </div>
+      <div class="main">
+        <div class="cols wide">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="panel-title">src-tauri/<span class="path">Cargo.toml</span> · L57</span></div>
+              <pre class="code" data-lang="toml">[profile.release]
+codegen-units = 1  # better LLVM optimization
+lto = true         # link-time optimization
+opt-level = "s"    # prioritize small binary size
+panic = "abort"    # drop panic unwinding
+strip = true       # remove debug symbols</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="subhead">What ships</div>
+            <ul class="notes tight">
+              <li><b>NSIS setup.exe</b> <span>:plus a standalone portable exe.</span></li>
+              <li><b>Bundled Node</b> <span>:the Playwright bridge runs with no host install.</span></li>
+              <li><b>WebView2 UI</b> <span>:the Vue dashboard, no browser dependency.</span></li>
+              <li><b>Self-contained</b> <span>:one artifact, no external services.</span></li>
+            </ul>
+            <div class="stats" style="grid-template-columns:repeat(2,1fr);">
+              <div class="st"><div class="v">"s"</div><div class="k">opt-level · size-first</div></div>
+              <div class="st"><div class="v">LTO</div><div class="k">strip · panic=abort</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Build &amp; packaging</span><span class="count">12 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 12 · STACK ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>12 · <b>Tech Stack</b></span></div></div>
+      <div class="head">
+        <div class="kick">Dependencies</div>
+        <h2 class="title">What it's <span class="a">built from</span></h2>
+        <p class="lead">A lean, modern stack: async Rust on the wire, Vue on the glass, and one verify script that gates every commit.</p>
+      </div>
+      <div class="main">
+        <div class="cols">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="panel-title">src-tauri/<span class="path">Cargo.toml</span></span></div>
+              <pre class="code sm" data-lang="toml">axum    = { version = "0.8", features = ["macros", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
+tauri   = { version = "2.11.2" }
+tokio   = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }</pre>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="panel-title"><span class="path">package.json</span> · scripts</span></div>
+              <pre class="code sm" data-lang="json">"dev":   "cross-env DEBUG=0 vite",
+"build": "vue-tsc --noEmit &amp;&amp; vite build",
+"test":  "vitest",
+"verify":"lint &amp;&amp; type-check &amp;&amp; test &amp;&amp; build &amp;&amp; audit &amp;&amp; clippy",</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="subhead">Frontend deps</div>
+            <table class="kv">
+              <tr><td>vue</td><td>^3.5.30</td></tr>
+              <tr><td>pinia</td><td>^3.0.4</td></tr>
+              <tr><td>@tauri-apps/api</td><td>^2.11.0</td></tr>
+              <tr><td>playwright</td><td>^1.60.0 <span class="g">· session bridge</span></td></tr>
+              <tr><td>gsap · animejs</td><td>^3.15 · ^3.2 <span class="g">· motion</span></td></tr>
+              <tr><td>chart.js · three</td><td>^4.5 · ^0.185 <span class="g">· visuals</span></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Tech stack recap</span><span class="count">13 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 13 · RUN IT ===== -->
+  <section class="slide">
+    <div class="body">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>13 · <b>Run It</b></span></div></div>
+      <div class="head">
+        <div class="kick">Try it</div>
+        <h2 class="title">From clone to <span class="a">first token</span></h2>
+        <p class="lead">Start the desktop app, then hit the local endpoint from any OpenAI-compatible client: curl, the SDK, or your editor.</p>
+      </div>
+      <div class="main">
+        <div class="cols">
+          <div class="col">
+            <div class="panel">
+              <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="panel-title">bash</span></div>
+              <pre class="code sm" data-lang="shell"><span class="cm"># dev: Vite + Tauri</span>
+$ pnpm install
+$ pnpm tauri dev
+
+<span class="cm"># call the hub like OpenAI</span>
+$ curl localhost:3100/v1/chat/completions \
+    -H "content-type: application/json" \
+    -d '{"model":"qwen:qwen-32b",
+         "messages":[{"role":"user",
+                      "content":"hi"}],
+         "stream":true}'</pre>
+            </div>
+          </div>
+          <div class="col">
+            <div class="subhead">Status &amp; roadmap</div>
+            <ul class="notes">
+              <li><b>Stable</b> <span>:six API providers routed, streamed and health-checked.</span></li>
+              <li><b>In progress</b> <span>:first-class Zai browser session via Playwright.</span></li>
+              <li><b>Next</b> <span>:dashboard polish + finishing the frontend verify pass.</span></li>
+            </ul>
+            <div class="stats" style="grid-template-columns:repeat(3,1fr);">
+              <div class="st"><div class="v">:3100</div><div class="k">local port</div></div>
+              <div class="st"><div class="v">7</div><div class="k">providers</div></div>
+              <div class="st"><div class="v">SSE</div><div class="k">streaming</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Running the hub</span><span class="count">14 / 15</span></div>
+    </div>
+  </section>
+
+  <!-- ===== 14 · CLOSE ===== -->
+  <section class="slide">
+    <div class="t-wrap">
+      <div class="top"><div class="brand">rust·proxy·<b>hub</b></div><div class="sec"><span>15 · <b>Recap</b></span></div></div>
+      <div class="t-hero" style="margin-top:150px;">
+        <div class="kick">The whole story, one line</div>
+        <h1 class="t-title" style="font-size:104px;">One API.<br><span class="hub">Seven</span> models. One app.</h1>
+        <p class="t-sub">A Rust + Tauri proxy hub that routes by model prefix, streams over SSE, drives browser-only providers with Playwright, and reports live health to a Vue dashboard, all in a single desktop bundle.</p>
+      </div>
+      <div class="t-term" style="margin-top:52px;width:1000px;">
+        <div class="panel">
+          <div class="panel-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="panel-title">endpoints</span></div>
+          <pre class="code sm" data-lang="text">POST /v1/chat/completions   ·  GET /v1/models   ·  POST /v1/messages
+GET  /health   ·   GET /providers        →  serving on 127.0.0.1:3100<span class="cursor"></span></pre>
+        </div>
+      </div>
+      <div class="foot"><span>github.com/…/RustProxyHub · v<b>2.11.2</b> · thank you</span><span class="count">15 / 15</span></div>
+    </div>
+  </section>
+
+  </div>
+</div>
+<div class="pbar" id="pbar" role="progressbar" aria-label="Presentation progress" aria-valuemin="1" aria-valuemax="15" aria-valuenow="1"></div>
+<nav class="deck-controls" id="dots" aria-label="Slide navigation"></nav>
+<div id="live" class="sr-only" aria-live="polite" role="status">Slide 1 of 15</div>
+
+<script>
+/* ---- syntax highlighter (rust / ts / toml / json / shell) ---- */
+function highlight(raw, lang){
+  var kwmap={
+    rust:'fn let mut match async await struct enum impl const if else return use pub self Self as where for in loop while move ref dyn true false Some None Ok Err',
+    ts:'export const let var function return if else await async new as import from type interface enum class extends null true false this default',
+    toml:'true false',
+    json:'true false null',
+    shell:'', text:''
+  };
+  var kwset={};(kwmap[lang]||'').split(' ').forEach(function(w){if(w)kwset[w]=1;});
+  var s=raw,n=s.length,i=0,out='';
+  function escs(str){return str.replace(/[&<>]/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':'&gt;';});}
+  while(i<n){
+    var c=s[i];
+    if((lang==='toml'||lang==='shell')&&c==='#'){var j=s.indexOf('\n',i);if(j<0)j=n;out+='<span class="cm">'+escs(s.slice(i,j))+'</span>';i=j;continue;}
+    if(c==='/'&&s[i+1]==='/'){var j=s.indexOf('\n',i);if(j<0)j=n;out+='<span class="cm">'+escs(s.slice(i,j))+'</span>';i=j;continue;}
+    if(lang==='rust'&&c==='#'&&s[i+1]==='['){var j=s.indexOf(']',i);j=j<0?n:j+1;out+='<span class="at">'+escs(s.slice(i,j))+'</span>';i=j;continue;}
+    if(c==='"'||c==="'"){var q=c,j=i+1;while(j<n&&s[j]!==q){if(s[j]==='\\')j++;j++;}j++;if(j>n)j=n;out+='<span class="str">'+escs(s.slice(i,j))+'</span>';i=j;continue;}
+    if(c>='0'&&c<='9'){var j=i;while(j<n&&/[0-9_.]/.test(s[j]))j++;out+='<span class="num">'+escs(s.slice(i,j))+'</span>';i=j;continue;}
+    if(/[A-Za-z_]/.test(c)){var j=i;while(j<n&&/[A-Za-z0-9_]/.test(s[j]))j++;var w=s.slice(i,j),cls='';
+      if(kwset[w])cls='kw';
+      else if(/^[A-Z][A-Za-z0-9_]*$/.test(w)&&/[a-z]/.test(w))cls='ty';
+      else if(/^[A-Z0-9_]{2,}$/.test(w))cls='cn';
+      else if(s[j]==='(')cls='fn';
+      out+=cls?'<span class="'+cls+'">'+escs(w)+'</span>':escs(w);i=j;continue;}
+    out+=escs(c);i++;
+  }
+  return out;
+}
+document.querySelectorAll('pre.code').forEach(function(pre){
+  if(pre.querySelector('span')) { /* pre-highlighted markup present: still colorize plain text nodes */ }
+  var lang=pre.getAttribute('data-lang')||'text';
+  // Only auto-highlight blocks that have NO manual spans, to avoid double-processing.
+  if(!pre.querySelector('span')){
+    pre.innerHTML=highlight(pre.textContent,lang);
+  }
+});
+
+/* ---- deck engine ---- */
+var slides=Array.prototype.slice.call(document.querySelectorAll('.slide'));
+var stage=document.getElementById('stage');
+var pbar=document.getElementById('pbar');
+var dots=document.getElementById('dots');
+var cur=0;
+slides.forEach(function(_,i){var d=document.createElement('button');d.type='button';d.setAttribute('aria-label','Go to slide '+(i+1)+' of '+slides.length);d.onclick=function(){go(i);};dots.appendChild(d);});
+var live=document.getElementById('live');
+function fit(){var k=Math.min(innerWidth/1920,innerHeight/1080);
+  stage.style.transform='translate('+(innerWidth-1920*k)/2+'px,'+(innerHeight-1080*k)/2+'px) scale('+k+')';}
+function go(i){cur=Math.max(0,Math.min(slides.length-1,i));
+  slides.forEach(function(s,n){s.classList.toggle('active',n===cur);});
+  Array.prototype.forEach.call(dots.children,function(d,n){if(n===cur)d.setAttribute('aria-current','true');else d.removeAttribute('aria-current');});
+  pbar.style.width=((cur+1)/slides.length*100)+'%';
+  pbar.setAttribute('aria-valuenow',cur+1);
+  if(live)live.textContent='Slide '+(cur+1)+' of '+slides.length;
+  location.hash=cur;}
+addEventListener('keydown',function(e){
+  if(e.key==='ArrowRight'||e.key==='PageDown'||e.key===' '){e.preventDefault();go(cur+1);}
+  else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();go(cur-1);}
+  else if(e.key==='Home'){go(0);}else if(e.key==='End'){go(slides.length-1);}});
+addEventListener('resize',fit);
+var h=parseInt(location.hash.slice(1));cur=isNaN(h)?0:h;
+fit();go(cur);
+</script>
+</body>
+</html>

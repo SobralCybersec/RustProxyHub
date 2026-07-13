@@ -11,12 +11,12 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
-    App: typeof import('./src/components/dashboard/App.vue')['default']
     DetailsDrawer: typeof import('./src/components/dashboard/DetailsDrawer.vue')['default']
     HubHeader: typeof import('./src/components/dashboard/HubHeader.vue')['default']
     LoginStudio: typeof import('./src/components/dashboard/LoginStudio.vue')['default']
     ProviderGrid: typeof import('./src/components/dashboard/ProviderGrid.vue')['default']
     QwenAccountsPanel: typeof import('./src/components/dashboard/QwenAccountsPanel.vue')['default']
+    SparkChart: typeof import('./src/components/dashboard/SparkChart.vue')['default']
     WorkbenchPanel: typeof import('./src/components/dashboard/WorkbenchPanel.vue')['default']
   }
 }

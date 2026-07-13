@@ -41,6 +41,12 @@ describe('agent setup helpers', () => {
     expect(setup.content).toContain('"id": "glm-5.1"')
   })
 
+  it('includes meta session fallback when discovery is empty', () => {
+    const setup = buildPiSetup(makeProvider({ name: 'meta', base_url: 'http://127.0.0.1:3007', models: [] }))
+
+    expect(setup.content).toContain('"id": "meta-ai-web-session"')
+  })
+
   it('builds a Claude settings snippet for browser-backed Anthropic compatibility', () => {
     const setup = buildClaudeSetup(makeProvider({ name: 'kimi', base_url: 'http://127.0.0.1:3002', models: ['kimi-k2.6'] }))
 

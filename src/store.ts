@@ -31,6 +31,7 @@ const defaultBrowserPrefs: BrowserPrefs = {
   gemini: 'msedge',
   mistral: 'msedge',
   zai: 'msedge',
+  meta: 'msedge',
 }
 
 type BusyMap = Record<string, boolean>

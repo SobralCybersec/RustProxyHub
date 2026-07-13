@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
     time::Duration,
 };
 
@@ -60,6 +61,7 @@ struct AppConfig {
     gemini: ProviderConfig,
     mistral: ProviderConfig,
     zai: ProviderConfig,
+    meta: ProviderConfig,
 }
 
 #[derive(Clone)]
@@ -74,12 +76,14 @@ pub struct HubServiceConfig {
     pub gemini: ProviderConfig,
     pub mistral: ProviderConfig,
     pub zai: ProviderConfig,
+    pub meta: ProviderConfig,
 }
 
 #[derive(Clone)]
 struct AppState {
     client: reqwest::Client,
     config: AppConfig,
+    models_cache: Arc<tokio::sync::RwLock<Option<(serde_json::Value, std::time::Instant)>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -92,6 +96,7 @@ enum ProviderName {
     Gemini,
     Mistral,
     Zai,
+    Meta,
 }
 
 impl ProviderName {
@@ -104,11 +109,12 @@ impl ProviderName {
             Self::Gemini => "gemini",
             Self::Mistral => "mistral",
             Self::Zai => "zai",
+            Self::Meta => "meta",
         }
     }
 }
 
-const PROVIDER_ORDER: [ProviderName; 7] = [
+const PROVIDER_ORDER: [ProviderName; 8] = [
     ProviderName::Qwen,
     ProviderName::Deepseek,
     ProviderName::Kimi,
@@ -116,6 +122,7 @@ const PROVIDER_ORDER: [ProviderName; 7] = [
     ProviderName::Gemini,
     ProviderName::Mistral,
     ProviderName::Zai,
+    ProviderName::Meta,
 ];
 
 #[derive(Debug, Serialize)]
@@ -157,6 +164,7 @@ async fn run_server(config: AppConfig) -> Result<()> {
             .timeout(Duration::from_secs(120))
             .build()?,
         config: config.clone(),
+        models_cache: Arc::new(tokio::sync::RwLock::new(None)),
     };
 
     let app = Router::new()
@@ -234,6 +242,13 @@ fn load_config() -> AppConfig {
             base_url: std::env::var("ZAI_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3006".to_owned()),
             api_key: std::env::var("ZAI_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+        },
+        meta: ProviderConfig {
+            base_url: std::env::var("META_BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3007".to_owned()),
+            api_key: std::env::var("META_API_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
         },
@@ -343,15 +358,23 @@ async fn chat_completions(
     }
 
     let routed = normalize_prefixed_model(&body.model);
-    let mut upstream_body = body.clone();
-    upstream_body.model = routed.model.clone();
+    // Avoid full clone when model string is unchanged (no prefix was stripped).
+    // upstream_body_owned is only initialized in the true branch; ProviderName is Copy.
+    let upstream_body_owned;
+    let upstream_body: &OpenAIRequest = if routed.model != body.model {
+        upstream_body_owned = { let mut b = body.clone(); b.model = routed.model; b };
+        &upstream_body_owned
+    } else {
+        // ponytail: model string swap; full clone acceptable for large context until OpenAIRequest gets Cow<str> model
+        &body
+    };
 
     if body.stream.unwrap_or(false) {
         return match proxy_stream_post(
             &state,
             routed.provider,
             "/v1/chat/completions",
-            &upstream_body,
+            upstream_body,
         )
         .await
         {
@@ -364,7 +387,7 @@ async fn chat_completions(
         &state,
         routed.provider,
         "/v1/chat/completions",
-        &upstream_body,
+        upstream_body,
         Some(body.model.clone()),
     )
     .await
@@ -525,6 +548,19 @@ async fn provider_health_checks(state: &AppState) -> Vec<ProviderHealth> {
 }
 
 async fn fetch_merged_models(state: &AppState) -> Result<Value> {
+    const TTL: Duration = Duration::from_secs(30);
+
+    // read lock — concurrent callers share the fast path
+    {
+        let cached = state.models_cache.read().await;
+        if let Some((ref val, ts)) = *cached {
+            if ts.elapsed() < TTL {
+                return Ok(val.clone());
+            }
+        }
+    }
+
+    // cache miss — fan out to all providers
     let mut data = Vec::new();
     let mut errors = Vec::new();
 
@@ -547,11 +583,9 @@ async fn fetch_merged_models(state: &AppState) -> Result<Value> {
         return Err(anyhow!("all upstream model lists failed"));
     }
 
-    Ok(json!({
-        "object": "list",
-        "data": data,
-        "errors": errors,
-    }))
+    let result = json!({ "object": "list", "data": data, "errors": errors });
+    *state.models_cache.write().await = Some((result.clone(), std::time::Instant::now()));
+    Ok(result)
 }
 
 async fn fetch_provider_models(state: &AppState, provider: ProviderName) -> Result<Vec<Value>> {
@@ -805,6 +839,7 @@ fn normalize_prefixed_model(model: &str) -> RoutedModel {
             "gemini" => ProviderName::Gemini,
             "mistral" => ProviderName::Mistral,
             "zai" => ProviderName::Zai,
+            "meta" => ProviderName::Meta,
             _ => infer_provider(trimmed),
         };
         return RoutedModel {
@@ -834,6 +869,8 @@ fn infer_provider(model: &str) -> ProviderName {
         ProviderName::Mistral
     } else if lower.starts_with("glm") || lower.starts_with("autoglm") || lower.starts_with("zai") {
         ProviderName::Zai
+    } else if lower.starts_with("meta") || lower.starts_with("llama") {
+        ProviderName::Meta
     } else if lower.starts_with("gpt")
         || lower.starts_with("o1")
         || lower.starts_with("o3")
@@ -858,6 +895,7 @@ impl AppState {
             ProviderName::Gemini => &self.config.gemini,
             ProviderName::Mistral => &self.config.mistral,
             ProviderName::Zai => &self.config.zai,
+            ProviderName::Meta => &self.config.meta,
         }
     }
 }
@@ -874,6 +912,7 @@ pub async fn serve_embedded(config: HubServiceConfig) -> Result<()> {
         gemini: config.gemini,
         mistral: config.mistral,
         zai: config.zai,
+        meta: config.meta,
     })
     .await
 }
@@ -884,7 +923,7 @@ fn openapi_document(config: &AppConfig) -> Value {
         "info": {
             "title": "RustProxyHub Unified API",
             "version": "0.1.0",
-            "description": "Unified OpenAI-compatible gateway for the embedded Qwen, DeepSeek, Kimi, ChatGPT, Gemini, and Mistral proxy services."
+            "description": "Unified OpenAI-compatible gateway for the embedded Qwen, DeepSeek, Kimi, ChatGPT, Gemini, Mistral, Z.AI, and Meta AI proxy services."
         },
         "servers": [
             { "url": format!("http://127.0.0.1:{}", config.port) }
@@ -1149,6 +1188,13 @@ mod tests {
     }
 
     #[test]
+    fn routes_prefixed_meta_models_to_meta() {
+        let routed = normalize_prefixed_model("meta:meta-ai-web-session");
+        assert_eq!(routed.provider, ProviderName::Meta);
+        assert_eq!(routed.model, "meta-ai-web-session");
+    }
+
+    #[test]
     fn infers_mistral_family_models() {
         assert_eq!(infer_provider("mistral-medium"), ProviderName::Mistral);
         assert_eq!(infer_provider("magistral-medium"), ProviderName::Mistral);
@@ -1159,6 +1205,12 @@ mod tests {
     fn infers_glm_family_models_to_zai() {
         assert_eq!(infer_provider("glm-5.2"), ProviderName::Zai);
         assert_eq!(infer_provider("autoglm-agent"), ProviderName::Zai);
+    }
+
+    #[test]
+    fn infers_meta_family_models() {
+        assert_eq!(infer_provider("meta-ai-web-session"), ProviderName::Meta);
+        assert_eq!(infer_provider("llama-4"), ProviderName::Meta);
     }
 
     #[test]

@@ -1,0 +1,7 @@
+[advisories]
+ignore = [
+    # glib 0.18.5 — VariantStrIter unsoundness (RUSTSEC-2024-0429)
+    # Transitive via tauri → gtk → glib. No 0.18.x patch exists; fix requires
+    # bumping Tauri's entire GTK stack. Revisit when Tauri upgrades gtk-rs.
+    "RUSTSEC-2024-0429",
+]

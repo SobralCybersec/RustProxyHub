@@ -16,7 +16,6 @@ dist
 dist-ssr
 *.local
 
-
 # Editor directories and files
 .idea
 .DS_Store
@@ -58,3 +57,6 @@ Cargo.lock
 *.zip
 src/test/
 
+AGENTS2.md
+DESIGN.md
+CLAUDE2.md
