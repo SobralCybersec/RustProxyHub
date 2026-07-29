@@ -68,6 +68,62 @@ function assertSafeAccountId(accountId) {
   }
 }
 
+// Known install locations per Chromium-family browser, across platforms. Used
+// to fall back to an installed browser when the requested channel's own
+// distribution is missing (e.g. 'msedge' requested on a Linux box that only has
+// Chromium) instead of hard-failing the launch.
+const BROWSER_PATHS = {
+  msedge: [
+    '/opt/microsoft/msedge/msedge',
+    '/usr/bin/microsoft-edge',
+    '/usr/bin/microsoft-edge-stable',
+    '/usr/bin/microsoft-edge-beta',
+    '/usr/bin/microsoft-edge-dev',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  ],
+  chrome: [
+    '/opt/google/chrome/chrome',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ],
+  chromium: [
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  ],
+}
+
+function firstExisting(paths) {
+  return paths.find((candidate) => fs.existsSync(candidate))
+}
+
+// Resolve a Chromium launch config. If the requested channel's real
+// distribution is installed, drive it via `channel` (Playwright applies the
+// right profile flags). Otherwise point `executablePath` at whatever
+// Chromium-family browser IS installed — preferring the requested family, then
+// Edge → Chrome → Chromium. Last resort is Playwright's bundled chromium.
+function resolveChromium(preferredChannel) {
+  if (preferredChannel && firstExisting(BROWSER_PATHS[preferredChannel] ?? [])) {
+    return { engine: chromium, channel: preferredChannel }
+  }
+  const order = preferredChannel
+    ? [preferredChannel, 'msedge', 'chrome', 'chromium']
+    : ['chromium', 'chrome', 'msedge']
+  for (const key of order) {
+    const executablePath = firstExisting(BROWSER_PATHS[key] ?? [])
+    if (executablePath) {
+      return { engine: chromium, executablePath }
+    }
+  }
+  return { engine: chromium }
+}
+
 function resolveEngine(browser) {
   switch (browser) {
     case 'firefox':
@@ -75,13 +131,13 @@ function resolveEngine(browser) {
     case 'webkit':
       return { engine: webkit }
     case 'chrome':
-      return { engine: chromium, channel: 'chrome' }
+      return resolveChromium('chrome')
     case 'edge':
     case 'msedge':
-      return { engine: chromium, channel: 'msedge' }
+      return resolveChromium('msedge')
     case 'chromium':
     default:
-      return { engine: chromium }
+      return resolveChromium(null)
   }
 }
 
@@ -407,10 +463,11 @@ async function initDeepSeek({ runtime_dir, headless, browser }) {
     state.deepseek.page = null
   }
   ensureDir(path.resolve('deepseek_profile'))
-  const { engine, channel } = resolveEngine(browser)
+  const { engine, channel, executablePath } = resolveEngine(browser)
   state.deepseek.context = await engine.launchPersistentContext(path.resolve('deepseek_profile'), {
     headless,
     channel,
+    executablePath,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     args: [
       '--disable-blink-features=AutomationControlled',
@@ -508,10 +565,11 @@ async function initChatGPT({ runtime_dir, headless, browser }) {
     state.chatgpt.lastHeadersTime = 0
   }
   ensureDir(path.resolve('chatgpt_profile'))
-  const { engine, channel } = resolveEngine(browser)
+  const { engine, channel, executablePath } = resolveEngine(browser)
   state.chatgpt.context = await engine.launchPersistentContext(path.resolve('chatgpt_profile'), {
     headless,
     channel,
+    executablePath,
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
@@ -627,29 +685,40 @@ async function getChatGPTBasicHeaders() {
   }
 }
 
-function buildChatGPTPayload(prompt, model, webSearch) {
+function buildChatGPTMessages(prompt, webSearch, systemPrompt) {
+  const messages = []
+  if (systemPrompt && systemPrompt.trim()) {
+    messages.push({
+      id: randomUUID(),
+      author: { role: 'system' },
+      create_time: Date.now() / 1000,
+      content: { content_type: 'text', parts: [systemPrompt.trim()] },
+      metadata: {},
+    })
+  }
+  messages.push({
+    id: randomUUID(),
+    author: { role: 'user' },
+    create_time: Date.now() / 1000,
+    content: {
+      content_type: 'text',
+      parts: [prompt],
+    },
+    metadata: {
+      developer_mode_connector_ids: [],
+      selected_sources: webSearch ? ['web'] : [],
+      selected_github_repos: [],
+      selected_all_github_repos: false,
+      serialization_metadata: { custom_symbol_offsets: [] },
+    },
+  })
+  return messages
+}
+
+function buildChatGPTPayload(prompt, model, webSearch, systemPrompt) {
   return {
     action: 'next',
-    messages: [
-      {
-        id: randomUUID(),
-        author: { role: 'user' },
-        create_time: Date.now() / 1000,
-        content: {
-          content_type: 'text',
-          parts: [prompt],
-        },
-        metadata: {
-          developer_mode_connector_ids: [],
-          selected_sources: webSearch ? ['web'] : [],
-          selected_github_repos: [],
-          selected_all_github_repos: false,
-          serialization_metadata: {
-            custom_symbol_offsets: [],
-          },
-        },
-      },
-    ],
+    messages: buildChatGPTMessages(prompt, webSearch, systemPrompt),
     parent_message_id: 'client-created-root',
     model,
     client_prepare_state: 'success',
@@ -708,14 +777,14 @@ function compactChatGPTPrompt(prompt, maxChars = 18000) {
   }
 }
 
-function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch) {
+function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch, systemPrompt) {
   let payload = null
   try {
     payload = template?.payload ? JSON.parse(template.payload) : null
   } catch {}
 
   if (!payload || typeof payload !== 'object') {
-    return buildChatGPTPayload(prompt, model, webSearch)
+    return buildChatGPTPayload(prompt, model, webSearch, systemPrompt)
   }
 
   const nextPayload = cloneJson(payload)
@@ -737,19 +806,29 @@ function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch) {
   delete nextPayload.responseId
   delete nextPayload.suggestions
   delete nextPayload.history_and_training_disabled
-  nextPayload.messages = [
-    {
-      ...templateMessage,
+
+  const builtMessages = []
+  if (systemPrompt && systemPrompt.trim()) {
+    builtMessages.push({
       id: randomUUID(),
+      author: { role: 'system' },
       create_time: Date.now() / 1000,
-      author: { ...(templateMessage.author || {}), role: 'user' },
-      content: replaceChatGPTMessageContent(templateMessage.content, prompt),
-      metadata: {
-        ...templateMetadata,
-        selected_sources: webSearch ? ['web'] : [],
-      },
+      content: { content_type: 'text', parts: [systemPrompt.trim()] },
+      metadata: {},
+    })
+  }
+  builtMessages.push({
+    ...templateMessage,
+    id: randomUUID(),
+    create_time: Date.now() / 1000,
+    author: { ...(templateMessage.author || {}), role: 'user' },
+    content: replaceChatGPTMessageContent(templateMessage.content, prompt),
+    metadata: {
+      ...templateMetadata,
+      selected_sources: webSearch ? ['web'] : [],
     },
-  ]
+  })
+  nextPayload.messages = builtMessages
 
   nextPayload.parent_message_id = 'client-created-root'
   if (!nextPayload.action || typeof nextPayload.action !== 'string') {
@@ -804,7 +883,7 @@ async function listChatGPTModels() {
   return modelListResponse(ids, 'chatgpt', 'chatgpt-web-session')
 }
 
-async function chatChatGPT({ model, prompt, web_search = false }) {
+async function chatChatGPT({ model, prompt, system_prompt, web_search = false }) {
   const page = state.chatgpt.page
   if (!page) throw new Error('ChatGPT Playwright not initialized')
 
@@ -818,6 +897,7 @@ async function chatChatGPT({ model, prompt, web_search = false }) {
       preparedPrompt.text,
       ensureSessionText(model, template.model || 'chatgpt-web-session'),
       web_search,
+      system_prompt || null,
     )
     const requestResult = await page.evaluate(async ({ headers, payload }) => {
       const response = await fetch('https://chatgpt.com/backend-api/f/conversation', {
@@ -939,10 +1019,11 @@ async function initGemini({ runtime_dir, headless, browser }) {
     state.gemini.lastHeadersTime = 0
   }
   ensureDir(path.resolve('gemini_profile'))
-  const { engine, channel } = resolveEngine(browser)
+  const { engine, channel, executablePath } = resolveEngine(browser)
   state.gemini.context = await engine.launchPersistentContext(path.resolve('gemini_profile'), {
     headless,
     channel,
+    executablePath,
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
@@ -1203,10 +1284,11 @@ async function initMistral({ runtime_dir, headless, browser }) {
     state.mistral.lastHeadersTime = 0
   }
   ensureDir(path.resolve('mistral_profile'))
-  const { engine, channel } = resolveEngine(browser)
+  const { engine, channel, executablePath } = resolveEngine(browser)
   state.mistral.context = await engine.launchPersistentContext(path.resolve('mistral_profile'), {
     headless,
     channel,
+    executablePath,
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
@@ -1471,10 +1553,11 @@ async function initZai({ runtime_dir, headless, browser }) {
     state.zai.lastHeadersTime = 0
   }
   ensureDir(path.resolve('zai_profile'))
-  const { engine, channel } = resolveEngine(browser)
+  const { engine, channel, executablePath } = resolveEngine(browser)
   state.zai.context = await engine.launchPersistentContext(path.resolve('zai_profile'), {
     headless,
     channel,
+    executablePath,
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
@@ -1709,10 +1792,11 @@ async function initMeta({ runtime_dir, headless, browser }) {
     state.meta.lastHeadersTime = 0
   }
   ensureDir(path.resolve('meta_profile'))
-  const { engine, channel } = resolveEngine(browser)
+  const { engine, channel, executablePath } = resolveEngine(browser)
   state.meta.context = await engine.launchPersistentContext(path.resolve('meta_profile'), {
     headless,
     channel,
+    executablePath,
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
@@ -1944,10 +2028,11 @@ async function initKimi({ runtime_dir, headless, browser }) {
     state.kimi.lastHeadersTime = 0
   }
   ensureDir(path.resolve('kimi_profile'))
-  const { engine, channel } = resolveEngine(browser)
+  const { engine, channel, executablePath } = resolveEngine(browser)
   state.kimi.context = await engine.launchPersistentContext(path.resolve('kimi_profile'), {
     headless,
     channel,
+    executablePath,
     userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
@@ -2089,10 +2174,11 @@ async function initQwen({ runtime_dir, headless, browser, account_id = null }) {
   }
   const profileId = account_id || '_default'
   ensureDir(path.resolve('qwen_profiles', profileId))
-  const { engine, channel } = resolveEngine(browser)
+  const { engine, channel, executablePath } = resolveEngine(browser)
   slot.context = await engine.launchPersistentContext(path.resolve('qwen_profiles', profileId), {
     headless,
     channel,
+    executablePath,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
