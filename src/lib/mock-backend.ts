@@ -197,7 +197,7 @@ class MockWorld {
     return {
       generated_at: Math.floor(Date.now() / 1000),
       runtime: {
-        edge_available: true,
+        browser_available: true,
         single_runner_ready: this.runnerReady,
         issues: this.runtimeIssues,
       },
