@@ -1,51 +1,30 @@
 <script setup lang="ts">
 import { HugeiconsIcon } from '@hugeicons/vue'
 import {
-  ArrowExpand01Icon,
+  ArrowRight01Icon,
   ChatGptIcon,
-  CheckmarkBadge01Icon,
-  CpuIcon,
+  Copy01Icon,
   DeepseekIcon,
+  Globe02Icon,
   GoogleGeminiIcon,
   KimiAiIcon,
-  Login03Icon,
   MetaIcon,
   MistralIcon,
   PlayIcon,
   QwenIcon,
   RoboticIcon,
+  Search01Icon,
 } from '@hugeicons/core-free-icons'
-import { computed } from 'vue'
-import SparkChart from '@/components/dashboard/SparkChart.vue'
-import { burstFromElement, playTone } from '@/effects'
+import { storeToRefs } from 'pinia'
 import type { ProviderName, ProviderOverview } from '@/lib/types'
 import { useStore } from '@/store'
 
-const props = defineProps<{ providers: ProviderOverview[] }>()
 const store = useStore()
-const t = (key: string, params?: Record<string, string | number>) => store.t(key, params)
+const { searchQuery, filteredProviders } = storeToRefs(store)
 
-const summary = computed(() => {
-  const live = props.providers.filter((p) => p.running)
-  return {
-    live: live.length,
-    models: props.providers.reduce((sum, p) => sum + p.model_count, 0),
-    authenticated: props.providers.filter((p) => p.login_state === 'authenticated').length,
-  }
-})
-
-function statusLabel(p: ProviderOverview) {
-  if (!p.running) return t('providers.status.idle')
-  if (p.health_status === 'degraded') return t('providers.status.warn')
-  if (p.login_state === 'authenticated') return t('providers.status.ok')
-  return t('providers.status.run')
-}
-function statusClass(p: ProviderOverview) {
-  if (!p.running) return 'idle'
-  if (p.health_status === 'degraded') return 'warn'
-  return 'ok'
-}
-const PROVIDER_ICONS: Record<ProviderName, unknown> = {
+// Brand glyphs per provider (same set the previous grid shipped). zai has no
+// dedicated hugeicon, so it falls back to the generic RoboticIcon.
+const PROVIDER_ICONS: Partial<Record<ProviderName, typeof RoboticIcon>> = {
   chatgpt: ChatGptIcon,
   deepseek: DeepseekIcon,
   gemini: GoogleGeminiIcon,
@@ -53,438 +32,189 @@ const PROVIDER_ICONS: Record<ProviderName, unknown> = {
   meta: MetaIcon,
   mistral: MistralIcon,
   qwen: QwenIcon,
-  zai: RoboticIcon, // no dedicated icon in hugeicons yet
+  zai: RoboticIcon,
 }
+
 function providerIcon(name: ProviderName) {
   return PROVIDER_ICONS[name] ?? RoboticIcon
 }
-// ponytail: deterministic stable curve derived from rpm; no Math.random so the
-// SparkChart watcher stops re-rendering on every parent re-paint.
-const TOKEN_SERIES_CACHE = new WeakMap<ProviderOverview, { rpm: number | undefined; values: number[] }>()
-function tokenSeries(p: ProviderOverview): number[] {
-  const cached = TOKEN_SERIES_CACHE.get(p)
-  if (cached && cached.rpm === p.rpm) return cached.values
-  const base = p.rpm ?? 20
-  const values = Array.from({ length: 12 }, (_, i) => base * (0.7 + Math.sin((i + base) * 0.6) * 0.3))
-  TOKEN_SERIES_CACHE.set(p, { rpm: p.rpm, values })
-  return values
-}
 
-function onStart(event: MouseEvent, name: ProviderName) {
-  burstFromElement(event.currentTarget as Element, '#ff9500', 14)
-  playTone('boot')
-  void store.startService(name)
-}
-function onLogin(event: MouseEvent, p: ProviderOverview) {
-  burstFromElement(event.currentTarget as Element, '#5ce1e6', 12)
-  void store.startProviderLogin(p.name)
-}
-function copyAgent(name: ProviderName, agent: 'pi' | 'kilo' | 'claude') {
-  void store.copyAgentSetup(name, agent)
+function dotClass(p: ProviderOverview): string {
+  if (p.last_error) return 'err'
+  if (p.health_status === 'healthy') return 'ok'
+  if (p.health_status === 'degraded' || p.health_status === 'booting') return 'warn'
+  return ''
 }
 </script>
 
 <template>
-  <div class="provider-panel">
-    <header class="panel-head">
-      <div>
-        <span class="eyebrow">{{ t('providers.kicker') }}</span>
-        <h2 class="panel-title">{{ t('providers.title') }}</h2>
-      </div>
-      <div class="summary-pills">
-        <div class="summary-pill">
-          <span class="pill-num">{{ summary.live }}</span>
-          <span class="pill-label">{{ t('providers.summary.live') }}</span>
-        </div>
-        <div class="summary-pill">
-          <span class="pill-num">{{ summary.models }}</span>
-          <span class="pill-label">{{ t('providers.summary.models') }}</span>
-        </div>
-        <div class="summary-pill">
-          <span class="pill-num">{{ summary.authenticated }}</span>
-          <span class="pill-label">{{ t('providers.summary.authenticated') }}</span>
-        </div>
-      </div>
-    </header>
+  <div class="stack">
+    <!-- search -->
+    <div class="search-row">
+      <HugeiconsIcon :icon="Search01Icon" :size="16" class="search-icon" aria-hidden="true" />
+      <input
+        class="input search"
+        type="search"
+        :placeholder="store.t('hubHeader.filterPlaceholder')"
+        :value="searchQuery"
+        @input="store.setSearchQuery(($event.target as HTMLInputElement).value)"
+      />
+    </div>
 
-    <p class="panel-copy">{{ t('providers.copy') }}</p>
+    <!-- empty state -->
+    <p v-if="filteredProviders.length === 0" class="faint empty-msg">
+      {{ store.t('providers.empty') }}
+    </p>
 
-    <div v-if="!providers.length" class="empty-state">{{ t('providers.empty') }}</div>
-
-    <div v-else class="provider-grid">
-      <article v-for="p in providers" :key="p.name" v-tilt class="card provider-card" :class="statusClass(p)">
-        <div class="provider-card-glow" aria-hidden="true" />
-        <header class="provider-card-head">
-          <div class="provider-id">
-            <span class="provider-avatar"><HugeiconsIcon :icon="providerIcon(p.name)" :size="20" aria-hidden="true" /></span>
-            <div>
-              <h3 class="provider-name">{{ p.name }}</h3>
-              <span class="provider-url">{{ p.base_url || t('providers.noBaseUrl') }}</span>
-            </div>
-          </div>
-          <span class="status-chip" :class="statusClass(p)">
-            <span class="chip-dot" />{{ statusLabel(p) }}
+    <!-- provider grid -->
+    <div v-else class="grid">
+      <div v-for="p in filteredProviders" :key="p.name" class="card stack provider-card">
+        <!-- brand avatar + name + status dot -->
+        <div class="row">
+          <span class="provider-avatar">
+            <HugeiconsIcon :icon="providerIcon(p.name)" :size="18" aria-hidden="true" />
           </span>
-        </header>
-
-        <div class="provider-metrics">
-          <div class="pm">
-            <span class="pm-label">LAT</span>
-            <span class="pm-value">{{ p.running ? `${p.latency_ms ?? 0}ms` : '--' }}</span>
-          </div>
-          <div class="pm">
-            <span class="pm-label">RPM</span>
-            <span class="pm-value">{{ p.running ? p.rpm ?? 0 : '--' }}</span>
-          </div>
-          <div class="pm">
-            <span class="pm-label">ERR</span>
-            <span class="pm-value" :class="{ danger: (p.error_rate ?? 0) > 3 }">
-              {{ p.running ? `${(p.error_rate ?? 0).toFixed(1)}%` : '--' }}
-            </span>
-          </div>
-          <div class="pm">
-            <span class="pm-label">UP</span>
-            <span class="pm-value">{{ p.running ? `${(p.uptime_pct ?? 0).toFixed(1)}%` : '--' }}</span>
-          </div>
+          <span class="strong provider-name">{{ p.name }}</span>
+          <span :class="['dot', dotClass(p)]" />
+          <span class="faint small">{{ p.health_status }}</span>
         </div>
 
-        <SparkChart
-          v-if="p.running"
-          :values="tokenSeries(p)"
-          :height="32"
-          :stroke="statusClass(p) === 'warn' ? '#ff9500' : '#5ce1e6'"
-          :fill="statusClass(p) === 'warn' ? 'rgba(255,149,0,0.14)' : 'rgba(92,225,230,0.14)'"
-        />
-        <div v-else class="spark-placeholder">{{ t('providers.modelBufferEmpty') }}</div>
-
-        <div class="provider-models">
-          <HugeiconsIcon :icon="CpuIcon" :size="13" aria-hidden="true" />
-          <template v-if="p.models.length">
-            <span v-for="m in p.models.slice(0, 2)" :key="m" class="model-tag">{{ m }}</span>
-            <span v-if="p.models.length > 2" class="model-tag more">
-              {{ t('providers.modelExtras', { count: p.models.length - 2 }) }}
-            </span>
-          </template>
-          <span v-else class="model-empty">{{ t('providers.modelBufferEmpty') }}</span>
+        <!-- chips -->
+        <div class="row chips-row">
+          <span class="chip">{{ p.login_state }}</span>
+          <span v-if="p.web_search_supported" class="chip">
+            <HugeiconsIcon :icon="Globe02Icon" :size="12" aria-hidden="true" />
+            web search
+          </span>
+          <span class="faint small">{{ p.model_count }} {{ store.t('providers.fields.models') }}</span>
         </div>
 
-        <footer class="provider-actions">
+        <!-- last error -->
+        <p v-if="p.last_error" class="faint small err-text">{{ p.last_error }}</p>
+
+        <!-- actions -->
+        <div class="row actions-row">
           <button
             v-if="!p.running"
             type="button"
-            class="pa-btn primary"
+            class="btn btn-primary"
             :disabled="store.isBusy(`service:start:${p.name}`)"
-            @click="onStart($event, p.name)"
+            @click="store.startService(p.name)"
           >
-            <HugeiconsIcon :icon="PlayIcon" :size="13" aria-hidden="true" />
-            {{ t('providers.actions.start') }}
-          </button>
-          <button
-            v-else
-            type="button"
-            class="pa-btn"
-            :disabled="store.isBusy(`login:start:${p.name}`)"
-            @click="onLogin($event, p)"
-          >
-            <HugeiconsIcon :icon="p.login_state === 'authenticated' ? CheckmarkBadge01Icon : Login03Icon" :size="13" aria-hidden="true" />
-            {{ p.login_state === 'authenticated' ? t('providers.actions.relogin') : t('providers.actions.login') }}
+            <HugeiconsIcon :icon="PlayIcon" :size="16" aria-hidden="true" />
+            {{ store.t('providers.actions.start') }}
           </button>
 
-          <button type="button" class="pa-btn ghost" @click="copyAgent(p.name, 'pi')">{{ t('providers.actions.pi') }}</button>
-          <button type="button" class="pa-btn ghost" @click="copyAgent(p.name, 'claude')">{{ t('providers.actions.claude') }}</button>
-          <button type="button" class="pa-btn icon" :title="t('providers.actions.dossier')" :aria-label="t('providers.actions.dossier')" @click="store.openProviderDrawer(p.name)">
-            <HugeiconsIcon :icon="ArrowExpand01Icon" :size="14" aria-hidden="true" />
+          <button
+            type="button"
+            class="btn btn-utility"
+            @click="store.openProviderDrawer(p.name)"
+          >
+            <HugeiconsIcon :icon="ArrowRight01Icon" :size="16" aria-hidden="true" />
+            {{ store.t('providers.actions.dossier') }}
           </button>
-        </footer>
-      </article>
+
+          <span class="spacer" />
+
+          <button
+            type="button"
+            class="btn btn-utility copy-btn"
+            :title="store.t('providers.actions.claude')"
+            @click="store.copyAgentSetup(p.name, 'claude')"
+          >
+            <HugeiconsIcon :icon="Copy01Icon" :size="14" aria-hidden="true" />
+            Claude
+          </button>
+
+          <button
+            type="button"
+            class="btn btn-utility copy-btn"
+            :title="store.t('providers.actions.kilo')"
+            @click="store.copyAgentSetup(p.name, 'kilo')"
+          >
+            <HugeiconsIcon :icon="Copy01Icon" :size="14" aria-hidden="true" />
+            Kilo
+          </button>
+
+          <button
+            type="button"
+            class="btn btn-utility copy-btn"
+            :title="store.t('providers.actions.pi')"
+            @click="store.copyAgentSetup(p.name, 'pi')"
+          >
+            <HugeiconsIcon :icon="Copy01Icon" :size="14" aria-hidden="true" />
+            Pi
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.provider-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 0.9rem;
-  padding: 1.2rem;
-}
-.panel-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-.eyebrow {
-  font-family: var(--font-arcade);
-  font-size: 0.5rem;
-  color: var(--orange);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-.panel-title {
-  font-family: var(--font-arcade);
-  font-size: 0.88rem;
-  margin-top: 0.5rem;
-  color: var(--text);
-}
-.panel-copy {
-  color: var(--muted-strong);
-  font-size: 0.75rem;
-  line-height: 1.55;
-  max-width: 60ch;
-}
-.summary-pills {
-  display: flex;
-  gap: 0.5rem;
-}
-.summary-pill {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 0.45rem 0.7rem;
-  background: var(--void-2);
-  min-width: 3.6rem;
-}
-.pill-num {
-  font-family: var(--font-arcade);
-  font-size: 0.85rem;
-  color: var(--orange);
-  text-shadow: var(--glow-orange);
-}
-.pill-label {
-  font-size: 0.54rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-top: 0.2rem;
-}
-
-.empty-state {
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--radius-md);
-  padding: 2.5rem 1rem;
-  text-align: center;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.provider-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
-  gap: 0.8rem;
-}
-.provider-card {
+.search-row {
   position: relative;
-  padding: 0.95rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.7rem;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  max-width: 420px;
 }
-.provider-card.ok {
-  border-color: rgba(92, 225, 230, 0.25);
-}
-.provider-card.warn {
-  border-color: rgba(255, 149, 0, 0.4);
-}
-.provider-card.idle {
-  opacity: 0.82;
-}
-.provider-card-glow {
+.search-icon {
   position: absolute;
-  inset: 0;
-  background: radial-gradient(circle at 80% -10%, rgba(255, 149, 0, 0.1), transparent 55%);
+  left: var(--md);
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-faint);
   pointer-events: none;
 }
-.provider-card.ok .provider-card-glow {
-  background: radial-gradient(circle at 80% -10%, rgba(92, 225, 230, 0.1), transparent 55%);
+/* push text past the icon */
+.search-row .input.search {
+  padding-left: calc(var(--md) + 16px + var(--xs));
 }
 
-.provider-card-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.6rem;
+.empty-msg {
+  text-align: center;
+  padding: var(--xl) 0;
 }
-.provider-id {
-  display: flex;
-  gap: 0.55rem;
-  align-items: center;
+
+.provider-card {
+  gap: var(--sm);
 }
+
 .provider-avatar {
-  display: grid;
-  place-items: center;
-  width: 2.1rem;
-  height: 2.1rem;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  color: var(--orange);
-  background: var(--void-2);
-}
-.provider-name {
-  font-size: 0.84rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text);
-}
-.provider-url {
-  font-size: 0.58rem;
-  color: var(--muted);
-}
-.status-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  font-size: 0.56rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 0.3rem 0.5rem;
-  border-radius: 2px;
-  border: 1px solid var(--line);
-  white-space: nowrap;
-}
-.status-chip .chip-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--muted);
-}
-.status-chip.ok {
-  color: var(--cyan);
-  border-color: rgba(92, 225, 230, 0.4);
-}
-.status-chip.ok .chip-dot {
-  background: var(--cyan);
-  box-shadow: 0 0 6px var(--cyan);
-}
-.status-chip.warn {
-  color: var(--orange);
-  border-color: rgba(255, 149, 0, 0.5);
-}
-.status-chip.warn .chip-dot {
-  background: var(--orange);
-  box-shadow: 0 0 6px var(--orange);
-}
-.status-chip.idle {
-  color: var(--muted);
-}
-
-.provider-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0.4rem;
-}
-.pm {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  border: 1px solid var(--line-soft);
-  border-radius: 2px;
-  padding: 0.35rem 0.4rem;
-  background: rgba(0, 0, 0, 0.25);
-}
-.pm-label {
-  font-size: 0.5rem;
-  color: var(--muted);
-  letter-spacing: 0.08em;
-}
-.pm-value {
-  font-family: var(--font-arcade);
-  font-size: 0.62rem;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text);
 }
-.pm-value.danger {
-  color: var(--danger);
+
+.provider-name {
+  text-transform: capitalize;
 }
 
-.spark-placeholder {
-  height: 32px;
-  display: grid;
-  place-items: center;
-  font-size: 0.58rem;
-  color: var(--muted);
-  border: 1px dashed var(--line-soft);
-  border-radius: 2px;
+.small {
+  font-size: 12px;
 }
 
-.provider-models {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
+.chips-row {
   flex-wrap: wrap;
-  color: var(--muted);
-}
-.model-tag {
-  font-size: 0.56rem;
-  border: 1px solid var(--line);
-  border-radius: 2px;
-  padding: 0.2rem 0.4rem;
-  color: var(--muted-strong);
-  background: var(--void-2);
-}
-.model-tag.more {
-  color: var(--orange);
-  border-color: var(--line-strong);
-}
-.model-empty {
-  font-size: 0.58rem;
-  color: var(--muted);
 }
 
-.provider-actions {
-  display: flex;
-  gap: 0.35rem;
+.err-text {
+  color: var(--err);
+  font-size: 12px;
+}
+
+.actions-row {
   flex-wrap: wrap;
   margin-top: auto;
 }
-.pa-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.02);
-  color: var(--muted-strong);
-  padding: 0.42rem 0.55rem;
-  cursor: pointer;
-  font-size: 0.58rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border-radius: var(--radius-sm);
-  transition: all 0.15s ease;
-}
-.pa-btn:hover:not(:disabled) {
-  color: var(--orange);
-  border-color: var(--orange);
-  background: var(--orange-soft);
-}
-.pa-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.pa-btn.primary {
-  color: var(--void);
-  background: var(--orange);
-  border-color: var(--orange);
-  font-weight: 700;
-}
-.pa-btn.primary:hover:not(:disabled) {
-  box-shadow: var(--glow-orange);
-  color: var(--void);
-}
-.pa-btn.ghost {
-  font-size: 0.54rem;
-}
-.pa-btn.icon {
-  margin-left: auto;
-  padding: 0.42rem 0.5rem;
-}
 
-@media (max-width: 520px) {
-  .provider-grid {
-    grid-template-columns: 1fr;
-  }
+/* smaller padding so copy buttons don't dominate */
+.copy-btn {
+  padding: 6px 10px;
+  font-size: 12px;
 }
 </style>
