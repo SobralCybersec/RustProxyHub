@@ -4,7 +4,7 @@ const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'g
 
 function makeRuntime(overrides: Partial<RuntimeDiagnostics> = {}): RuntimeDiagnostics {
   return {
-    edge_available: true,
+    browser_available: true,
     single_runner_ready: true,
     issues: [],
     ...overrides,
