@@ -139,4 +139,38 @@ mod tests {
     fn keeps_bare_model_ids_stable() {
         assert_eq!(normalize_model_id("qwen3.7-plus"), "qwen3.7-plus");
     }
+
+    #[test]
+    fn strips_prefix_only_when_no_thinking_suffix() {
+        assert_eq!(normalize_model_id("qwen:qwen3-30b-a3b"), "qwen3-30b-a3b");
+    }
+
+    #[test]
+    fn strips_no_thinking_suffix_without_prefix() {
+        assert_eq!(
+            normalize_model_id("qwen3-30b-a3b-no-thinking"),
+            "qwen3-30b-a3b"
+        );
+    }
+
+    #[test]
+    fn empty_string_stays_empty() {
+        assert_eq!(normalize_model_id(""), "");
+    }
+
+    #[test]
+    fn prefix_colon_extracts_model_part_verbatim() {
+        // split_once(':') takes everything after the colon; inner whitespace is not stripped
+        assert_eq!(normalize_model_id("qwen:qwen3.7-plus"), "qwen3.7-plus");
+        assert_eq!(
+            normalize_model_id("deepseek:deepseek-v4-pro"),
+            "deepseek-v4-pro"
+        );
+    }
+
+    #[test]
+    fn colon_with_no_actual_model_returns_empty() {
+        // "prefix:" splits into ("prefix", ""), second part is ""
+        assert_eq!(normalize_model_id("prefix:"), "");
+    }
 }
