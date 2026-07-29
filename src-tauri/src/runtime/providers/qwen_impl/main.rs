@@ -981,6 +981,7 @@ async fn build_non_stream_response(
     let mut tool_parser = body.tools.as_ref().map(|_| StreamingToolParser::new());
     let mut tool_calls = Vec::new();
     let mut buffer = String::new();
+    let mut offset = 0usize;
     let mut bytes_stream = response.bytes_stream();
 
     loop {
@@ -992,9 +993,10 @@ async fn build_non_stream_response(
                 let Some(chunk) = chunk else { break; };
                 let chunk = chunk?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(idx) = buffer.find('\n') {
-                    let line = buffer[..idx].trim().to_owned();
-                    buffer = buffer[idx + 1..].to_owned();
+                while let Some(rel) = buffer[offset..].find('\n') {
+                    let end = offset + rel;
+                    let line = buffer[offset..end].trim().to_owned();
+                    offset = end + 1;
                     if let Some(data) = line.strip_prefix("data: ") {
                         for event in collect_qwen_events(
                             data,
@@ -1011,6 +1013,9 @@ async fn build_non_stream_response(
                         }
                     }
                 }
+                // drain in place: offset is right after '\n' (ASCII), always a char boundary
+                buffer.drain(..offset);
+                offset = 0;
             }
         }
     }
@@ -1105,6 +1110,7 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
         let mut tool_parser = body.tools.as_ref().map(|_| StreamingToolParser::new());
         let mut tool_index = 0usize;
         let mut buffer = String::new();
+        let mut offset = 0usize;
         let mut bytes_stream = response.bytes_stream();
 
         loop {
@@ -1117,9 +1123,10 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
                     match chunk {
                         Some(Ok(chunk)) => {
                             buffer.push_str(&String::from_utf8_lossy(&chunk));
-                            while let Some(idx) = buffer.find('\n') {
-                                let line = buffer[..idx].trim().to_owned();
-                                buffer = buffer[idx + 1..].to_owned();
+                            while let Some(rel) = buffer[offset..].find('\n') {
+                                let end = offset + rel;
+                                let line = buffer[offset..end].trim().to_owned();
+                                offset = end + 1;
                                 if let Some(data) = line.strip_prefix("data: ") {
                                     match collect_qwen_events(data, &completion_id, &stream_registry, &mut parse_state, &mut tool_parser).await {
                                         Ok(events) => {
@@ -1182,6 +1189,9 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
                                     }
                                 }
                             }
+                            // drain in place: offset is right after '\n' (ASCII), always a char boundary
+                            buffer.drain(..offset);
+                            offset = 0;
                         }
                         Some(Err(err)) => {
                             metrics.increment("streams.errors", 1.0).await;
@@ -1869,23 +1879,36 @@ async fn truncate_request(request: &OpenAIRequest, registry: &ModelRegistry) -> 
         .cloned()
         .collect::<Vec<_>>();
 
+    // Estimate system+tools cost once (build_prompt appends tool instructions to system_prompt).
+    let system_only = OpenAIRequest {
+        model: request.model.clone(),
+        messages: system_messages.clone(),
+        stream: request.stream,
+        web_search: request.web_search,
+        tools: request.tools.clone(),
+        tool_choice: request.tool_choice.clone(),
+        stream_options: request.stream_options.clone(),
+    };
+    let system_tokens = registry.estimate_tokens(&build_prompt(&system_only), &request.model);
+    let remaining = limit.saturating_sub(system_tokens);
+
+    // Walk newest→oldest; estimate each message once; accumulate running total.
+    // ponytail: per-message build_prompt is O(msg_len); total is O(n) over all content.
+    let mut running = 0usize;
     let mut kept_reversed = Vec::new();
     for message in other_messages.iter().rev() {
-        let mut candidate_messages = system_messages.clone();
-        let mut reversed = kept_reversed.clone();
-        reversed.push(message.clone());
-        reversed.reverse();
-        candidate_messages.extend(reversed);
-        let candidate = OpenAIRequest {
+        let msg_only = OpenAIRequest {
             model: request.model.clone(),
-            messages: candidate_messages,
+            messages: vec![message.clone()],
             stream: request.stream,
             web_search: request.web_search,
-            tools: request.tools.clone(),
-            tool_choice: request.tool_choice.clone(),
+            tools: None, // tools already counted in system_tokens above
+            tool_choice: None,
             stream_options: request.stream_options.clone(),
         };
-        if registry.estimate_tokens(&build_prompt(&candidate), &request.model) <= limit {
+        let msg_tokens = registry.estimate_tokens(&build_prompt(&msg_only), &request.model);
+        if running + msg_tokens <= remaining {
+            running += msg_tokens;
             kept_reversed.push(message.clone());
         }
     }
