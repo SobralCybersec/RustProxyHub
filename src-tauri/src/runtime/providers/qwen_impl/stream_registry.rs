@@ -124,4 +124,81 @@ impl StreamRegistry {
 
         keys.len()
     }
+
+    /* RAII cleanup for a registered stream. Held inside the streaming generator so
+    the slot is freed even when the client disconnects early and the generator's
+    explicit remove never runs — cleanup can't be forgotten, only the prune
+    fallback would otherwise reap it. */
+    pub fn guard(&self, completion_id: impl Into<String>) -> ActiveStreamGuard {
+        ActiveStreamGuard {
+            registry: self.clone(),
+            completion_id: completion_id.into(),
+        }
+    }
+}
+
+pub struct ActiveStreamGuard {
+    registry: StreamRegistry,
+    completion_id: String,
+}
+
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        let completion_id = std::mem::take(&mut self.completion_id);
+        /* remove is async but Drop is sync: take the lock without blocking when we
+        can (the common case — registry locks are brief), else hand the async
+        remove to the runtime. Removing an already-gone slot is a no-op, so the
+        normal-completion path that already removed stays correct. */
+        if let Ok(mut map) = self.registry.inner.try_lock() {
+            map.remove(&completion_id);
+            return;
+        }
+        let registry = self.registry.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                registry.remove_by_completion_id(&completion_id).await;
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn guard_frees_slot_when_dropped() {
+        let registry = StreamRegistry::new();
+        registry
+            .register(
+                "c1".to_owned(),
+                "chat".to_owned(),
+                "acct".to_owned(),
+                HashMap::new(),
+            )
+            .await;
+        assert_eq!(registry.active_count().await, 1);
+        {
+            let _guard = registry.guard("c1");
+        }
+        /* try_lock succeeds with no other holder, so Drop removes synchronously */
+        assert_eq!(registry.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn guard_drop_after_explicit_remove_is_a_noop() {
+        let registry = StreamRegistry::new();
+        registry
+            .register(
+                "c2".to_owned(),
+                "chat".to_owned(),
+                "acct".to_owned(),
+                HashMap::new(),
+            )
+            .await;
+        let guard = registry.guard("c2");
+        registry.remove_by_completion_id("c2").await;
+        drop(guard);
+        assert_eq!(registry.active_count().await, 0);
+    }
 }
