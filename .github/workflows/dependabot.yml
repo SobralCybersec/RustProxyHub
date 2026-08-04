@@ -1,0 +1,33 @@
+# ============================================================
+# Dependabot — keep GitHub Actions SHA-pinned deps updated
+# Runs every Monday 07:00 Europe/Lisbon.
+# Dependabot will open PRs to bump pinned action SHAs
+# automatically, keeping the supply-chain secure.
+# ============================================================
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: "Europe/Lisbon"
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      # Bundle all official actions/  updates into one PR
+      actions-official:
+        patterns:
+          - "actions/*"
+      # Bundle all docker/  action updates into one PR
+      docker-actions:
+        patterns:
+          - "docker/*"
+    # Limit open PRs to avoid noise
+    open-pull-requests-limit: 5

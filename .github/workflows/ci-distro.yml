@@ -1,0 +1,130 @@
+# ============================================================
+# PostInstallHUB — Distro Smoke Tests
+# Runs each distro's test script in its native Docker image.
+# Triggered: push→main, all PRs, weekly Monday 06:00 Lisbon.
+# Matrix: Kali · Ubuntu · Debian · Arch · EndeavourOS · Fedora
+# ============================================================
+name: Distro Smoke Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * 1"
+      timezone: "Europe/Lisbon"
+
+concurrency:
+  group: distro-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ── Cheap syntax gate — runs before pulling any image ────
+  syntax-gate:
+    name: Syntax gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.3.1
+
+      - name: bash -n all scripts
+        run: |
+          find . -name '*.sh' -not -path './.git/*' -print0 \
+            | xargs -0 bash -n
+          echo "Syntax gate passed ✓"
+
+  # ── Distro matrix ────────────────────────────────────────
+  smoke:
+    name: "${{ matrix.name }}"
+    needs: syntax-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Kali Linux"
+            image: "kalilinux/kali-rolling"
+            bootstrap: >-
+              apt-get update -qq &&
+              apt-get install -y --no-install-recommends bash curl sudo 2>/dev/null
+            test_script: "tests/test_kali.sh"
+            distro_var: "DISTRO=kali"
+
+          - name: "Ubuntu 24.04"
+            image: "ubuntu:24.04"
+            bootstrap: >-
+              apt-get update -qq &&
+              apt-get install -y --no-install-recommends bash curl sudo 2>/dev/null
+            test_script: "tests/test_ubuntu.sh"
+            distro_var: "DISTRO=ubuntu"
+
+          - name: "Debian 13 Trixie"
+            image: "debian:trixie"
+            bootstrap: >-
+              apt-get update -qq &&
+              apt-get install -y --no-install-recommends bash curl sudo 2>/dev/null
+            test_script: "tests/test_debian.sh"
+            distro_var: "DISTRO=debian"
+
+          - name: "Arch Linux"
+            image: "archlinux:latest"
+            bootstrap: >-
+              pacman -Sy --noconfirm bash curl sudo 2>/dev/null
+            test_script: "tests/test_arch.sh"
+            distro_var: "DISTRO=arch"
+
+          - name: "EndeavourOS (Arch-based)"
+            image: "archlinux:latest"
+            bootstrap: >-
+              pacman -Sy --noconfirm bash curl sudo 2>/dev/null
+            test_script: "tests/test_endeavour.sh"
+            distro_var: "DISTRO=endeavouros"
+
+          - name: "Fedora 41"
+            image: "fedora:41"
+            bootstrap: >-
+              dnf install -y bash curl sudo 2>/dev/null
+            test_script: "tests/test_fedora.sh"
+            distro_var: "DISTRO=fedora"
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.3.1
+
+      - name: "Pull image — ${{ matrix.image }}"
+        run: docker pull "${{ matrix.image }}"
+
+      - name: "Smoke — ${{ matrix.name }}"
+        run: |
+          docker run --rm \
+            --network host \
+            -v "$PWD:/src:ro" \
+            -w /src \
+            -e POSTINSTALL_YES=1 \
+            -e CI=true \
+            -e "${{ matrix.distro_var }}" \
+            "${{ matrix.image }}" \
+            bash -c "${{ matrix.bootstrap }} && bash ${{ matrix.test_script }}"
+
+  # ── Summary gate — blocks merge if any distro fails ──────
+  smoke-summary:
+    name: All distro smokes passed
+    needs: smoke
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Check matrix result
+        run: |
+          if [[ "${{ needs.smoke.result }}" != "success" ]]; then
+            echo "::error::One or more distro smoke tests failed — see matrix above"
+            exit 1
+          fi
+          echo "All distro smoke tests passed ✓"

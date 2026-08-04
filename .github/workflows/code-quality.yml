@@ -1,0 +1,62 @@
+# ============================================================
+# Code Quality — fast style gate that ci.yml doesn't already cover.
+#   actionlint     — lint the workflow YAML itself
+#   format:check   — Prettier (ci.yml runs eslint + cargo fmt, not this)
+# No system deps, no compile — targets < 3 min.
+# ============================================================
+name: Code Quality
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "**.ts"
+      - "**.vue"
+      - "**.js"
+      - "**.mjs"
+      - "**.json"
+      - ".github/workflows/**"
+  pull_request:
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint (workflow YAML)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install actionlint v1.7.12
+        run: |
+          curl -sSL \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            | tar -xz actionlint
+          sudo mv actionlint /usr/local/bin/actionlint
+          actionlint --version
+      - run: actionlint -color .github/workflows/*.yml
+
+  format:
+    name: Prettier (format:check)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check

@@ -1,0 +1,48 @@
+# ── Build outputs ────────────────────────────────────────
+# Rust target dirs are huge and host-specific — never ship them into a layer.
+src-tauri/target/
+target/
+**/*.rs.bk
+
+# ── Node / frontend ──────────────────────────────────────
+node_modules/
+**/node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+
+# ── Tauri bundles + release artifacts ────────────────────
+src-tauri/gen/
+*.AppImage
+*.deb
+*.rpm
+*.dmg
+*.msi
+*.exe
+*.app
+
+# ── VCS / CI / editor cruft ──────────────────────────────
+.git/
+.github/
+.gitignore
+.codegraph/
+.frontend-slides/
+newdesign/
+**/.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ── Docs + local-only files (not needed to build/verify) ─
+*.md
+!README.md
+docs/
+REFACTOR_PLAN.md
+
+# ── Secrets / local env — must NEVER enter an image ───────
+.env
+.env.*
+*.log
+*.sqlite
+*.sqlite3
