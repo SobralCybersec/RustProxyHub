@@ -41,18 +41,19 @@ RUN npm install -g pnpm@11
 
 WORKDIR /app
 
-# ── Dependency layers FIRST — they survive source-only edits ──
-# pnpm fetch needs only the lockfile; cargo fetch only the manifests.
+# ── pnpm dependency layer: fetch needs only the lockfile ──
 COPY package.json pnpm-lock.yaml ./
 RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
     pnpm fetch
-COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./src-tauri/
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo fetch --manifest-path src-tauri/Cargo.toml
 
-# ── Real source + offline install (no network, uses fetched stores) ──
+# ── Real source, then installs ──
+# cargo can't fetch manifest-only here: Cargo.toml's `[lib] tauri_app_lib`
+# target requires src/lib.rs to exist at parse time. So fetch AFTER the source
+# lands; the cargo registry cache mount keeps it fast across rebuilds anyway.
 COPY . .
 RUN pnpm install --frozen-lockfile --offline
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo fetch --manifest-path src-tauri/Cargo.toml
 
 # The default `pnpm verify` shells out to `rtk`, a local wrapper not present
 # in CI — so run the gate directly here (same checks, no wrapper).
