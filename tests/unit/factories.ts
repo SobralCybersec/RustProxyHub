@@ -39,7 +39,7 @@ function makeProvider(name: ProviderName, overrides: Partial<ProviderOverview> =
 
 export function makeOverview(overrides: Partial<DashboardOverview> = {}): DashboardOverview {
   const runtime = makeRuntime(overrides.runtime)
-  const providers = overrides.providers ?? providerOrder.map((name) => makeProvider(name))
+  const providers = overrides.providers ?? providerOrder.map(name => makeProvider(name))
 
   return {
     generated_at: 1_717_171_717,

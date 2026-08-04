@@ -44,9 +44,18 @@ describe('app shell', () => {
     ;(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
       metadata: { currentWindow: { label: 'main' } },
       invoke: async (cmd: string) => {
-        if (cmd === 'plugin:window|minimize') { windowControls.minimize(); return }
-        if (cmd === 'plugin:window|toggleMaximize') { windowControls.toggleMaximize(); return }
-        if (cmd === 'plugin:window|close') { windowControls.close(); return }
+        if (cmd === 'plugin:window|minimize') {
+          windowControls.minimize()
+          return
+        }
+        if (cmd === 'plugin:window|toggleMaximize') {
+          windowControls.toggleMaximize()
+          return
+        }
+        if (cmd === 'plugin:window|close') {
+          windowControls.close()
+          return
+        }
         // other window plugin commands: no-op in tests
       },
     }
@@ -56,9 +65,18 @@ describe('app shell', () => {
       if (command === 'dashboard_overview') return makeOverview()
       if (command === 'list_qwen_accounts') return []
       // bridge for path (a): vi.mock intercepted the core invoke from window.js
-      if (command === 'plugin:window|minimize') { windowControls.minimize(); return }
-      if (command === 'plugin:window|toggleMaximize') { windowControls.toggleMaximize(); return }
-      if (command === 'plugin:window|close') { windowControls.close(); return }
+      if (command === 'plugin:window|minimize') {
+        windowControls.minimize()
+        return
+      }
+      if (command === 'plugin:window|toggleMaximize') {
+        windowControls.toggleMaximize()
+        return
+      }
+      if (command === 'plugin:window|close') {
+        windowControls.close()
+        return
+      }
       throw new Error(`unexpected invoke: ${String(command)}`)
     })
 

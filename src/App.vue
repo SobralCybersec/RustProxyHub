@@ -1,11 +1,6 @@
 <script setup lang="ts">
 import { HugeiconsIcon } from '@hugeicons/vue'
-import {
-  Cancel01Icon,
-  Globe02Icon,
-  Maximize01Icon,
-  Minimize01Icon,
-} from '@hugeicons/core-free-icons'
+import { Cancel01Icon, Globe02Icon, Maximize01Icon, Minimize01Icon } from '@hugeicons/core-free-icons'
 import { storeToRefs } from 'pinia'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import DetailsDrawer from '@/components/dashboard/DetailsDrawer.vue'
@@ -90,7 +85,7 @@ onBeforeUnmount(() => store.disposeApp())
 
     <!-- Sub-nav: frosted tab strip -->
     <nav class="sub-nav">
-      <h3 class="sub-title">{{ tabs.find((tab) => tab.key === activeTab)?.label }}</h3>
+      <h3 class="sub-title">{{ tabs.find(tab => tab.key === activeTab)?.label }}</h3>
       <span class="spacer"></span>
       <button
         v-for="tab in tabs"

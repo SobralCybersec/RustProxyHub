@@ -271,7 +271,7 @@ export const messages: Record<UiLocale, MessageTree> = {
       loginBlocked: 'stderr: login browser aberto. Feche antes de executar probe live.',
       running: 'stdout: executando probe live do hub...',
       finished: 'stdout: probe finalizada. Abra response.json para ver saída.',
-      notFound: 'stderr: comando não encontrado: {command}. Digite \'help\' para mais informações.',
+      notFound: "stderr: comando não encontrado: {command}. Digite 'help' para mais informações.",
       tabs: {
         terminal: 'terminal',
         chart: 'chartjs',
@@ -502,11 +502,7 @@ export const messages: Record<UiLocale, MessageTree> = {
           'finish login and wait for chat box',
           'mark complete and rerun smoke probe',
         ],
-        kimi: [
-          'open kimi.com',
-          'wait for session storage to stabilize',
-          'mark complete when the page is ready',
-        ],
+        kimi: ['open kimi.com', 'wait for session storage to stabilize', 'mark complete when the page is ready'],
         chatgpt: [
           'authenticate on chatgpt.com',
           'mark complete to resume headless path',
@@ -635,11 +631,7 @@ export function messageAt(locale: UiLocale, path: string): unknown {
   return lookup(messages[locale] ?? messages[DEFAULT_LOCALE], path) ?? lookup(messages[DEFAULT_LOCALE], path)
 }
 
-export function translate(
-  locale: UiLocale,
-  path: string,
-  params: Record<string, string | number> = {},
-): string {
+export function translate(locale: UiLocale, path: string, params: Record<string, string | number> = {}): string {
   const value = messageAt(locale, path)
   if (typeof value !== 'string') return path
   return value.replace(/\{(\w+)\}/g, (_, token) => String(params[token] ?? ''))

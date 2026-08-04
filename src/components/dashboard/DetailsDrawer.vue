@@ -27,11 +27,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEscape))
 
 <template>
   <Transition name="drawer">
-    <div
-      v-if="activeDrawer"
-      class="drawer-scrim"
-      @click.self="store.closeProviderDrawer()"
-    >
+    <div v-if="activeDrawer" class="drawer-scrim" @click.self="store.closeProviderDrawer()">
       <div class="drawer" role="dialog" :aria-label="activeDrawer" aria-modal="true">
         <!-- Header -->
         <div class="row" style="margin-bottom: var(--md)">
@@ -102,11 +98,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEscape))
             </div>
             <div class="row" style="flex-wrap: wrap; gap: var(--xs)">
               <template v-if="activeProviderDetails.overview.models.length">
-                <span
-                  v-for="model in activeProviderDetails.overview.models"
-                  :key="model"
-                  class="chip"
-                >
+                <span v-for="model in activeProviderDetails.overview.models" :key="model" class="chip">
                   {{ model }}
                 </span>
               </template>

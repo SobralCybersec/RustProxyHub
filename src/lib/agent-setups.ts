@@ -29,7 +29,7 @@ function primaryModel(provider: ProviderOverview) {
 }
 
 export function buildPiSetup(provider: ProviderOverview): AgentSetup {
-  const models = providerModels(provider).map((id) => ({ id }))
+  const models = providerModels(provider).map(id => ({ id }))
   return {
     supported: true,
     target: '~/.pi/agent/models.json',
@@ -46,7 +46,7 @@ export function buildPiSetup(provider: ProviderOverview): AgentSetup {
         },
       },
       null,
-      2,
+      2
     ),
   }
 }
@@ -70,7 +70,7 @@ export function buildClaudeSetup(provider: ProviderOverview): AgentSetup {
         },
       },
       null,
-      2,
+      2
     ),
   }
 }
@@ -100,7 +100,7 @@ export function buildKiloSetup(provider: ProviderOverview): AgentSetup {
         },
       },
       null,
-      2,
+      2
     ),
   }
 }

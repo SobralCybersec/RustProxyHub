@@ -77,11 +77,7 @@ function closeLogin(name: ProviderName) {
     </div>
 
     <!-- ── Provider login sessions ── -->
-    <div
-      v-for="p in providers"
-      :key="p.name"
-      class="card row"
-    >
+    <div v-for="p in providers" :key="p.name" class="card row">
       <!-- status dot + name + state label -->
       <span :class="dotClass(p.login_state)" />
       <span class="strong">{{ p.name }}</span>
@@ -128,8 +124,8 @@ function closeLogin(name: ProviderName) {
 
     <!-- ── Workbench block notice ── -->
     <div v-if="store.openLoginCount > 0" class="banner banner-notice">
-      {{ store.openLoginCount }} open browser {{ store.openLoginCount === 1 ? 'session' : 'sessions' }} —
-      the workbench is blocked until all login windows are closed.
+      {{ store.openLoginCount }} open browser {{ store.openLoginCount === 1 ? 'session' : 'sessions' }} — the workbench
+      is blocked until all login windows are closed.
     </div>
   </div>
 </template>

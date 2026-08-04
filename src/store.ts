@@ -86,14 +86,14 @@ export const useStore = defineStore('main', {
   }),
 
   getters: {
-    providersByName: (state) => {
+    providersByName: state => {
       const entries = state.overview?.providers ?? []
       return entries.reduce(
         (accumulator, provider) => {
           accumulator[provider.name] = provider
           return accumulator
         },
-        {} as Record<ProviderName, ProviderOverview>,
+        {} as Record<ProviderName, ProviderOverview>
       )
     },
 
@@ -101,7 +101,7 @@ export const useStore = defineStore('main', {
       const providers = this.overview?.providers ?? []
       const query = this.searchQuery.trim().toLowerCase()
       if (!query) return providers
-      return providers.filter((provider) => {
+      return providers.filter(provider => {
         const haystack = [
           provider.name,
           provider.health_status,
@@ -118,26 +118,24 @@ export const useStore = defineStore('main', {
 
     hubModelOptions(): string[] {
       const providers = this.overview?.providers ?? []
-      const models = providers.flatMap((provider) =>
-        provider.models.map((model) => formatHubModel(provider.name, model)),
-      )
+      const models = providers.flatMap(provider => provider.models.map(model => formatHubModel(provider.name, model)))
       return Array.from(new Set(models))
     },
 
     filteredQwenAccounts(): QwenAccountSummary[] {
       const query = this.searchQuery.trim().toLowerCase()
       if (!query) return this.qwenAccounts
-      return this.qwenAccounts.filter((account) =>
-        [account.email, account.id, account.created_at ?? ''].join(' ').toLowerCase().includes(query),
+      return this.qwenAccounts.filter(account =>
+        [account.email, account.id, account.created_at ?? ''].join(' ').toLowerCase().includes(query)
       )
     },
 
     activeProviderDetails(state): ProviderDetails | null {
-      return state.activeDrawer ? state.providerDetails[state.activeDrawer] ?? null : null
+      return state.activeDrawer ? (state.providerDetails[state.activeDrawer] ?? null) : null
     },
 
     activeProviderLogs(state): string[] {
-      return state.activeDrawer ? state.providerLogs[state.activeDrawer] ?? [] : []
+      return state.activeDrawer ? (state.providerLogs[state.activeDrawer] ?? []) : []
     },
 
     openLoginCount(state): number {
@@ -247,7 +245,7 @@ export const useStore = defineStore('main', {
       if ('__TAURI_INTERNALS__' in window) {
         try {
           const { listen } = await import('@tauri-apps/api/event')
-          this.unlistenDashboard = await listen<DashboardOverview>('dashboard:update', (event) => {
+          this.unlistenDashboard = await listen<DashboardOverview>('dashboard:update', event => {
             this.overview = event.payload
             this.syncWorkbenchModel()
           })
@@ -396,11 +394,7 @@ export const useStore = defineStore('main', {
         const response = await invoke<unknown>('run_workbench_request', {
           request: { model, prompt, web_search: this.workbenchWebSearch },
         })
-        this.workbenchResponse = JSON.stringify(
-          response ?? { error: this.t('store.nullWorkbenchResponse') },
-          null,
-          2,
-        )
+        this.workbenchResponse = JSON.stringify(response ?? { error: this.t('store.nullWorkbenchResponse') }, null, 2)
         await this.refreshOverview()
         this.syncWorkbenchModel()
       })

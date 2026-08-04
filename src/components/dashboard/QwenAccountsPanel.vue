@@ -2,13 +2,7 @@
 import { ref, computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { HugeiconsIcon } from '@hugeicons/vue'
-import {
-  UserAdd01Icon,
-  Delete02Icon,
-  Login03Icon,
-  Logout03Icon,
-  Mail01Icon,
-} from '@hugeicons/core-free-icons'
+import { UserAdd01Icon, Delete02Icon, Login03Icon, Logout03Icon, Mail01Icon } from '@hugeicons/core-free-icons'
 import { useStore } from '@/store'
 
 const store = useStore()
@@ -32,7 +26,6 @@ async function onAddAccount() {
 
 <template>
   <div class="panel-root stack">
-
     <!-- Header -->
     <div class="row">
       <h2 class="strong">{{ store.t('common.accounts') }}</h2>
@@ -97,11 +90,7 @@ async function onAddAccount() {
 
     <!-- Accounts list -->
     <div v-else class="stack">
-      <div
-        v-for="account in filteredQwenAccounts"
-        :key="account.id"
-        class="card account-card stack"
-      >
+      <div v-for="account in filteredQwenAccounts" :key="account.id" class="card account-card stack">
         <!-- Identity row -->
         <div class="row">
           <div class="account-identity">
@@ -155,7 +144,6 @@ async function onAddAccount() {
         </div>
       </div>
     </div>
-
   </div>
 </template>
 

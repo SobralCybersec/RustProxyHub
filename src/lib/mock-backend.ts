@@ -94,7 +94,7 @@ class MockWorld {
         }
         return acc
       },
-      {} as Record<ProviderName, ProviderState>,
+      {} as Record<ProviderName, ProviderState>
     )
 
     this.qwenAccounts = [
@@ -120,7 +120,7 @@ class MockWorld {
       this.latencySeries.push(clamp(jitter(42, 22), 18, 92))
     }
 
-    providerOrder.forEach((name) => {
+    providerOrder.forEach(name => {
       if (this.providers[name].running) {
         this.pushLog(name, `[boot] ${name} runner online :: pid ${1000 + Math.floor(Math.random() * 9000)}`)
         this.pushLog(name, `[probe] ${name} discovery ok :: ${this.providers[name].models.length} models`)
@@ -136,12 +136,12 @@ class MockWorld {
 
   /** Advance the simulation by one tick — called on an interval. */
   tick() {
-    const liveProviders = providerOrder.filter((name) => this.providers[name].running)
+    const liveProviders = providerOrder.filter(name => this.providers[name].running)
     let totalRpm = 0
     let latAccum = 0
     let latCount = 0
 
-    liveProviders.forEach((name) => {
+    liveProviders.forEach(name => {
       const p = this.providers[name]
       p.latencyMs = clamp(jitter(p.latencyMs, 6), 14, 140)
       p.rpm = clamp(jitter(p.rpm, 14), 12, 320)
@@ -170,7 +170,7 @@ class MockWorld {
   }
 
   toOverview(): DashboardOverview {
-    const providers: ProviderOverview[] = providerOrder.map((name) => {
+    const providers: ProviderOverview[] = providerOrder.map(name => {
       const p = this.providers[name]
       return {
         name,
@@ -265,7 +265,7 @@ function ensureTicking() {
 }
 
 function delay(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
+  return new Promise(resolve => window.setTimeout(resolve, ms))
 }
 
 /** Drop-in replacement for the Tauri `invoke` function. */
@@ -279,7 +279,7 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
 
     case 'provider_details': {
       const provider = args?.provider as ProviderName
-      const overview = world.toOverview().providers.find((p) => p.name === provider)!
+      const overview = world.toOverview().providers.find(p => p.name === provider)!
       const details: ProviderDetails = {
         overview,
         detail: {
@@ -321,7 +321,7 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
 
     case 'remove_qwen_account': {
       const accountId = args?.accountId as string
-      world.qwenAccounts = world.qwenAccounts.filter((a) => a.id !== accountId)
+      world.qwenAccounts = world.qwenAccounts.filter(a => a.id !== accountId)
       world.openQwenLogins.delete(accountId)
       return [...world.qwenAccounts] as T
     }
