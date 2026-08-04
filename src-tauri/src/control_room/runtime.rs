@@ -379,7 +379,12 @@ mod tests {
                 .join("playwright-bridge")
                 .join("index.mjs"),
         );
-        touch(&resources.join("resources").join("node").join(node_binary_name()));
+        touch(
+            &resources
+                .join("resources")
+                .join("node")
+                .join(node_binary_name()),
+        );
 
         let resolved = resolve_runtime_paths(Some(&resources), &root);
         assert_eq!(
@@ -388,7 +393,12 @@ mod tests {
         );
         assert_eq!(
             resolved.node_path,
-            Some(resources.join("resources").join("node").join(node_binary_name()))
+            Some(
+                resources
+                    .join("resources")
+                    .join("node")
+                    .join(node_binary_name())
+            )
         );
         assert_eq!(resolved.node_source.as_deref(), Some("portable-bundle"));
     }
@@ -421,7 +431,10 @@ mod tests {
             candidates,
             vec![
                 resources.join("node").join(node_binary_name()),
-                resources.join("resources").join("node").join(node_binary_name()),
+                resources
+                    .join("resources")
+                    .join("node")
+                    .join(node_binary_name()),
                 root.join("src-tauri")
                     .join("resources")
                     .join("node")

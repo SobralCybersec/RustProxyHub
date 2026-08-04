@@ -35,21 +35,25 @@ use crate::browser_bridge::helper_dir_from;
 #[cfg(feature = "standalone-provider-cli")]
 use clap::{Parser, Subcommand};
 
+/* static literal patterns: an invalid regex here is a build-time typo, not a runtime condition */
 static PAUSE_MESSAGE_RES: Lazy<[Regex; 3]> = Lazy::new(|| {
     [
-        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume the task\."#).unwrap(),
-        Regex::new(r#"(?is)Esta tarefa foi pausada porque.*?retomar a tarefa\."#).unwrap(),
-        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume\."#).unwrap(),
+        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume the task\."#)
+            .expect("valid static regex"),
+        Regex::new(r#"(?is)Esta tarefa foi pausada porque.*?retomar a tarefa\."#)
+            .expect("valid static regex"),
+        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume\."#)
+            .expect("valid static regex"),
     ]
 });
 static PAUSE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
-        Regex::new("(?i)maximum number of tool calls").unwrap(),
-        Regex::new("(?i)reached the maximum number of tool").unwrap(),
-        Regex::new("(?i)type ['\"“”]?continue['\"“”]? to resume").unwrap(),
-        Regex::new("(?i)número máximo de chamadas de ferramenta").unwrap(),
-        Regex::new("(?i)digite ['\"“”]?continue['\"“”]? para retomar").unwrap(),
-        Regex::new("(?i)limite máximo de chamadas").unwrap(),
+        Regex::new("(?i)maximum number of tool calls").expect("valid static regex"),
+        Regex::new("(?i)reached the maximum number of tool").expect("valid static regex"),
+        Regex::new("(?i)type ['\"“”]?continue['\"“”]? to resume").expect("valid static regex"),
+        Regex::new("(?i)número máximo de chamadas de ferramenta").expect("valid static regex"),
+        Regex::new("(?i)digite ['\"“”]?continue['\"“”]? para retomar").expect("valid static regex"),
+        Regex::new("(?i)limite máximo de chamadas").expect("valid static regex"),
     ]
 });
 
