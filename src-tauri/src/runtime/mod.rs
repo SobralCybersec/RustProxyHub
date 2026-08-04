@@ -4,13 +4,13 @@ pub mod proxy_core;
 
 #[path = "providers/browser_runtime.rs"]
 pub mod browser_runtime;
-#[path = "providers/deepseek_impl/lib.rs"]
+#[path = "providers/deepseek/mod.rs"]
 pub mod deepseek;
-#[path = "hub_impl/lib.rs"]
+#[path = "hub/mod.rs"]
 pub mod hub;
-#[path = "providers/kimi_impl/lib.rs"]
+#[path = "providers/kimi/mod.rs"]
 pub mod kimi;
-#[path = "providers/qwen_impl/lib.rs"]
+#[path = "providers/qwen/mod.rs"]
 pub mod qwen;
 
 pub use browser_runtime::{

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,16 @@ pub fn current_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/* One place owns SSE frame shape for every provider: a JSON payload line and the
+terminating [DONE] sentinel, both `data: …\n\n`. */
+pub fn sse_json(value: Value) -> Bytes {
+    Bytes::from(format!("data: {}\n\n", value))
+}
+
+pub fn sse_done() -> Bytes {
+    Bytes::from("data: [DONE]\n\n")
 }
 
 /// Constant-time string comparison to avoid timing oracles on API keys.

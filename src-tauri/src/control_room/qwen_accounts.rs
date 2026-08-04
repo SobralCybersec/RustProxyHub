@@ -7,6 +7,28 @@ use std::{
 };
 use uuid::Uuid;
 
+/* Every SQL statement this module runs, gathered so the schema and each query read
+at a glance. Bound arguments stay at the call sites (runtime values). */
+mod queries {
+    pub const INIT_SCHEMA: &str = r#"
+        CREATE TABLE IF NOT EXISTS accounts (
+          id TEXT PRIMARY KEY,
+          email TEXT UNIQUE NOT NULL,
+          password TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email);
+        "#;
+    pub const LIST: &str =
+        "SELECT id, email, password, created_at FROM accounts ORDER BY created_at ASC";
+    pub const SELECT_ID_BY_EMAIL: &str = "SELECT id FROM accounts WHERE email = ?1";
+    pub const INSERT: &str = "INSERT INTO accounts (id, email, password) VALUES (?1, ?2, ?3)";
+    pub const DELETE_BY_ID: &str = "DELETE FROM accounts WHERE id = ?1";
+    pub const INSERT_IGNORE: &str =
+        "INSERT OR IGNORE INTO accounts (id, email, password) VALUES (?1, ?2, ?3)";
+}
+
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub struct QwenAccountSummary {
     pub id: String,
@@ -41,18 +63,7 @@ pub fn ensure_qwen_db(qwen_runtime_dir: &Path, workspace_root: &Path) -> Result<
     }
 
     let connection = Connection::open(&db_path)?;
-    connection.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS accounts (
-          id TEXT PRIMARY KEY,
-          email TEXT UNIQUE NOT NULL,
-          password TEXT NOT NULL DEFAULT '',
-          created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email);
-        "#,
-    )?;
+    connection.execute_batch(queries::INIT_SCHEMA)?;
 
     let legacy_json = workspace_root
         .join("proxy")
@@ -71,8 +82,7 @@ pub fn list_qwen_accounts(
 ) -> Result<Vec<QwenAccountSummary>> {
     let db_path = ensure_qwen_db(qwen_runtime_dir, workspace_root)?;
     let connection = Connection::open(db_path)?;
-    let mut statement = connection
-        .prepare("SELECT id, email, password, created_at FROM accounts ORDER BY created_at ASC")?;
+    let mut statement = connection.prepare(queries::LIST)?;
     let rows = statement.query_map([], |row| {
         Ok(QwenAccountSummary {
             id: row.get(0)?,
@@ -103,18 +113,16 @@ pub fn add_qwen_account(
     let db_path = ensure_qwen_db(qwen_runtime_dir, workspace_root)?;
     let connection = Connection::open(db_path)?;
     let existing: Option<String> = connection
-        .query_row(
-            "SELECT id FROM accounts WHERE email = ?1",
-            params![email],
-            |row| row.get(0),
-        )
+        .query_row(queries::SELECT_ID_BY_EMAIL, params![email], |row| {
+            row.get(0)
+        })
         .optional()?;
     if existing.is_some() {
         return Err(anyhow!("account with email {email} already exists"));
     }
 
     connection.execute(
-        "INSERT INTO accounts (id, email, password) VALUES (?1, ?2, ?3)",
+        queries::INSERT,
         params![Uuid::new_v4().to_string(), email, password],
     )?;
     Ok(())
@@ -127,7 +135,7 @@ pub fn remove_qwen_account(
 ) -> Result<()> {
     let db_path = ensure_qwen_db(qwen_runtime_dir, workspace_root)?;
     let connection = Connection::open(db_path)?;
-    connection.execute("DELETE FROM accounts WHERE id = ?1", params![account_id])?;
+    connection.execute(queries::DELETE_BY_ID, params![account_id])?;
     Ok(())
 }
 
@@ -142,8 +150,7 @@ fn migrate_legacy_accounts_json(connection: &Connection, json_path: &Path) -> Re
 
     let raw = fs::read_to_string(json_path)?;
     let parsed: Vec<LegacyAccount> = serde_json::from_str(&raw).unwrap_or_default();
-    let mut statement = connection
-        .prepare("INSERT OR IGNORE INTO accounts (id, email, password) VALUES (?1, ?2, ?3)")?;
+    let mut statement = connection.prepare(queries::INSERT_IGNORE)?;
     for account in parsed {
         if account.email.trim().is_empty() {
             continue;

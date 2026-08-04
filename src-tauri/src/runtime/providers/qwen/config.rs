@@ -49,26 +49,6 @@ pub fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-#[cfg(feature = "standalone-provider-cli")]
-pub fn load_config() -> AppConfig {
-    let root = workspace_root();
-    let runtime_dir = root.join("runtime").join("qwen");
-    build_embedded_config(
-        runtime_dir,
-        env::var("PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(3000),
-        env::var("API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty()),
-        env::var("BROWSER").unwrap_or_else(|_| "chromium".to_owned()),
-        env::var("HEADLESS")
-            .map(|value| value != "false")
-            .unwrap_or(true),
-    )
-}
-
 pub fn build_embedded_config(
     runtime_dir: PathBuf,
     port: u16,

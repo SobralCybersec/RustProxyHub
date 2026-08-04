@@ -4,10 +4,27 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use uuid::Uuid;
 
-#[cfg(feature = "standalone-provider-cli")]
-use anyhow::anyhow;
-#[cfg(feature = "standalone-provider-cli")]
-use rusqlite::OptionalExtension;
+/* Every SQL statement for the account store, gathered here so the schema and each
+query read at a glance instead of scattered across the call sites below. Bound
+arguments (params![...]) stay at the call sites since they are runtime values. */
+mod queries {
+    pub const INIT_SCHEMA: &str = r#"
+        CREATE TABLE IF NOT EXISTS accounts (
+          id TEXT PRIMARY KEY,
+          email TEXT UNIQUE NOT NULL,
+          password TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email);
+        "#;
+    pub const INSERT_IGNORE: &str =
+        "INSERT OR IGNORE INTO accounts (id, email, password) VALUES (?1, ?2, ?3)";
+    pub const LIST: &str =
+        "SELECT id, email, password, created_at FROM accounts ORDER BY created_at ASC";
+    pub const COUNT: &str = "SELECT COUNT(*) FROM accounts";
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct QwenAccount {
@@ -116,22 +133,9 @@ impl AccountStore {
 
     fn initialize(&self, legacy_json_candidates: &[PathBuf]) -> Result<()> {
         let connection = self.open()?;
-        connection.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS accounts (
-              id TEXT PRIMARY KEY,
-              email TEXT UNIQUE NOT NULL,
-              password TEXT NOT NULL DEFAULT '',
-              created_at TEXT NOT NULL DEFAULT (datetime('now')),
-              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
+        connection.execute_batch(queries::INIT_SCHEMA)?;
 
-            CREATE INDEX IF NOT EXISTS idx_accounts_email ON accounts(email);
-            "#,
-        )?;
-
-        let mut insert = connection
-            .prepare("INSERT OR IGNORE INTO accounts (id, email, password) VALUES (?1, ?2, ?3)")?;
+        let mut insert = connection.prepare(queries::INSERT_IGNORE)?;
 
         for path in legacy_json_candidates {
             if !path.exists() {
@@ -170,58 +174,9 @@ impl AccountStore {
         Ok(())
     }
 
-    #[cfg(feature = "standalone-provider-cli")]
-    pub fn add_account(
-        &self,
-        email: &str,
-        password: &str,
-        id: Option<&str>,
-    ) -> Result<QwenAccount> {
-        let email = email.trim();
-        if email.is_empty() {
-            return Err(anyhow!("email is required"));
-        }
-
-        let connection = self.open()?;
-        let existing: Option<String> = connection
-            .query_row(
-                "SELECT id FROM accounts WHERE email = ?1",
-                params![email],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if existing.is_some() {
-            return Err(anyhow!("account with email {email} already exists"));
-        }
-
-        let id = id
-            .map(str::to_owned)
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        connection.execute(
-            "INSERT INTO accounts (id, email, password) VALUES (?1, ?2, ?3)",
-            params![id, email, password],
-        )?;
-
-        Ok(QwenAccount {
-            id,
-            email: email.to_owned(),
-            password: password.to_owned(),
-            created_at: None,
-        })
-    }
-
-    #[cfg(feature = "standalone-provider-cli")]
-    pub fn remove_account(&self, id: &str) -> Result<bool> {
-        let connection = self.open()?;
-        let changed = connection.execute("DELETE FROM accounts WHERE id = ?1", params![id])?;
-        Ok(changed > 0)
-    }
-
     pub fn list_accounts(&self) -> Result<Vec<QwenAccount>> {
         let connection = self.open()?;
-        let mut statement = connection.prepare(
-            "SELECT id, email, password, created_at FROM accounts ORDER BY created_at ASC",
-        )?;
+        let mut statement = connection.prepare(queries::LIST)?;
         let rows = statement.query_map([], |row| {
             Ok(QwenAccount {
                 id: row.get(0)?,
@@ -246,30 +201,9 @@ impl AccountStore {
             .collect())
     }
 
-    #[cfg(feature = "standalone-provider-cli")]
-    pub fn get_account(&self, id: &str) -> Result<Option<QwenAccount>> {
-        let connection = self.open()?;
-        let account = connection
-            .query_row(
-                "SELECT id, email, password, created_at FROM accounts WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok(QwenAccount {
-                        id: row.get(0)?,
-                        email: row.get(1)?,
-                        password: row.get(2)?,
-                        created_at: row.get(3).ok(),
-                    })
-                },
-            )
-            .optional()?;
-        Ok(account)
-    }
-
     pub fn count(&self) -> Result<usize> {
         let connection = self.open()?;
-        let count: i64 =
-            connection.query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?;
+        let count: i64 = connection.query_row(queries::COUNT, [], |row| row.get(0))?;
         Ok(count.max(0) as usize)
     }
 }

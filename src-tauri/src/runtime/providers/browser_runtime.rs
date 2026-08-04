@@ -1,8 +1,8 @@
 use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
 use crate::proxy_core::{
-    build_prompt, constant_time_eq, current_timestamp, split_prompt, usage_from_text,
-    FunctionToolDefinition, Message, MessageToolCall, OpenAIRequest, StreamingToolParser,
-    ToolCallFunction, Usage,
+    build_prompt, constant_time_eq, current_timestamp, split_prompt, sse_done, sse_json,
+    usage_from_text, FunctionToolDefinition, Message, MessageToolCall, OpenAIRequest,
+    StreamingToolParser, ToolCallFunction, Usage,
 };
 use anyhow::Result;
 use async_stream::stream;
@@ -1435,14 +1435,6 @@ fn json_error(status: StatusCode, message: String) -> Response {
         })),
     )
         .into_response()
-}
-
-fn sse_json(value: Value) -> Bytes {
-    Bytes::from(format!("data: {}\n\n", value))
-}
-
-fn sse_done() -> Bytes {
-    Bytes::from("data: [DONE]\n\n")
 }
 
 #[cfg(test)]
