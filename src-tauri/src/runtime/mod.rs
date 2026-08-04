@@ -1,4 +1,5 @@
 pub mod browser_bridge;
+pub mod ids;
 pub mod proxy_core;
 
 #[path = "providers/browser_runtime.rs"]

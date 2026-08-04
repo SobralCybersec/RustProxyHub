@@ -38,7 +38,7 @@ interface ProviderState {
 
 const seedModels: Record<ProviderName, string[]> = {
   qwen: ['qwen-max-2025-09', 'qwen-plus-2025-07-28', 'qwen-turbo-latest', 'qwen-vl-max', 'qwen-coder-32b'],
-  deepseek: ['deepseek-v4-pro', 'deepseek-v4-pro-thinking', 'deepseek-coder-v3', 'deepseek-math'],
+  deepseek: ['deepseek-v4-pro', 'deepseek-v4-pro-thinking', 'deepseek-v4-vision', 'deepseek-coder-v3', 'deepseek-math'],
   kimi: ['kimi-k2.6', 'kimi-k2.6-thinking', 'kimi-vision-pro'],
   chatgpt: ['gpt-4o-web', 'gpt-4o-mini-web', 'o3-web-session'],
   gemini: ['gemini-2.5-pro-web', 'gemini-2.5-flash-web', 'gemini-vision-web'],
