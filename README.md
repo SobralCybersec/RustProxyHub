@@ -384,6 +384,38 @@ mindmap
 ---
 
 <h1 align="center">
+ <img src="https://i.imgur.com/6nSJzZ2.gif" width="35"/> IT-Management Objectives → Metrics
+</h1>
+
+> I built this project to demonstrate classic IT-management objectives **in practice**. Every objective below points to a verifiable artifact — a file, a CI gate, a test count, an architecture decision — never a showcase number. True to the `Metrics` section: if you can't open the code and check it, it isn't here.
+
+| # | Objective | How RustProxyHub delivers it | Verifiable metric |
+|---|---|---|---|
+| 1 | **Look at the business** | One endpoint speaking both OpenAI **and** Anthropic consolidates eight providers; the business goal (zero token cost) becomes the architecture | 8 providers → 1 endpoint · 2 API dialects |
+| 2 | **Measure the area's performance** | Real telemetry recorded on every request — `GET /metrics` (Prometheus) + `/admin/status` (JSON) | 5 series: latency histogram, requests/errors, cache hit/miss, active streams, heap |
+| 3 | **Allocate costs** | Per-request, per-error and cache counters let you attribute consumption by provider/account | `requests.total` · `requests.errors` sliceable per provider |
+| 4 | **Maintain internal service levels** | Fallback to any installed Chromium + explicit login warning instead of silent failure | Per-request health surfaced at `/admin/status` |
+| 5 | **Reduce cost** | 100% keyless: reuses already-logged-in browser sessions instead of paid API keys | US$ 0/token · US$ 0/mo gateway · 0 keys |
+| 6 | **Optimize structure** | O(n²) streaming hotspots killed; SSE framing unified | O(n²) → O(n) · 4 SSE copies → 1 |
+| 7 | **Be agile** | Refactor driven phase-by-phase, each phase shipped green in CI before advancing | Each phase = 1 green bar before merge |
+| 8 | **Innovate in proposed solutions** | Keyless approach: a real browser session in place of a key / headless model | 0 keys · cookies 100% local |
+| 9 | **Make accurate forecasts** | Latency histogram (buckets 5 → 5000 ms) + gauges feed capacity projection | p50/p95 straight from histogram buckets |
+| 10 | **Don't focus on "commodities"** | HTTP/SSE/DB come from mature stacks (axum, tokio, rusqlite); own code only on the differentiator (multi-provider routing) | Authored logic concentrated in the routing hub |
+| 11 | **Generate correct information** | ID newtypes block mix-ups at compile time; zero `unwrap()` outside tests | 4 newtypes (Model/Session/Account/ParentMessage) · 0 non-test unwraps |
+| 12 | **Maintain Business Intelligence** | Scrapeable Prometheus endpoint (Grafana-ready) + live dashboard | `/metrics` in Prometheus format |
+| 13 | **Focus on value actions** | Tests cover critical paths (tool-call parsing, routing), not trivial getters | 146 green tests on value paths |
+| 14 | **Keep critical processes running** | RAII guard (`ActiveStreamGuard`) frees the stream-registry slot even on abrupt disconnect | 0 slot leaks on disconnect |
+| 15 | **Keep the environment secure** | Cookies/sessions never leave the machine; passwords in local SQLite, never serialized over IPC/API | 0 secrets on the wire · 0 keys on disk |
+| 16 | **Keep infrastructure 24×7×365** | Local-first app with no cloud dependency — there is no RustProxyHub server to go down | 0 cloud dependencies on the critical path |
+| 17 | **Reusable model** | One tool-call parser shared by every provider; centralized SSE framing | 1 parser for 8 providers · 1 framing owner |
+| 18 | **Win over the business people** | Bilingual README (EN/pt-BR) + a quick-start that actually runs | 2 languages · setup documented end to end |
+| 19 | **Be more efficient, more effective** | CI runs `clippy -D warnings` + `fmt --check` on every push | 0 warnings on the default build |
+| 20 | **Standardize processes** | One CI job, one contract: frontend and Rust on the same green bar | 7 gates in 1 pipeline per push/PR |
+| 21 | **Automate user tasks** | Automatic cross-platform browser/node detection, no manual path config | 0 manual path configuration |
+
+---
+
+<h1 align="center">
  <img src="https://i.imgur.com/O7HwCZt.gif" width="30"/> Limitations & Notes
 </h1>
 

@@ -384,6 +384,38 @@ mindmap
 ---
 
 <h1 align="center">
+ <img src="https://i.imgur.com/6nSJzZ2.gif" width="35"/> Objetivos de Gestão de TI → Métricas
+</h1>
+
+> Construí este projeto para demonstrar objetivos clássicos de gestão de TI **na prática**. Cada objetivo abaixo aponta para um artefato verificável — um arquivo, um gate de CI, uma contagem de testes, uma decisão de arquitetura — nunca um número de vitrine. Fiel à seção `Métricas`: se você não consegue abrir o código e conferir, não está aqui.
+
+| # | Objetivo | Entrega no RustProxyHub | Métrica verificável |
+|---|---|---|---|
+| 1 | **Olhar para o negócio** | Um endpoint único compatível com OpenAI **e** Anthropic consolida oito provedores; o objetivo de negócio (custo zero de token) vira a arquitetura | 8 provedores → 1 endpoint · 2 dialetos de API |
+| 2 | **Medir o desempenho da área** | Telemetria real registrada a cada requisição — `GET /metrics` (Prometheus) + `/admin/status` (JSON) | 5 séries: histograma de latência, requests/errors, cache hit/miss, streams ativos, heap |
+| 3 | **Alocar custos** | Counters por requisição, erro e cache permitem atribuir consumo por provedor/conta | `requests.total` · `requests.errors` segmentáveis por provedor |
+| 4 | **Manter níveis de serviço interno** | Fallback para qualquer Chromium instalado + aviso de login explícito em vez de falha silenciosa | Saúde por requisição exposta em `/admin/status` |
+| 5 | **Reduzir custo** | 100% keyless: reusa sessões de navegador já logadas em vez de API keys pagas | US$ 0/token · US$ 0/mês de gateway · 0 chaves |
+| 6 | **Otimizar estrutura** | Hotspots O(n²) de streaming eliminados; framing SSE unificado | O(n²) → O(n) · 4 cópias de SSE → 1 |
+| 7 | **Ser ágil** | Refactor conduzido por fases, cada fase entregue verde no CI antes de avançar | Cada fase = 1 barra verde antes do merge |
+| 8 | **Inovar nas soluções propostas** | Abordagem keyless: sessão de navegador real no lugar de chave/headless | 0 chaves · cookies 100% locais |
+| 9 | **Fazer previsões acuradas** | Histograma de latência (buckets 5 → 5000 ms) + gauges alimentam projeção de capacidade | p50/p95 direto dos buckets do histograma |
+| 10 | **Não focar em "commodities"** | HTTP/SSE/DB vêm de stacks maduras (axum, tokio, rusqlite); código próprio só no diferencial (roteamento multi-provider) | Lógica autoral concentrada no hub de roteamento |
+| 11 | **Gerar informação correta** | Newtypes de ID barram troca em tempo de compilação; zero `unwrap()` fora de teste | 4 newtypes (Model/Session/Account/ParentMessage) · 0 unwrap não-teste |
+| 12 | **Manter um Business Intelligence** | Endpoint Prometheus scrapeável (pronto p/ Grafana) + dashboard ao vivo | `/metrics` no formato Prometheus |
+| 13 | **Focar em ações de valor** | Testes cobrem caminhos críticos (parse de tool-call, roteamento), não getters triviais | 146 testes verdes em caminhos de valor |
+| 14 | **Manter os processos críticos** | Guard RAII (`ActiveStreamGuard`) libera o slot do stream-registry mesmo em desconexão abrupta | 0 vazamento de slot em disconnect |
+| 15 | **Manter o ambiente seguro** | Cookies/sessões nunca deixam a máquina; senhas em SQLite local, nunca serializadas em IPC/API | 0 segredos na rede · 0 chaves em disco |
+| 16 | **Manter 24×7×365 a infraestrutura** | App local-first sem dependência de nuvem — não há servidor RustProxyHub para cair | 0 dependências de nuvem no caminho crítico |
+| 17 | **Modelo reutilizável** | Um parser de tool-call compartilhado por todos os provedores; framing SSE centralizado | 1 parser p/ 8 provedores · 1 dono do framing |
+| 18 | **Conquistar o pessoal do negócio** | README bilíngue (EN/pt-BR) + quick-start que realmente roda | 2 idiomas · setup documentado ponta a ponta |
+| 19 | **Ser mais eficiente, ser mais eficaz** | CI roda `clippy -D warnings` + `fmt --check` a cada push | 0 warnings no build padrão |
+| 20 | **Padronizar processos** | Um job de CI, um contrato: frontend e Rust na mesma barra verde | 7 gates em 1 pipeline por push/PR |
+| 21 | **Automatizar tarefas dos usuários** | Detecção cross-platform de browser/node automática, sem configuração manual de caminho | 0 config manual de path |
+
+---
+
+<h1 align="center">
  <img src="https://i.imgur.com/O7HwCZt.gif" width="30"/> Limitações & Notas
 </h1>
 
