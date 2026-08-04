@@ -37,7 +37,7 @@ export interface ProviderOverview {
 }
 
 export interface RuntimeDiagnostics {
-  edge_available: boolean
+  browser_available: boolean
   single_runner_ready: boolean
   issues: string[]
 }

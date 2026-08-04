@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use self::{
     qwen_accounts::{
@@ -30,7 +30,7 @@ use self::{
         QwenAccountSummary,
     },
     runtime::{
-        build_runtime_diagnostics, detect_edge_available, require_helper_dir, require_node_path,
+        build_runtime_diagnostics, detect_browser_available, require_helper_dir, require_node_path,
         RuntimeDiagnostics,
     },
 };
@@ -69,6 +69,7 @@ struct ControlState {
     open_qwen_account_login_sessions: Arc<Mutex<HashSet<String>>>,
     tasks: Arc<std::sync::Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
     app_handle: Option<AppHandle>,
+    dashboard_notify: Arc<Notify>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,7 +185,7 @@ impl ControlState {
             app.path().resource_dir().ok().as_deref(),
             &workspace_root,
             &app_data_dir,
-            detect_edge_available(),
+            detect_browser_available(),
         );
         let startup_config = startup_config_from_env();
         let hub_api_key = std::env::var("RUST_PROXY_HUB_API_KEY")
@@ -219,16 +220,30 @@ impl ControlState {
             open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::new())),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             app_handle: Some(app.clone()),
+            dashboard_notify: Arc::new(Notify::new()),
         })
     }
 
     fn emit_dashboard_update(&self) {
+        // Poke the coalescer; it will debounce bursts into one build+emit.
+        self.dashboard_notify.notify_one();
+    }
+
+    fn start_dashboard_coalescer(&self) {
         let state = self.clone();
         tauri::async_runtime::spawn(async move {
-            if let (Some(handle), Ok(overview)) =
-                (&state.app_handle, state.build_dashboard_overview().await)
-            {
-                let _ = handle.emit("dashboard:update", &overview);
+            loop {
+                state.dashboard_notify.notified().await;
+                // ponytail: 250ms coalesce window; tune if UI feels laggy
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                // Any notify_one() calls that arrived during the sleep are
+                // already collapsed into one permit — we consume them by doing
+                // the build now; the loop will block on the next notified().
+                if let (Some(handle), Ok(overview)) =
+                    (&state.app_handle, state.build_dashboard_overview().await)
+                {
+                    let _ = handle.emit("dashboard:update", &overview);
+                }
             }
         });
     }
@@ -865,7 +880,12 @@ impl ControlState {
 
         let login_state = if login_open {
             "login_open".to_owned()
-        } else if name == "chatgpt" || name == "gemini" || name == "mistral" || name == "zai" || name == "meta" {
+        } else if name == "chatgpt"
+            || name == "gemini"
+            || name == "mistral"
+            || name == "zai"
+            || name == "meta"
+        {
             if model_count > 0 {
                 "authenticated".to_owned()
             } else if status.running {
@@ -1354,6 +1374,7 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let state = ControlState::new(app.handle())?;
+            state.start_dashboard_coalescer();
             let bootstrap = state.clone();
 
             #[cfg(debug_assertions)]
@@ -1459,7 +1480,7 @@ mod tests {
                 node_path: None,
                 node_source: None,
                 helper_dir: None,
-                edge_available: false,
+                browser_available: false,
                 single_runner_ready: false,
                 issues: vec!["Bundled node.exe not found in Tauri resources.".to_owned()],
             },
@@ -1481,6 +1502,7 @@ mod tests {
             open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::new())),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             app_handle: None,
+            dashboard_notify: Arc::new(tokio::sync::Notify::new()),
         };
 
         state.mark_runtime_blocked().await;
@@ -1526,7 +1548,7 @@ mod tests {
                 node_path: Some("C:/bundle/resources/node/node.exe".to_owned()),
                 node_source: Some("bundled-resource".to_owned()),
                 helper_dir: Some("C:/bundle/resources/playwright-bridge".to_owned()),
-                edge_available: true,
+                browser_available: true,
                 single_runner_ready: true,
                 issues: Vec::new(),
             },
@@ -1552,6 +1574,7 @@ mod tests {
             )]))),
             tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             app_handle: None,
+            dashboard_notify: Arc::new(tokio::sync::Notify::new()),
         };
 
         let overview = state.build_dashboard_overview().await.unwrap();

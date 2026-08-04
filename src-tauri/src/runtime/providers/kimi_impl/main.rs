@@ -320,7 +320,10 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
             { "id": "kimi-k2.6", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
             { "id": "kimi-k2.6-thinking", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
             { "id": "k2d6", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
-            { "id": "k2d6-thinking", "object": "model", "created": current_timestamp(), "owned_by": "kimi" }
+            { "id": "k2d6-thinking", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
+            { "id": "kimi-k3", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
+            { "id": "kimi-k3-thinking", "object": "model", "created": current_timestamp(), "owned_by": "kimi" },
+            { "id": "kimi-latest", "object": "model", "created": current_timestamp(), "owned_by": "kimi" }
         ]
     }))
     .into_response()
@@ -965,6 +968,18 @@ fn model_scenario(model_id: &str) -> KimiModelConfig {
             kimi_plus_id: Some("ok-computer".to_owned()),
             agent_mode: Some("TYPE_ULTRA".to_owned()),
         },
+        "kimi-k3" | "kimi-latest" => KimiModelConfig {
+            scenario: "SCENARIO_K3".to_owned(),
+            thinking: false,
+            kimi_plus_id: None,
+            agent_mode: None,
+        },
+        "kimi-k3-thinking" => KimiModelConfig {
+            scenario: "SCENARIO_K3".to_owned(),
+            thinking: true,
+            kimi_plus_id: None,
+            agent_mode: None,
+        },
         _ => KimiModelConfig {
             scenario: "SCENARIO_K2D5".to_owned(),
             thinking: model_id.contains("thinking"),
@@ -1057,4 +1072,75 @@ where
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(stream))
         .expect("valid streaming response")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_scenario;
+
+    #[test]
+    fn k2_models_map_to_k2d5_scenario() {
+        assert_eq!(model_scenario("kimi-k2.6").scenario, "SCENARIO_K2D5");
+        assert_eq!(
+            model_scenario("kimi-k2.6-thinking").scenario,
+            "SCENARIO_K2D5"
+        );
+        assert_eq!(model_scenario("k2d6").scenario, "SCENARIO_K2D5");
+        assert_eq!(model_scenario("k2d6-thinking").scenario, "SCENARIO_K2D5");
+    }
+
+    #[test]
+    fn k2_thinking_variants_set_thinking_flag() {
+        assert!(!model_scenario("kimi-k2.6").thinking);
+        assert!(model_scenario("kimi-k2.6-thinking").thinking);
+        assert!(!model_scenario("k2d6").thinking);
+        assert!(model_scenario("k2d6-thinking").thinking);
+    }
+
+    #[test]
+    fn k3_models_map_to_k3_scenario() {
+        assert_eq!(model_scenario("kimi-k3").scenario, "SCENARIO_K3");
+        assert_eq!(model_scenario("kimi-k3-thinking").scenario, "SCENARIO_K3");
+        assert_eq!(model_scenario("kimi-latest").scenario, "SCENARIO_K3");
+    }
+
+    #[test]
+    fn k3_thinking_variant_sets_thinking_flag() {
+        assert!(!model_scenario("kimi-k3").thinking);
+        assert!(model_scenario("kimi-k3-thinking").thinking);
+        assert!(!model_scenario("kimi-latest").thinking);
+    }
+
+    #[test]
+    fn agent_models_map_to_ok_computer_scenario() {
+        let agent = model_scenario("k2d6-agent");
+        assert_eq!(agent.scenario, "SCENARIO_OK_COMPUTER");
+        assert_eq!(agent.kimi_plus_id.as_deref(), Some("ok-computer"));
+        assert_eq!(agent.agent_mode.as_deref(), Some("TYPE_NORMAL"));
+
+        let ultra = model_scenario("k2d6-agent-ultra");
+        assert_eq!(ultra.scenario, "SCENARIO_OK_COMPUTER");
+        assert_eq!(ultra.agent_mode.as_deref(), Some("TYPE_ULTRA"));
+    }
+
+    #[test]
+    fn no_thinking_suffix_stripped_before_matching() {
+        // "kimi-k2.6-no-thinking" should clean to "kimi-k2.6" and match
+        let cfg = model_scenario("kimi-k2.6-no-thinking");
+        assert_eq!(cfg.scenario, "SCENARIO_K2D5");
+        assert!(!cfg.thinking);
+    }
+
+    #[test]
+    fn unknown_model_falls_through_to_k2d5_default() {
+        let cfg = model_scenario("future-unknown-model");
+        assert_eq!(cfg.scenario, "SCENARIO_K2D5");
+        assert!(!cfg.thinking);
+    }
+
+    #[test]
+    fn unknown_thinking_model_falls_through_with_thinking_true() {
+        let cfg = model_scenario("future-unknown-model-thinking");
+        assert!(cfg.thinking);
+    }
 }

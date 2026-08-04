@@ -1,7 +1,8 @@
 use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
 use crate::proxy_core::{
-    build_prompt, constant_time_eq, current_timestamp, usage_from_text, FunctionToolDefinition,
-    Message, MessageToolCall, OpenAIRequest, StreamingToolParser, ToolCallFunction, Usage,
+    build_prompt, constant_time_eq, current_timestamp, split_prompt, usage_from_text,
+    FunctionToolDefinition, Message, MessageToolCall, OpenAIRequest, StreamingToolParser,
+    ToolCallFunction, Usage,
 };
 use anyhow::Result;
 use async_stream::stream;
@@ -479,13 +480,15 @@ async fn request_browser_chat(
         body.model.clone()
     };
 
+    let (system_prompt, conversation) = split_prompt(body);
     state
         .bridge
         .request(
             "chat",
             json!({
                 "model": model,
-                "prompt": build_prompt(body),
+                "prompt": conversation,
+                "system_prompt": if system_prompt.is_empty() { serde_json::Value::Null } else { serde_json::json!(system_prompt) },
                 "web_search": body.web_search.unwrap_or(false),
             }),
         )
@@ -1646,5 +1649,155 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].function.name, "read_file");
         assert_eq!(tools[0].function.strict, Some(true));
+    }
+
+    #[test]
+    fn anthropic_tool_choice_auto_stays_auto() {
+        // Anthropic "auto" → OpenAI "auto"
+        assert_eq!(
+            anthropic_tool_choice_to_openai(Some(&json!({ "type": "auto" }))),
+            Some(json!("auto"))
+        );
+    }
+
+    #[test]
+    fn anthropic_tool_choice_specific_maps_to_named_function() {
+        let result = anthropic_tool_choice_to_openai(Some(&json!({
+            "type": "tool",
+            "name": "read_file"
+        })));
+        let obj = result.expect("some value").as_object().cloned().unwrap();
+        assert_eq!(obj["type"], "function");
+        assert_eq!(obj["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn anthropic_tool_choice_none_object_passes_through_as_is() {
+        // type="none" as an object isn't a matched arm — falls through to Some(other.clone())
+        let result = anthropic_tool_choice_to_openai(Some(&json!({ "type": "none" })));
+        assert_eq!(result, Some(json!({ "type": "none" })));
+    }
+
+    #[test]
+    fn anthropic_tool_choice_none_string_maps_correctly() {
+        // string "none" is matched and returned as-is
+        assert_eq!(
+            anthropic_tool_choice_to_openai(Some(&json!("none"))),
+            Some(json!("none"))
+        );
+    }
+
+    #[test]
+    fn anthropic_tool_choice_absent_returns_option_none() {
+        assert_eq!(anthropic_tool_choice_to_openai(None), None);
+    }
+
+    #[test]
+    fn coerce_agent_model_passes_through_native_provider_model() {
+        // A model already native to the provider should pass through unchanged
+        assert_eq!(
+            coerce_agent_model(BrowserProviderKind::Chatgpt, "chatgpt-web-session"),
+            "chatgpt-web-session"
+        );
+        assert_eq!(
+            coerce_agent_model(BrowserProviderKind::Mistral, "mistral-web-session"),
+            "mistral-web-session"
+        );
+    }
+
+    #[test]
+    fn parse_browser_output_plain_text_no_tools() {
+        let parsed = parse_browser_output(
+            &OpenAIRequest {
+                model: "chatgpt-web-session".to_owned(),
+                messages: Vec::new(),
+                stream: None,
+                web_search: None,
+                tools: None,
+                tool_choice: None,
+                stream_options: None,
+            },
+            "just some plain text response",
+        );
+        assert_eq!(parsed.text.trim(), "just some plain text response");
+        assert!(parsed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn anthropic_tools_empty_array_returns_some_empty_vec() {
+        // Empty array → Some([]) rather than None (the array exists, just has no items)
+        let result = anthropic_tools_from_value(Some(&json!([])));
+        assert!(result.is_some_and(|v| v.is_empty()));
+    }
+
+    #[test]
+    fn anthropic_tools_missing_field_returns_none() {
+        assert!(anthropic_tools_from_value(None).is_none());
+    }
+
+    #[test]
+    fn openai_tools_none_returns_none() {
+        assert!(openai_tools_from_value(None).is_none());
+    }
+
+    #[test]
+    fn openai_tools_empty_array_returns_some_empty_vec() {
+        // Empty array → Some([]) — callers must handle empty-but-present
+        let result = openai_tools_from_value(Some(&json!([])));
+        assert!(result.is_some_and(|v| v.is_empty()));
+    }
+
+    #[test]
+    fn fallback_payload_chatgpt_uses_web_session_id() {
+        let payload = fallback_model_payload_for(BrowserProviderKind::Chatgpt, Vec::new());
+        let first = payload["data"]
+            .as_array()
+            .and_then(|a| a.first())
+            .expect("model item");
+        assert_eq!(first["id"], "chatgpt-web-session");
+        assert_eq!(first["owned_by"], "chatgpt");
+    }
+
+    #[test]
+    fn fallback_payload_gemini_uses_web_session_id() {
+        let payload = fallback_model_payload_for(BrowserProviderKind::Gemini, Vec::new());
+        let first = payload["data"]
+            .as_array()
+            .and_then(|a| a.first())
+            .expect("model item");
+        assert_eq!(first["id"], "gemini-web-session");
+    }
+
+    #[test]
+    fn anthropic_message_plain_string_content_becomes_user_message() {
+        let msgs = anthropic_message_to_openai_messages(&json!({
+            "role": "user",
+            "content": "simple text"
+        }));
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+    }
+
+    #[test]
+    fn anthropic_message_image_block_preserved_as_json_text() {
+        // image_url blocks that aren't text/tool_use should still produce a message
+        let msgs = anthropic_message_to_openai_messages(&json!({
+            "role": "user",
+            "content": [
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "abc" } }
+            ]
+        }));
+        assert!(!msgs.is_empty());
+    }
+
+    #[test]
+    fn response_input_ignores_unknown_item_types() {
+        let msgs = response_input_to_messages(Some(&json!([
+            { "role": "user", "content": "hi" },
+            { "type": "unknown_future_type", "data": {} }
+        ])));
+        // Only the user message should survive; unknown items produce nothing or empty
+        assert!(!msgs.is_empty());
+        assert_eq!(msgs[0].role, "user");
     }
 }

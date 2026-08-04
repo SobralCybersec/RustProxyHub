@@ -48,7 +48,7 @@ describe('store runtime flow', () => {
     const store = useStore()
     store.overview = makeOverview({
       runtime: {
-        edge_available: true,
+        browser_available: true,
         single_runner_ready: false,
         issues: ['Bundled node.exe not found in Tauri resources.'],
       },

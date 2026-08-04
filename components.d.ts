@@ -16,7 +16,6 @@ declare module 'vue' {
     LoginStudio: typeof import('./src/components/dashboard/LoginStudio.vue')['default']
     ProviderGrid: typeof import('./src/components/dashboard/ProviderGrid.vue')['default']
     QwenAccountsPanel: typeof import('./src/components/dashboard/QwenAccountsPanel.vue')['default']
-    SparkChart: typeof import('./src/components/dashboard/SparkChart.vue')['default']
     WorkbenchPanel: typeof import('./src/components/dashboard/WorkbenchPanel.vue')['default']
   }
 }

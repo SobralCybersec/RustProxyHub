@@ -1211,4 +1211,76 @@ mod tests {
         assert_eq!(payload["model_type"], "expert");
         assert_eq!(payload["thinking_enabled"], false);
     }
+
+    #[test]
+    fn deepseek_mode_flags_plain_model_is_not_pro_not_thinking() {
+        assert_eq!(deepseek_mode_flags("deepseek-chat"), (false, false));
+        assert_eq!(deepseek_mode_flags("deepseek-v3"), (false, false));
+    }
+
+    #[test]
+    fn deepseek_mode_flags_case_insensitive() {
+        assert_eq!(deepseek_mode_flags("DeepSeek-Expert"), (true, false));
+        assert_eq!(deepseek_mode_flags("DEEPSEEK-DEEPTHINK"), (false, true));
+    }
+
+    #[test]
+    fn deepseek_mode_flags_whitespace_trimmed() {
+        assert_eq!(deepseek_mode_flags("  deepseek-expert  "), (true, false));
+    }
+
+    #[test]
+    fn fragment_events_with_only_think_blocks_produce_no_text() {
+        let mut state = DeepSeekParseState::default();
+        let mut parser = None::<StreamingToolParser>;
+        let events = collect_fragment_events(
+            &[
+                json!({ "type": "THINK", "content": "internal A" }),
+                json!({ "type": "THINK", "content": " internal B" }),
+            ],
+            &mut state,
+            &mut parser,
+        );
+
+        assert_eq!(state.reasoning, "internal A internal B");
+        // No TEXT events → no visible text output
+        let visible: String = events
+            .into_iter()
+            .filter_map(|e| match e {
+                ParsedEvent::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn fragment_events_empty_array_produces_no_events() {
+        let mut state = DeepSeekParseState::default();
+        let mut parser = None::<StreamingToolParser>;
+        let events = collect_fragment_events(&[], &mut state, &mut parser);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn deepseek_payload_without_template_creates_events_array() {
+        let payload = build_deepseek_payload(None, "hello", "sess", None, false, false, false);
+        assert!(payload.get("events").is_some());
+        assert_eq!(payload["prompt"], "hello");
+        assert_eq!(payload["model_type"], "default");
+        assert_eq!(payload["thinking_enabled"], false);
+        assert_eq!(payload["search_enabled"], false);
+    }
+
+    #[test]
+    fn deepseek_payload_parent_message_id_included_when_some() {
+        let payload = build_deepseek_payload(None, "p", "s", Some(99), false, false, false);
+        assert_eq!(payload["parent_message_id"], 99);
+    }
+
+    #[test]
+    fn deepseek_payload_web_search_flag_set() {
+        let payload = build_deepseek_payload(None, "q", "s", None, false, false, true);
+        assert_eq!(payload["search_enabled"], true);
+    }
 }

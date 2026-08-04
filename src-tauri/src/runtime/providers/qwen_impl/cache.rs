@@ -1,6 +1,10 @@
 use super::metrics::Metrics;
 use serde_json::Value;
-use std::{collections::{HashMap, VecDeque}, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::RwLock;
 
 #[derive(Clone)]

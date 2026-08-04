@@ -1,6 +1,6 @@
 import { acceptHMRUpdate, defineStore } from 'pinia'
 import { buildClaudeSetup, buildKiloSetup, buildPiSetup, type AgentSetupKind } from '@/lib/agent-setups'
-import { invoke, providerOrder } from '@/lib/mock-backend'
+import { invoke, providerOrder } from '@/lib/backend'
 import { DEFAULT_LOCALE, defaultWorkbenchPrompt, translate, type UiLocale } from '@/lib/ui-i18n'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import type {
