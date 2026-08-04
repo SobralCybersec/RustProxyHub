@@ -1,7 +1,7 @@
 <div align="center">
 
 <h1 align="center">
- RustProxyHub
+ RustProxyHub 
 </h1>
 
 A local-first, **keyless** LLM proxy cockpit. One desktop app turns your own logged-in browser sessions for eight AI providers into a single OpenAI- and Anthropic-compatible endpoint — point any coding agent at it: no API keys, no token billing, no cloud, your cookies never leave the machine. Built on Tauri v2 (Rust) + Vue 3.
