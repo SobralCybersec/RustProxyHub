@@ -1095,8 +1095,12 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
     let model = body.model.clone();
     let stream_registry = state.stream_registry.clone();
     let metrics = state.metrics.clone();
+    /* frees the registry slot even if the client disconnects before the generator
+    reaches its explicit remove below */
+    let cleanup_guard = stream_registry.guard(completion_id.clone());
 
     let stream = stream! {
+        let _cleanup_guard = cleanup_guard;
         yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(": heartbeat\n\n"));
         yield Ok(sse_json(json!({
             "id": completion_id,

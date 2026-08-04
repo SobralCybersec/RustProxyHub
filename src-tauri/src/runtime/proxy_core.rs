@@ -502,12 +502,45 @@ impl StreamingToolParser {
 
         while !self.buffer.is_empty() {
             if !self.inside_tool {
-                if let Some((start, end, open_tag)) = find_tool_open(&self.buffer) {
+                let tag_open = find_tool_open(&self.buffer);
+                let json_open = find_bare_json_start(&self.buffer);
+                /* whichever structure starts first wins; a <tool_call> tag's own '<'
+                precedes its inner '{', so tags are still preferred when present */
+                let tag_first = match (&tag_open, json_open) {
+                    (Some((tag_start, _, _)), Some(js)) => *tag_start <= js,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+
+                if tag_first {
+                    let (start, end, open_tag) =
+                        tag_open.expect("tag_first is only true when a tag matched");
                     result.text.push_str(&self.buffer[..start]);
                     self.inside_tool = true;
                     self.current_open_tag = open_tag;
                     // drain the consumed prefix in place instead of reallocating the tail
                     self.buffer.drain(..end);
+                } else if let Some(js) = json_open {
+                    match find_balanced_json_end(&self.buffer, js) {
+                        Some(je) => {
+                            let calls = parse_json_tool_calls(&self.buffer[js..je]);
+                            if calls.is_empty() {
+                                /* balanced but not a tool call → ordinary text */
+                                result.text.push_str(&self.buffer[..je]);
+                            } else {
+                                result.text.push_str(&self.buffer[..js]);
+                                self.emitted_tool_calls += calls.len();
+                                result.tool_calls.extend(calls);
+                            }
+                            self.buffer.drain(..je);
+                        }
+                        None => {
+                            /* object still streaming in → hold it until it closes */
+                            result.text.push_str(&self.buffer[..js]);
+                            self.buffer.drain(..js);
+                            break;
+                        }
+                    }
                 } else {
                     let flush_index =
                         find_partial_tool_open_index(&self.buffer).unwrap_or(self.buffer.len());
@@ -677,6 +710,141 @@ fn parse_tool_call_value(value: Value) -> Option<ParsedToolCall> {
     })
 }
 
+/* A JSON value is only treated as a leaked tool call when it carries BOTH a
+name-key and an arguments-key. Without this, plain data like {"name":"Jo"} would
+be mistaken for a call. */
+fn looks_like_tool_call(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let has_name = ["name", "tool_name", "tool"]
+        .iter()
+        .any(|key| object.get(*key).and_then(Value::as_str).is_some())
+        || object
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .is_some();
+    let has_args = ["arguments", "args", "parameters", "input"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+        || object
+            .get("function")
+            .and_then(|function| function.get("arguments"))
+            .is_some();
+    has_name && has_args
+}
+
+fn parse_json_tool_calls(candidate: &str) -> Vec<ParsedToolCall> {
+    robust_parse_json(candidate)
+        .map(json_value_tool_calls)
+        .unwrap_or_default()
+}
+
+fn json_value_tool_calls(parsed: Value) -> Vec<ParsedToolCall> {
+    let values = match parsed {
+        Value::Array(values) => values,
+        other => vec![other],
+    };
+    values
+        .into_iter()
+        .filter(looks_like_tool_call)
+        .filter_map(parse_tool_call_value)
+        .collect()
+}
+
+/* Catch tool calls a model emitted as bare or ```-fenced JSON instead of the
+<tool_call> tags it was told to use. Otherwise they reach the client as plain
+text and agents like Kilo/Pi see no tool call at all. Returns the text with any
+lifted calls removed. Only whole-message JSON or fenced blocks are scanned —
+inline JSON amid prose is left alone to avoid false positives. */
+pub fn extract_tool_calls_from_text(text: &str) -> (String, Vec<ParsedToolCall>) {
+    let trimmed = text.trim();
+    /* whole message is exactly the JSON call — strict parse so prose around JSON
+    isn't scraped out from under itself */
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+            let calls = json_value_tool_calls(parsed);
+            if !calls.is_empty() {
+                return (String::new(), calls);
+            }
+        }
+    }
+
+    let mut cleaned = String::with_capacity(text.len());
+    let mut tool_calls = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("```") {
+        let after_open = &rest[open + 3..];
+        let Some(close_rel) = after_open.find("```") else {
+            break;
+        };
+        let block = &after_open[..close_rel];
+        /* drop the optional language tag on the fence's first line */
+        let inner = block
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+            .trim();
+        let calls = robust_parse_json(inner)
+            .map(json_value_tool_calls)
+            .unwrap_or_default();
+        if calls.is_empty() {
+            cleaned.push_str(&rest[..open + 3 + close_rel + 3]);
+        } else {
+            cleaned.push_str(&rest[..open]);
+            tool_calls.extend(calls);
+        }
+        rest = &after_open[close_rel + 3..];
+    }
+    cleaned.push_str(rest);
+    (cleaned.trim().to_owned(), tool_calls)
+}
+
+/* First byte index of a '{' or '[' — a possible bare-JSON tool call the model
+emitted without the <tool_call> tags. Structural JSON chars are ASCII, so a byte
+index is always a valid char boundary for slicing. */
+fn find_bare_json_start(buffer: &str) -> Option<usize> {
+    buffer.bytes().position(|b| b == b'{' || b == b'[')
+}
+
+/* End index (exclusive) of the balanced JSON value that begins at `start`, or None
+if it hasn't fully arrived yet (mid-stream). String-aware so braces inside string
+literals don't throw off the depth count. */
+fn find_balanced_json_end(buffer: &str, start: usize) -> Option<usize> {
+    let bytes = buffer.as_bytes();
+    let open = bytes[start];
+    let close = match open {
+        b'{' => b'}',
+        b'[' => b']',
+        _ => return None,
+    };
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, &byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == open {
+            depth += 1;
+        } else if byte == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(offset + 1);
+            }
+        }
+    }
+    None
+}
+
 fn find_tool_open(buffer: &str) -> Option<(usize, usize, String)> {
     let captures = TOOL_OPEN_RE.find(buffer)?;
     Some((
@@ -698,10 +866,14 @@ fn find_partial_tool_open_index(buffer: &str) -> Option<usize> {
             continue;
         }
         let tail = &buffer[idx..];
-        if tail.len() >= prefix.len() {
-            continue;
-        }
-        if prefix[..tail.len()].eq_ignore_ascii_case(tail) {
+        if tail.len() < prefix.len() {
+            /* still mid-name: hold if the tail is a prefix of "<tool_call" */
+            if prefix[..tail.len()].eq_ignore_ascii_case(tail) {
+                return Some(idx);
+            }
+        } else if tail[..prefix.len()].eq_ignore_ascii_case(prefix) && !tail.contains('>') {
+            /* full "<tool_call" but no closing '>' yet — attributes or the '>' may
+            still be streaming in; hold it so the tag doesn't leak as text */
             return Some(idx);
         }
     }
@@ -727,6 +899,96 @@ mod tests {
         assert_eq!(parsed.tool_calls[0].name, "read_file");
         assert_eq!(parsed.tool_calls[1].name, "run_tests");
         assert_eq!(parser.emitted_tool_call_count(), 2);
+    }
+
+    #[test]
+    fn extract_lifts_whole_message_bare_json_tool_call() {
+        let (text, calls) =
+            extract_tool_calls_from_text(r#"{"name":"read_file","arguments":{"path":"a.rs"}}"#);
+        assert_eq!(text, "");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn extract_lifts_fenced_json_tool_call_and_keeps_prose() {
+        let (text, calls) = extract_tool_calls_from_text(
+            "Sure, running it:\n```json\n{\"name\":\"run_tests\",\"arguments\":{\"filter\":\"x\"}}\n```",
+        );
+        assert_eq!(text, "Sure, running it:");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "run_tests");
+    }
+
+    #[test]
+    fn extract_ignores_plain_json_without_arguments_key() {
+        /* {"name":..} with no args-key is data, not a tool call — must stay text */
+        let (text, calls) = extract_tool_calls_from_text(r#"{"name":"John","age":30}"#);
+        assert!(calls.is_empty());
+        assert_eq!(text, r#"{"name":"John","age":30}"#);
+    }
+
+    #[test]
+    fn extract_leaves_ordinary_code_fence_alone() {
+        let input = "Here:\n```rust\nfn main() {}\n```";
+        let (text, calls) = extract_tool_calls_from_text(input);
+        assert!(calls.is_empty());
+        assert_eq!(text, input);
+    }
+
+    #[test]
+    fn streaming_parser_lifts_bare_json_tool_call_without_tags() {
+        let mut parser = StreamingToolParser::new();
+        let parsed = parser.feed(r#"{"name":"bash","arguments":{"command":"ls"}}"#);
+        assert_eq!(parsed.text, "");
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].name, "bash");
+    }
+
+    #[test]
+    fn streaming_parser_lifts_multiple_space_separated_bare_json_calls() {
+        /* the exact Kilo failure: {..} {..} {..} bare, space-separated, no tags */
+        let mut parser = StreamingToolParser::new();
+        let parsed = parser.feed(
+            r#"{"name":"bash","arguments":{"command":"ls"}} {"name":"glob","arguments":{"pattern":"*.md"}} {"name":"read","arguments":{"filePath":"a"}}"#,
+        );
+        let names: Vec<_> = parsed.tool_calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["bash", "glob", "read"]);
+    }
+
+    #[test]
+    fn streaming_parser_buffers_bare_json_split_across_chunks() {
+        let mut parser = StreamingToolParser::new();
+        let first = parser.feed(r#"{"name":"read","argu"#);
+        assert!(first.tool_calls.is_empty());
+        let second = parser.feed(r#"ments":{"filePath":"a.rs"}}"#);
+        assert_eq!(second.tool_calls.len(), 1);
+        assert_eq!(second.tool_calls[0].name, "read");
+    }
+
+    #[test]
+    fn streaming_parser_does_not_leak_tool_call_tag_split_at_bracket() {
+        /* the exact live streaming bug: a chunk lands on "<tool_call" (no '>' yet);
+        it must be held, not leaked as content, and the tags must never appear in text */
+        let mut parser = StreamingToolParser::new();
+        let first = parser.feed("<tool_call");
+        assert_eq!(first.text, "");
+        let second =
+            parser.feed(">\n{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}\n</tool_call>");
+        assert_eq!(second.text, "");
+        assert_eq!(second.tool_calls.len(), 1);
+        assert_eq!(second.tool_calls[0].name, "bash");
+    }
+
+    #[test]
+    fn streaming_parser_leaves_non_tool_json_as_text() {
+        let mut parser = StreamingToolParser::new();
+        let parsed = parser.feed(r#"the config is {"name":"John","age":30} today"#);
+        assert!(parsed.tool_calls.is_empty());
+        assert_eq!(
+            parsed.text,
+            r#"the config is {"name":"John","age":30} today"#
+        );
     }
 
     #[test]

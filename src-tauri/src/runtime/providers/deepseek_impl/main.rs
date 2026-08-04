@@ -3,8 +3,8 @@ use crate::browser_bridge::{
 };
 use crate::ids::{ParentMessageId, SessionId};
 use crate::proxy_core::{
-    build_prompt, constant_time_eq, current_timestamp, usage_from_text, MessageToolCall,
-    OpenAIRequest, StreamingToolParser, ToolCallFunction,
+    build_prompt, constant_time_eq, current_timestamp, extract_tool_calls_from_text,
+    usage_from_text, MessageToolCall, OpenAIRequest, StreamingToolParser, ToolCallFunction,
 };
 use anyhow::{anyhow, Result};
 use async_stream::stream;
@@ -231,44 +231,90 @@ fn sync_deepseek_events(
     payload.insert("events".to_owned(), Value::Array(events));
 }
 
-// ponytail: positional bools trip too_many_arguments; REFACTOR_PLAN phase 5 replaces this with a builder.
-#[allow(clippy::too_many_arguments)]
-fn build_deepseek_payload(
+/* Builds the DeepSeek chat payload. Mode flags read as named toggles at the call
+site (.pro/.thinking/.vision/.search) instead of a row of positional bools the
+compiler and the reader can't tell apart. */
+struct DeepseekPayload<'a> {
     template: Option<Value>,
-    final_prompt: &str,
-    ui_session_id: &str,
-    actual_parent: Option<i64>,
+    prompt: &'a str,
+    session_id: &'a SessionId,
+    parent: Option<ParentMessageId>,
     is_pro: bool,
     is_thinking: bool,
     is_vision: bool,
-    search_enabled: bool,
-) -> Value {
-    let mut payload = template
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
+    search: bool,
+}
 
-    if !ui_session_id.is_empty() {
-        payload.insert(
-            "chat_session_id".to_owned(),
-            Value::String(ui_session_id.to_owned()),
-        );
+impl<'a> DeepseekPayload<'a> {
+    fn new(prompt: &'a str, session_id: &'a SessionId) -> Self {
+        Self {
+            template: None,
+            prompt,
+            session_id,
+            parent: None,
+            is_pro: false,
+            is_thinking: false,
+            is_vision: false,
+            search: false,
+        }
     }
-    payload.insert(
-        "parent_message_id".to_owned(),
-        actual_parent.map(Value::from).unwrap_or(Value::Null),
-    );
-    payload.insert(
-        "model_type".to_owned(),
-        Value::String(deepseek_model_type(is_pro, is_vision).to_owned()),
-    );
-    payload.insert("prompt".to_owned(), Value::String(final_prompt.to_owned()));
-    payload.insert("ref_file_ids".to_owned(), Value::Array(Vec::new()));
-    payload.insert("thinking_enabled".to_owned(), Value::Bool(is_thinking));
-    payload.insert("search_enabled".to_owned(), Value::Bool(search_enabled));
-    payload.insert("preempt".to_owned(), Value::Bool(false));
-    sync_deepseek_events(&mut payload, is_pro, is_thinking, is_vision);
 
-    Value::Object(payload)
+    fn template(mut self, template: Option<Value>) -> Self {
+        self.template = template;
+        self
+    }
+    fn parent(mut self, parent: Option<ParentMessageId>) -> Self {
+        self.parent = parent;
+        self
+    }
+    fn pro(mut self, yes: bool) -> Self {
+        self.is_pro = yes;
+        self
+    }
+    fn thinking(mut self, yes: bool) -> Self {
+        self.is_thinking = yes;
+        self
+    }
+    fn vision(mut self, yes: bool) -> Self {
+        self.is_vision = yes;
+        self
+    }
+    fn search(mut self, yes: bool) -> Self {
+        self.search = yes;
+        self
+    }
+
+    fn build(self) -> Value {
+        let mut payload = self
+            .template
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+
+        if !self.session_id.is_empty() {
+            payload.insert(
+                "chat_session_id".to_owned(),
+                Value::String(self.session_id.to_string()),
+            );
+        }
+        payload.insert(
+            "parent_message_id".to_owned(),
+            self.parent
+                .map(|parent| Value::from(parent.get()))
+                .unwrap_or(Value::Null),
+        );
+        payload.insert(
+            "model_type".to_owned(),
+            Value::String(deepseek_model_type(self.is_pro, self.is_vision).to_owned()),
+        );
+        payload.insert("prompt".to_owned(), Value::String(self.prompt.to_owned()));
+        payload.insert("ref_file_ids".to_owned(), Value::Array(Vec::new()));
+        payload.insert("thinking_enabled".to_owned(), Value::Bool(self.is_thinking));
+        payload.insert("search_enabled".to_owned(), Value::Bool(self.search));
+        payload.insert("preempt".to_owned(), Value::Bool(false));
+        sync_deepseek_events(&mut payload, self.is_pro, self.is_thinking, self.is_vision);
+
+        Value::Object(payload)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -463,7 +509,8 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
             { "id": "deepseek-instant", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-flash", "parent": null },
             { "id": "deepseek-instant-deepthink", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-flash-thinking", "parent": null },
             { "id": "deepseek-expert", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-pro", "parent": null },
-            { "id": "deepseek-expert-deepthink", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-pro-thinking", "parent": null }
+            { "id": "deepseek-expert-deepthink", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-pro-thinking", "parent": null },
+            { "id": "deepseek-v4-vision", "object": "model", "created": current_timestamp(), "owned_by": "deepseek", "permission": [], "root": "deepseek-v4-vision", "parent": null }
         ]
     }))
     .into_response()
@@ -537,16 +584,14 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                 .or(browser_parent)
         };
 
-        let payload = build_deepseek_payload(
-            captured.request_payload.clone(),
-            &final_prompt,
-            ui_session_id.as_str(),
-            actual_parent.map(ParentMessageId::get),
-            is_pro,
-            is_thinking,
-            is_vision,
-            body.web_search.unwrap_or(true),
-        );
+        let payload = DeepseekPayload::new(&final_prompt, &ui_session_id)
+            .template(captured.request_payload.clone())
+            .parent(actual_parent)
+            .pro(is_pro)
+            .thinking(is_thinking)
+            .vision(is_vision)
+            .search(body.web_search.unwrap_or(true))
+            .build();
 
         let request = state
             .client
@@ -655,6 +700,18 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
             parse_state.text.push_str(&flush.text);
             for parsed in flush.tool_calls {
                 tool_calls.push(tool_call_to_message(tool_calls.len(), parsed));
+            }
+        }
+
+        /* model may emit the call as bare or fenced JSON instead of <tool_call> tags;
+        lift those out so the agent receives real tool_calls, not leaked text */
+        if tool_calls.is_empty() && body.tools.is_some() {
+            let (cleaned, leaked) = extract_tool_calls_from_text(&parse_state.text);
+            if !leaked.is_empty() {
+                parse_state.text = cleaned;
+                for parsed in leaked {
+                    tool_calls.push(tool_call_to_message(tool_calls.len(), parsed));
+                }
             }
         }
 
@@ -944,10 +1001,10 @@ async fn collect_deepseek_events(
                 .and_then(Value::as_i64)
         })
     {
-        session_parents
-            .lock()
-            .await
-            .insert(ui_session_id.to_owned(), Some(ParentMessageId::from(message_id)));
+        session_parents.lock().await.insert(
+            ui_session_id.to_owned(),
+            Some(ParentMessageId::from(message_id)),
+        );
     }
 
     if let Some(path) = chunk.get("p").and_then(Value::as_str) {
@@ -1097,9 +1154,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        build_deepseek_payload, collect_fragment_events, deepseek_mode_flags, DeepSeekParseState,
+        collect_fragment_events, deepseek_mode_flags, DeepSeekParseState, DeepseekPayload,
         ParsedEvent,
     };
+    use crate::ids::{ParentMessageId, SessionId};
     use crate::proxy_core::StreamingToolParser;
     use serde_json::json;
 
@@ -1131,22 +1189,18 @@ mod tests {
 
     #[test]
     fn deepseek_payload_reuses_template_and_syncs_direct_events() {
-        let payload = build_deepseek_payload(
-            Some(json!({
+        let payload = DeepseekPayload::new("READY", &SessionId::new("session-1"))
+            .template(Some(json!({
                 "events": [
                     { "event": "switchModelType", "params": "default" },
                     { "event": "thinkingSwitchToggled", "params": false }
                 ],
                 "unused": true
-            })),
-            "READY",
-            "session-1",
-            Some(42),
-            true,
-            true,
-            false,
-            false,
-        );
+            })))
+            .parent(Some(ParentMessageId::from(42)))
+            .pro(true)
+            .thinking(true)
+            .build();
 
         assert_eq!(payload["chat_session_id"], "session-1");
         assert_eq!(payload["parent_message_id"], 42);
@@ -1161,8 +1215,8 @@ mod tests {
 
     #[test]
     fn deepseek_payload_syncs_nested_event_groups() {
-        let payload = build_deepseek_payload(
-            Some(json!({
+        let payload = DeepseekPayload::new("READY", &SessionId::new("session-2"))
+            .template(Some(json!({
                 "events": [
                     {
                         "events": [
@@ -1170,15 +1224,9 @@ mod tests {
                         ]
                     }
                 ]
-            })),
-            "READY",
-            "session-2",
-            None,
-            false,
-            false,
-            false,
-            true,
-        );
+            })))
+            .search(true)
+            .build();
 
         assert_eq!(payload["model_type"], "default");
         assert_eq!(payload["events"][0]["events"][0]["params"], "default");
@@ -1222,16 +1270,11 @@ mod tests {
     #[test]
     fn deepseek_v4_pro_payload_uses_expert_model_type() {
         let (is_pro, is_thinking, is_vision) = deepseek_mode_flags("deepseek-v4-pro");
-        let payload = build_deepseek_payload(
-            None,
-            "READY",
-            "session-v4-pro",
-            None,
-            is_pro,
-            is_thinking,
-            is_vision,
-            false,
-        );
+        let payload = DeepseekPayload::new("READY", &SessionId::new("session-v4-pro"))
+            .pro(is_pro)
+            .thinking(is_thinking)
+            .vision(is_vision)
+            .build();
 
         assert_eq!(payload["model_type"], "expert");
         assert_eq!(payload["thinking_enabled"], false);
@@ -1241,16 +1284,12 @@ mod tests {
     fn deepseek_v4_vision_payload_uses_vision_model_type() {
         let (is_pro, is_thinking, is_vision) = deepseek_mode_flags("deepseek-v4-vision");
         assert_eq!((is_pro, is_thinking, is_vision), (false, false, true));
-        let payload = build_deepseek_payload(
-            None,
-            "describe this image",
-            "session-v4-vision",
-            None,
-            is_pro,
-            is_thinking,
-            is_vision,
-            false,
-        );
+        let payload =
+            DeepseekPayload::new("describe this image", &SessionId::new("session-v4-vision"))
+                .pro(is_pro)
+                .thinking(is_thinking)
+                .vision(is_vision)
+                .build();
 
         assert_eq!(payload["model_type"], "vision");
         assert_eq!(payload["thinking_enabled"], false);
@@ -1328,8 +1367,7 @@ mod tests {
 
     #[test]
     fn deepseek_payload_without_template_creates_events_array() {
-        let payload =
-            build_deepseek_payload(None, "hello", "sess", None, false, false, false, false);
+        let payload = DeepseekPayload::new("hello", &SessionId::new("sess")).build();
         assert!(payload.get("events").is_some());
         assert_eq!(payload["prompt"], "hello");
         assert_eq!(payload["model_type"], "default");
@@ -1339,13 +1377,17 @@ mod tests {
 
     #[test]
     fn deepseek_payload_parent_message_id_included_when_some() {
-        let payload = build_deepseek_payload(None, "p", "s", Some(99), false, false, false, false);
+        let payload = DeepseekPayload::new("p", &SessionId::new("s"))
+            .parent(Some(ParentMessageId::from(99)))
+            .build();
         assert_eq!(payload["parent_message_id"], 99);
     }
 
     #[test]
     fn deepseek_payload_web_search_flag_set() {
-        let payload = build_deepseek_payload(None, "q", "s", None, false, false, false, true);
+        let payload = DeepseekPayload::new("q", &SessionId::new("s"))
+            .search(true)
+            .build();
         assert_eq!(payload["search_enabled"], true);
     }
 }
