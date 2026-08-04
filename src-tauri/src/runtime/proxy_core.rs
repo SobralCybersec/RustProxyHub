@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use bytes::Bytes;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,24 @@ pub struct FunctionToolSpec {
 pub struct FunctionToolDefinition {
     #[serde(rename = "type")]
     pub tool_type: String,
-    pub function: FunctionToolSpec,
+    /* function tools nest name/params here; custom (freeform, type:"custom") tools omit it */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionToolSpec>,
+    /* custom-tool name/description live at the top level, not under `function` */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl FunctionToolDefinition {
+    /* the callable name whether this is a function or a custom tool */
+    pub fn tool_name(&self) -> Option<&str> {
+        self.function
+            .as_ref()
+            .map(|spec| spec.name.as_str())
+            .or(self.name.as_deref())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -105,6 +123,16 @@ pub fn current_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/* One place owns SSE frame shape for every provider: a JSON payload line and the
+terminating [DONE] sentinel, both `data: …\n\n`. */
+pub fn sse_json(value: Value) -> Bytes {
+    Bytes::from(format!("data: {}\n\n", value))
+}
+
+pub fn sse_done() -> Bytes {
+    Bytes::from("data: [DONE]\n\n")
 }
 
 /// Constant-time string comparison to avoid timing oracles on API keys.
@@ -278,17 +306,57 @@ fn tool_instructions(tools: &[FunctionToolDefinition], tool_choice: Option<&Valu
         "\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n{tools_json}\n\nThese tools are REAL and executable in this session.\nDo NOT claim you cannot access tools, that tools are only pasted text, or that tool execution is unavailable.\nIf the user asks to test, use, inspect, read, write, search, or run tools, you MUST answer by emitting tool calls.\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{{\"name\": \"tool_name\", \"arguments\": {{\"param_name\": \"value\"}}}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text after your <tool_call> blocks.\n4. The JSON inside the tags MUST be valid and include the \"arguments\" field.\n5. NEVER invent tool names. Only use tools from the list above.\n"
     );
 
-    if let Some(name) = tool_choice
-        .and_then(|value| value.get("function"))
-        .and_then(|value| value.get("name"))
-        .and_then(Value::as_str)
-    {
+    /* a forced tool names itself under `function.name` OR at the top level
+    ({type:"function"|"custom", name}) */
+    let forced_name = tool_choice.and_then(|value| {
+        value
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+    });
+    let choice_type = tool_choice
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str);
+
+    if let Some(name) = forced_name {
         out.push_str(&format!(
             "\nCRITICAL: You MUST call the tool \"{name}\" in this response.\n"
         ));
+    } else if choice_type == Some("allowed_tools") {
+        /* restrict the callable subset without dropping tools from the list above */
+        let names: Vec<&str> = tool_choice
+            .and_then(|value| value.get("tools"))
+            .and_then(Value::as_array)
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|tool| {
+                        tool.get("name")
+                            .or_else(|| tool.get("function").and_then(|f| f.get("name")))
+                            .and_then(Value::as_str)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !names.is_empty() {
+            let verb = if tool_choice
+                .and_then(|v| v.get("mode"))
+                .and_then(Value::as_str)
+                == Some("required")
+            {
+                "You MUST call"
+            } else {
+                "You may only call"
+            };
+            out.push_str(&format!(
+                "\nCRITICAL: {verb} one of these tools: {}.\n",
+                names.join(", ")
+            ));
+        }
     } else if tool_choice.and_then(Value::as_str) == Some("required") {
         out.push_str("\nCRITICAL: You MUST call one of the available tools in this response.\n");
-    } else if tool_choice.and_then(Value::as_str) == Some("none") {
+    } else if tool_choice.and_then(Value::as_str) == Some("none") || choice_type == Some("none") {
         out.push_str("\nCRITICAL: Do NOT call tools in this response.\n");
     }
 
@@ -502,12 +570,45 @@ impl StreamingToolParser {
 
         while !self.buffer.is_empty() {
             if !self.inside_tool {
-                if let Some((start, end, open_tag)) = find_tool_open(&self.buffer) {
+                let tag_open = find_tool_open(&self.buffer);
+                let json_open = find_bare_json_start(&self.buffer);
+                /* whichever structure starts first wins; a <tool_call> tag's own '<'
+                precedes its inner '{', so tags are still preferred when present */
+                let tag_first = match (&tag_open, json_open) {
+                    (Some((tag_start, _, _)), Some(js)) => *tag_start <= js,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+
+                if tag_first {
+                    let (start, end, open_tag) =
+                        tag_open.expect("tag_first is only true when a tag matched");
                     result.text.push_str(&self.buffer[..start]);
                     self.inside_tool = true;
                     self.current_open_tag = open_tag;
                     // drain the consumed prefix in place instead of reallocating the tail
                     self.buffer.drain(..end);
+                } else if let Some(js) = json_open {
+                    match find_balanced_json_end(&self.buffer, js) {
+                        Some(je) => {
+                            let calls = parse_json_tool_calls(&self.buffer[js..je]);
+                            if calls.is_empty() {
+                                /* balanced but not a tool call → ordinary text */
+                                result.text.push_str(&self.buffer[..je]);
+                            } else {
+                                result.text.push_str(&self.buffer[..js]);
+                                self.emitted_tool_calls += calls.len();
+                                result.tool_calls.extend(calls);
+                            }
+                            self.buffer.drain(..je);
+                        }
+                        None => {
+                            /* object still streaming in → hold it until it closes */
+                            result.text.push_str(&self.buffer[..js]);
+                            self.buffer.drain(..js);
+                            break;
+                        }
+                    }
                 } else {
                     let flush_index =
                         find_partial_tool_open_index(&self.buffer).unwrap_or(self.buffer.len());
@@ -677,6 +778,141 @@ fn parse_tool_call_value(value: Value) -> Option<ParsedToolCall> {
     })
 }
 
+/* A JSON value is only treated as a leaked tool call when it carries BOTH a
+name-key and an arguments-key. Without this, plain data like {"name":"Jo"} would
+be mistaken for a call. */
+fn looks_like_tool_call(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let has_name = ["name", "tool_name", "tool"]
+        .iter()
+        .any(|key| object.get(*key).and_then(Value::as_str).is_some())
+        || object
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .is_some();
+    let has_args = ["arguments", "args", "parameters", "input"]
+        .iter()
+        .any(|key| object.contains_key(*key))
+        || object
+            .get("function")
+            .and_then(|function| function.get("arguments"))
+            .is_some();
+    has_name && has_args
+}
+
+fn parse_json_tool_calls(candidate: &str) -> Vec<ParsedToolCall> {
+    robust_parse_json(candidate)
+        .map(json_value_tool_calls)
+        .unwrap_or_default()
+}
+
+fn json_value_tool_calls(parsed: Value) -> Vec<ParsedToolCall> {
+    let values = match parsed {
+        Value::Array(values) => values,
+        other => vec![other],
+    };
+    values
+        .into_iter()
+        .filter(looks_like_tool_call)
+        .filter_map(parse_tool_call_value)
+        .collect()
+}
+
+/* Catch tool calls a model emitted as bare or ```-fenced JSON instead of the
+<tool_call> tags it was told to use. Otherwise they reach the client as plain
+text and agents like Kilo/Pi see no tool call at all. Returns the text with any
+lifted calls removed. Only whole-message JSON or fenced blocks are scanned —
+inline JSON amid prose is left alone to avoid false positives. */
+pub fn extract_tool_calls_from_text(text: &str) -> (String, Vec<ParsedToolCall>) {
+    let trimmed = text.trim();
+    /* whole message is exactly the JSON call — strict parse so prose around JSON
+    isn't scraped out from under itself */
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+            let calls = json_value_tool_calls(parsed);
+            if !calls.is_empty() {
+                return (String::new(), calls);
+            }
+        }
+    }
+
+    let mut cleaned = String::with_capacity(text.len());
+    let mut tool_calls = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("```") {
+        let after_open = &rest[open + 3..];
+        let Some(close_rel) = after_open.find("```") else {
+            break;
+        };
+        let block = &after_open[..close_rel];
+        /* drop the optional language tag on the fence's first line */
+        let inner = block
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .unwrap_or("")
+            .trim();
+        let calls = robust_parse_json(inner)
+            .map(json_value_tool_calls)
+            .unwrap_or_default();
+        if calls.is_empty() {
+            cleaned.push_str(&rest[..open + 3 + close_rel + 3]);
+        } else {
+            cleaned.push_str(&rest[..open]);
+            tool_calls.extend(calls);
+        }
+        rest = &after_open[close_rel + 3..];
+    }
+    cleaned.push_str(rest);
+    (cleaned.trim().to_owned(), tool_calls)
+}
+
+/* First byte index of a '{' or '[' — a possible bare-JSON tool call the model
+emitted without the <tool_call> tags. Structural JSON chars are ASCII, so a byte
+index is always a valid char boundary for slicing. */
+fn find_bare_json_start(buffer: &str) -> Option<usize> {
+    buffer.bytes().position(|b| b == b'{' || b == b'[')
+}
+
+/* End index (exclusive) of the balanced JSON value that begins at `start`, or None
+if it hasn't fully arrived yet (mid-stream). String-aware so braces inside string
+literals don't throw off the depth count. */
+fn find_balanced_json_end(buffer: &str, start: usize) -> Option<usize> {
+    let bytes = buffer.as_bytes();
+    let open = bytes[start];
+    let close = match open {
+        b'{' => b'}',
+        b'[' => b']',
+        _ => return None,
+    };
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, &byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == open {
+            depth += 1;
+        } else if byte == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(offset + 1);
+            }
+        }
+    }
+    None
+}
+
 fn find_tool_open(buffer: &str) -> Option<(usize, usize, String)> {
     let captures = TOOL_OPEN_RE.find(buffer)?;
     Some((
@@ -698,10 +934,14 @@ fn find_partial_tool_open_index(buffer: &str) -> Option<usize> {
             continue;
         }
         let tail = &buffer[idx..];
-        if tail.len() >= prefix.len() {
-            continue;
-        }
-        if prefix[..tail.len()].eq_ignore_ascii_case(tail) {
+        if tail.len() < prefix.len() {
+            /* still mid-name: hold if the tail is a prefix of "<tool_call" */
+            if prefix[..tail.len()].eq_ignore_ascii_case(tail) {
+                return Some(idx);
+            }
+        } else if tail[..prefix.len()].eq_ignore_ascii_case(prefix) && !tail.contains('>') {
+            /* full "<tool_call" but no closing '>' yet — attributes or the '>' may
+            still be streaming in; hold it so the tag doesn't leak as text */
             return Some(idx);
         }
     }
@@ -727,6 +967,151 @@ mod tests {
         assert_eq!(parsed.tool_calls[0].name, "read_file");
         assert_eq!(parsed.tool_calls[1].name, "run_tests");
         assert_eq!(parser.emitted_tool_call_count(), 2);
+    }
+
+    #[test]
+    fn extract_lifts_whole_message_bare_json_tool_call() {
+        let (text, calls) =
+            extract_tool_calls_from_text(r#"{"name":"read_file","arguments":{"path":"a.rs"}}"#);
+        assert_eq!(text, "");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn extract_lifts_fenced_json_tool_call_and_keeps_prose() {
+        let (text, calls) = extract_tool_calls_from_text(
+            "Sure, running it:\n```json\n{\"name\":\"run_tests\",\"arguments\":{\"filter\":\"x\"}}\n```",
+        );
+        assert_eq!(text, "Sure, running it:");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "run_tests");
+    }
+
+    #[test]
+    fn extract_ignores_plain_json_without_arguments_key() {
+        /* {"name":..} with no args-key is data, not a tool call — must stay text */
+        let (text, calls) = extract_tool_calls_from_text(r#"{"name":"John","age":30}"#);
+        assert!(calls.is_empty());
+        assert_eq!(text, r#"{"name":"John","age":30}"#);
+    }
+
+    #[test]
+    fn extract_leaves_ordinary_code_fence_alone() {
+        let input = "Here:\n```rust\nfn main() {}\n```";
+        let (text, calls) = extract_tool_calls_from_text(input);
+        assert!(calls.is_empty());
+        assert_eq!(text, input);
+    }
+
+    #[test]
+    fn custom_tool_deserializes_without_400_and_names_itself() {
+        /* a type:"custom" tool has no `function` object — it must not fail the request */
+        let req: OpenAIRequest = serde_json::from_value(json!({
+            "model": "m",
+            "messages": [],
+            "tools": [
+                { "type": "function", "function": { "name": "read_file" } },
+                { "type": "custom", "name": "code_exec", "description": "run code" }
+            ]
+        }))
+        .expect("custom tool must not break deserialization");
+        let tools = req.tools.expect("tools present");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].tool_name(), Some("read_file"));
+        assert_eq!(tools[1].tool_type, "custom");
+        assert_eq!(tools[1].tool_name(), Some("code_exec"));
+    }
+
+    #[test]
+    fn tool_instructions_restricts_to_allowed_tools() {
+        let tools = vec![FunctionToolDefinition {
+            tool_type: "function".to_owned(),
+            function: Some(FunctionToolSpec {
+                name: "alpha".to_owned(),
+                description: None,
+                parameters: None,
+                strict: None,
+            }),
+            name: None,
+            description: None,
+        }];
+        let choice = json!({
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{ "type": "function", "name": "alpha" }]
+        });
+        let out = tool_instructions(&tools, Some(&choice));
+        assert!(out.contains("You MUST call one of these tools: alpha"));
+    }
+
+    #[test]
+    fn tool_instructions_forces_top_level_named_tool() {
+        let tools = vec![FunctionToolDefinition {
+            tool_type: "custom".to_owned(),
+            function: None,
+            name: Some("code_exec".to_owned()),
+            description: None,
+        }];
+        /* Responses/custom style: name at the top level, not under `function` */
+        let choice = json!({ "type": "custom", "name": "code_exec" });
+        let out = tool_instructions(&tools, Some(&choice));
+        assert!(out.contains("You MUST call the tool \"code_exec\""));
+    }
+
+    #[test]
+    fn streaming_parser_lifts_bare_json_tool_call_without_tags() {
+        let mut parser = StreamingToolParser::new();
+        let parsed = parser.feed(r#"{"name":"bash","arguments":{"command":"ls"}}"#);
+        assert_eq!(parsed.text, "");
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].name, "bash");
+    }
+
+    #[test]
+    fn streaming_parser_lifts_multiple_space_separated_bare_json_calls() {
+        /* the exact Kilo failure: {..} {..} {..} bare, space-separated, no tags */
+        let mut parser = StreamingToolParser::new();
+        let parsed = parser.feed(
+            r#"{"name":"bash","arguments":{"command":"ls"}} {"name":"glob","arguments":{"pattern":"*.md"}} {"name":"read","arguments":{"filePath":"a"}}"#,
+        );
+        let names: Vec<_> = parsed.tool_calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["bash", "glob", "read"]);
+    }
+
+    #[test]
+    fn streaming_parser_buffers_bare_json_split_across_chunks() {
+        let mut parser = StreamingToolParser::new();
+        let first = parser.feed(r#"{"name":"read","argu"#);
+        assert!(first.tool_calls.is_empty());
+        let second = parser.feed(r#"ments":{"filePath":"a.rs"}}"#);
+        assert_eq!(second.tool_calls.len(), 1);
+        assert_eq!(second.tool_calls[0].name, "read");
+    }
+
+    #[test]
+    fn streaming_parser_does_not_leak_tool_call_tag_split_at_bracket() {
+        /* the exact live streaming bug: a chunk lands on "<tool_call" (no '>' yet);
+        it must be held, not leaked as content, and the tags must never appear in text */
+        let mut parser = StreamingToolParser::new();
+        let first = parser.feed("<tool_call");
+        assert_eq!(first.text, "");
+        let second =
+            parser.feed(">\n{\"name\":\"bash\",\"arguments\":{\"command\":\"ls\"}}\n</tool_call>");
+        assert_eq!(second.text, "");
+        assert_eq!(second.tool_calls.len(), 1);
+        assert_eq!(second.tool_calls[0].name, "bash");
+    }
+
+    #[test]
+    fn streaming_parser_leaves_non_tool_json_as_text() {
+        let mut parser = StreamingToolParser::new();
+        let parsed = parser.feed(r#"the config is {"name":"John","age":30} today"#);
+        assert!(parsed.tool_calls.is_empty());
+        assert_eq!(
+            parsed.text,
+            r#"the config is {"name":"John","age":30} today"#
+        );
     }
 
     #[test]
@@ -758,12 +1143,14 @@ mod tests {
             web_search: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
-                function: FunctionToolSpec {
+                function: Some(FunctionToolSpec {
                     name: "read_file".to_owned(),
                     description: None,
                     parameters: None,
                     strict: None,
-                },
+                }),
+                name: None,
+                description: None,
             }]),
             tool_choice: Some(json!("required")),
             stream_options: None,
@@ -901,12 +1288,14 @@ mod tests {
             web_search: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
-                function: FunctionToolSpec {
+                function: Some(FunctionToolSpec {
                     name: "get_weather".to_owned(),
                     description: None,
                     parameters: None,
                     strict: None,
-                },
+                }),
+                name: None,
+                description: None,
             }]),
             tool_choice: None,
             stream_options: None,
@@ -980,8 +1369,6 @@ mod tests {
         assert!(enforce_loopback_guard("0.0.0.0", Some("secret")).is_ok());
     }
 
-    // ── estimate_tokens / usage_from_text ──────────────────────────────────
-
     #[test]
     fn estimate_tokens_rounds_up() {
         // 7 chars / 3.5 = 2.0 exactly
@@ -1006,8 +1393,6 @@ mod tests {
         let detail = u.prompt_tokens_details.expect("detail present");
         assert_eq!(detail["cached_tokens"], 0);
     }
-
-    // ── content_to_text ────────────────────────────────────────────────────
 
     #[test]
     fn content_to_text_handles_none() {
@@ -1048,8 +1433,6 @@ mod tests {
         assert!(result.contains("42"));
     }
 
-    // ── robust_parse_json ──────────────────────────────────────────────────
-
     #[test]
     fn robust_parse_json_strips_markdown_fence() {
         let raw = "```json\n{\"key\": \"value\"}\n```";
@@ -1082,8 +1465,6 @@ mod tests {
         let val = robust_parse_json("[1, 2, 3]").expect("parsed array");
         assert_eq!(val.as_array().unwrap().len(), 3);
     }
-
-    // ── StreamingToolParser flush ──────────────────────────────────────────
 
     #[test]
     fn flush_recovers_partial_open_tag_as_text() {
@@ -1118,8 +1499,6 @@ mod tests {
             Value::String("Cargo.toml".to_owned())
         );
     }
-
-    // ── split_prompt multi-turn ────────────────────────────────────────────
 
     fn make_msg(role: &str, text: &str) -> Message {
         Message {

@@ -15,9 +15,6 @@ repository = "https://github.com/Uninen/tauri-vue-template"
 name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-[features]
-standalone-provider-cli = []
-
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
 
@@ -41,13 +38,11 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
-sha2 = "0.10"
 sysinfo = "0.30"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-prevent-default = "5.0"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-tower-http = { version = "0.6", features = ["cors"] }
 url = "2.5"
 uuid = { version = "1", features = ["v4"] }
 
