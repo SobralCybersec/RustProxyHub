@@ -18,22 +18,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(feature = "standalone-provider-cli")]
-use clap::{Parser, Subcommand};
-
-#[cfg(feature = "standalone-provider-cli")]
-#[derive(Parser)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-#[derive(Subcommand)]
-enum Commands {
-    Server,
-}
-
 #[derive(Clone)]
 pub struct ProviderConfig {
     base_url: String,
@@ -143,17 +127,6 @@ struct StopRequest {
     response_id: Option<String>,
 }
 
-#[cfg(feature = "standalone-provider-cli")]
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let config = load_config();
-
-    match cli.command {
-        Commands::Server => run_server(config).await,
-    }
-}
-
 async fn run_server(config: AppConfig) -> Result<()> {
     let state = AppState {
         client: reqwest::Client::builder()
@@ -197,76 +170,6 @@ async fn run_server(config: AppConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-fn load_config() -> AppConfig {
-    AppConfig {
-        host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
-        port: std::env::var("PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(3100),
-        api_key: std::env::var("API_KEY")
-            .ok()
-            .filter(|value| !value.trim().is_empty()),
-        qwen: ProviderConfig {
-            base_url: std::env::var("QWEN_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned()),
-            api_key: std::env::var("QWEN_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-        },
-        chatgpt: ProviderConfig {
-            base_url: std::env::var("CHATGPT_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3003".to_owned()),
-            api_key: std::env::var("CHATGPT_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-        },
-        gemini: ProviderConfig {
-            base_url: std::env::var("GEMINI_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3004".to_owned()),
-            api_key: std::env::var("GEMINI_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-        },
-        mistral: ProviderConfig {
-            base_url: std::env::var("MISTRAL_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3005".to_owned()),
-            api_key: std::env::var("MISTRAL_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-        },
-        zai: ProviderConfig {
-            base_url: std::env::var("ZAI_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3006".to_owned()),
-            api_key: std::env::var("ZAI_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-        },
-        meta: ProviderConfig {
-            base_url: std::env::var("META_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3007".to_owned()),
-            api_key: std::env::var("META_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-        },
-        deepseek: ProviderConfig {
-            base_url: std::env::var("DEEPSEEK_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3001".to_owned()),
-            api_key: std::env::var("DEEPSEEK_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-        },
-        kimi: ProviderConfig {
-            base_url: std::env::var("KIMI_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:3002".to_owned()),
-            api_key: std::env::var("KIMI_API_KEY")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
-        },
-    }
 }
 
 async fn root(State(state): State<AppState>) -> impl IntoResponse {

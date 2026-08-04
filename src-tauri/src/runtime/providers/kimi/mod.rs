@@ -2,8 +2,8 @@ use crate::browser_bridge::{
     BrowserBridge, CaptureHeadersParams, InitParams, ManualLoginParams, PlaywrightBridge,
 };
 use crate::proxy_core::{
-    build_prompt, constant_time_eq, current_timestamp, usage_from_text, MessageToolCall,
-    OpenAIRequest, StreamingToolParser, ToolCallFunction,
+    build_prompt, constant_time_eq, current_timestamp, sse_done, sse_json, usage_from_text,
+    MessageToolCall, OpenAIRequest, StreamingToolParser, ToolCallFunction,
 };
 use anyhow::{anyhow, Result};
 use async_stream::stream;
@@ -30,45 +30,27 @@ use std::{
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-#[cfg(feature = "standalone-provider-cli")]
-use crate::browser_bridge::helper_dir_from;
-#[cfg(feature = "standalone-provider-cli")]
-use clap::{Parser, Subcommand};
-
+/* static literal patterns: an invalid regex here is a build-time typo, not a runtime condition */
 static PAUSE_MESSAGE_RES: Lazy<[Regex; 3]> = Lazy::new(|| {
     [
-        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume the task\."#).unwrap(),
-        Regex::new(r#"(?is)Esta tarefa foi pausada porque.*?retomar a tarefa\."#).unwrap(),
-        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume\."#).unwrap(),
+        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume the task\."#)
+            .expect("valid static regex"),
+        Regex::new(r#"(?is)Esta tarefa foi pausada porque.*?retomar a tarefa\."#)
+            .expect("valid static regex"),
+        Regex::new(r#"(?is)This task paused because Kimi reached.*?resume\."#)
+            .expect("valid static regex"),
     ]
 });
 static PAUSE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
-        Regex::new("(?i)maximum number of tool calls").unwrap(),
-        Regex::new("(?i)reached the maximum number of tool").unwrap(),
-        Regex::new("(?i)type ['\"“”]?continue['\"“”]? to resume").unwrap(),
-        Regex::new("(?i)número máximo de chamadas de ferramenta").unwrap(),
-        Regex::new("(?i)digite ['\"“”]?continue['\"“”]? para retomar").unwrap(),
-        Regex::new("(?i)limite máximo de chamadas").unwrap(),
+        Regex::new("(?i)maximum number of tool calls").expect("valid static regex"),
+        Regex::new("(?i)reached the maximum number of tool").expect("valid static regex"),
+        Regex::new("(?i)type ['\"“”]?continue['\"“”]? to resume").expect("valid static regex"),
+        Regex::new("(?i)número máximo de chamadas de ferramenta").expect("valid static regex"),
+        Regex::new("(?i)digite ['\"“”]?continue['\"“”]? para retomar").expect("valid static regex"),
+        Regex::new("(?i)limite máximo de chamadas").expect("valid static regex"),
     ]
 });
-
-#[cfg(feature = "standalone-provider-cli")]
-#[derive(Parser)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-#[derive(Subcommand)]
-enum Commands {
-    Server,
-    Login {
-        #[arg(long, default_value = "chromium")]
-        browser: String,
-    },
-}
 
 #[derive(Clone)]
 struct AppConfig {
@@ -156,22 +138,6 @@ struct ManualLoginRequest {
     browser: Option<String>,
 }
 
-#[cfg(feature = "standalone-provider-cli")]
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let config = load_config();
-    tokio::fs::create_dir_all(&config.runtime_dir).await?;
-
-    let bridge =
-        Arc::new(PlaywrightBridge::new(helper_dir_from(env!("CARGO_MANIFEST_DIR")), "kimi").await?);
-
-    match cli.command {
-        Commands::Server => run_server(bridge, config).await,
-        Commands::Login { browser } => run_login(bridge, config, browser).await,
-    }
-}
-
 async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<()> {
     bridge
         .init(InitParams {
@@ -205,50 +171,6 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-async fn run_login(
-    bridge: Arc<PlaywrightBridge>,
-    config: AppConfig,
-    browser: String,
-) -> Result<()> {
-    bridge
-        .manual_login(ManualLoginParams {
-            runtime_dir: config.runtime_dir.to_string_lossy().to_string(),
-            browser,
-            account_id: None,
-        })
-        .await?;
-    println!("Kimi browser opened. Login, then press Enter here to close helper.");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    bridge.shutdown().await?;
-    Ok(())
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-fn load_config() -> AppConfig {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("workspace root")
-        .to_path_buf();
-
-    AppConfig {
-        host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_owned()),
-        port: std::env::var("PORT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(3000),
-        api_key: std::env::var("API_KEY")
-            .ok()
-            .filter(|value| !value.is_empty()),
-        headless: std::env::var("HEADLESS")
-            .map(|value| value != "false")
-            .unwrap_or(true),
-        browser: std::env::var("BROWSER").unwrap_or_else(|_| "chromium".to_owned()),
-        runtime_dir: root.join("runtime").join("kimi"),
-    }
 }
 
 pub async fn serve_embedded(config: KimiServiceConfig) -> Result<()> {
@@ -1051,14 +973,6 @@ fn bad_gateway_error(err: impl std::fmt::Display) -> Response {
         StatusCode::BAD_GATEWAY,
         format!("upstream provider error (id={id})"),
     )
-}
-
-fn sse_json(value: Value) -> Bytes {
-    Bytes::from(format!("data: {}\n\n", value))
-}
-
-fn sse_done() -> Bytes {
-    Bytes::from("data: [DONE]\n\n")
 }
 
 fn stream_response<S>(stream: S) -> Response

@@ -1,8 +1,8 @@
 use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
 use crate::proxy_core::{
-    build_prompt, constant_time_eq, current_timestamp, split_prompt, usage_from_text,
-    FunctionToolDefinition, Message, MessageToolCall, OpenAIRequest, StreamingToolParser,
-    ToolCallFunction, Usage,
+    build_prompt, constant_time_eq, current_timestamp, split_prompt, sse_done, sse_json,
+    usage_from_text, FunctionToolDefinition, Message, MessageToolCall, OpenAIRequest,
+    StreamingToolParser, ToolCallFunction, Usage,
 };
 use anyhow::Result;
 use async_stream::stream;
@@ -968,22 +968,34 @@ fn openai_tools_from_value(value: Option<&Value>) -> Option<Vec<FunctionToolDefi
                 return serde_json::from_value(item.clone()).ok();
             }
 
-            let tool_type = item.get("type").and_then(Value::as_str)?;
-            if tool_type != "function" {
-                return None;
-            }
+            let tool_type = item
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("function");
             let name = item.get("name").and_then(Value::as_str)?.to_owned();
+            let description = item
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if tool_type == "custom" {
+                /* freeform custom tool: no JSON parameters, name at the top level */
+                return Some(FunctionToolDefinition {
+                    tool_type: "custom".to_owned(),
+                    function: None,
+                    name: Some(name),
+                    description,
+                });
+            }
             Some(FunctionToolDefinition {
                 tool_type: "function".to_owned(),
-                function: crate::proxy_core::FunctionToolSpec {
+                function: Some(crate::proxy_core::FunctionToolSpec {
                     name,
-                    description: item
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
+                    description,
                     parameters: item.get("parameters").cloned(),
                     strict: item.get("strict").and_then(Value::as_bool),
-                },
+                }),
+                name: None,
+                description: None,
             })
         })
         .collect::<Vec<_>>();
@@ -998,7 +1010,7 @@ fn anthropic_tools_from_value(value: Option<&Value>) -> Option<Vec<FunctionToolD
             let name = item.get("name").and_then(Value::as_str)?.to_owned();
             Some(FunctionToolDefinition {
                 tool_type: "function".to_owned(),
-                function: crate::proxy_core::FunctionToolSpec {
+                function: Some(crate::proxy_core::FunctionToolSpec {
                     name,
                     description: item
                         .get("description")
@@ -1006,7 +1018,9 @@ fn anthropic_tools_from_value(value: Option<&Value>) -> Option<Vec<FunctionToolD
                         .map(str::to_owned),
                     parameters: item.get("input_schema").cloned(),
                     strict: None,
-                },
+                }),
+                name: None,
+                description: None,
             })
         })
         .collect::<Vec<_>>();
@@ -1437,14 +1451,6 @@ fn json_error(status: StatusCode, message: String) -> Response {
         .into_response()
 }
 
-fn sse_json(value: Value) -> Bytes {
-    Bytes::from(format!("data: {}\n\n", value))
-}
-
-fn sse_done() -> Bytes {
-    Bytes::from("data: [DONE]\n\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1526,12 +1532,14 @@ mod tests {
                 web_search: Some(false),
                 tools: Some(vec![FunctionToolDefinition {
                     tool_type: "function".to_owned(),
-                    function: FunctionToolSpec {
+                    function: Some(FunctionToolSpec {
                         name: "lookup".to_owned(),
                         description: None,
                         parameters: None,
                         strict: None,
-                    },
+                    }),
+                    name: None,
+                    description: None,
                 }]),
                 tool_choice: None,
                 stream_options: None,
@@ -1575,7 +1583,7 @@ mod tests {
         .expect("tools");
 
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].function.name, "read_file");
+        assert_eq!(tools[0].tool_name(), Some("read_file"));
     }
 
     #[test]
@@ -1647,8 +1655,8 @@ mod tests {
         .expect("tools");
 
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].function.name, "read_file");
-        assert_eq!(tools[0].function.strict, Some(true));
+        assert_eq!(tools[0].tool_name(), Some("read_file"));
+        assert_eq!(tools[0].function.as_ref().unwrap().strict, Some(true));
     }
 
     #[test]

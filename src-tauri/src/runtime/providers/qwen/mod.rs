@@ -8,13 +8,16 @@ mod stream_registry;
 mod upload;
 mod watchdog;
 
+/* was flattened by the old lib.rs wrapper; keep it reachable as qwen::build_embedded_config */
+pub use config::build_embedded_config;
+
 use crate::browser_bridge::{
     BrowserBridge, CaptureHeadersParams, CloseAccountParams, InitParams, ManualLoginParams,
     PlaywrightBridge,
 };
 use crate::proxy_core::{
-    build_prompt, constant_time_eq, current_timestamp, usage_from_text, MessageToolCall,
-    OpenAIRequest, StreamingToolParser, ToolCallFunction,
+    build_prompt, constant_time_eq, current_timestamp, sse_done, sse_json, usage_from_text,
+    MessageToolCall, OpenAIRequest, StreamingToolParser, ToolCallFunction,
 };
 use anyhow::{anyhow, Result};
 use async_stream::stream;
@@ -38,13 +41,6 @@ use std::{
 };
 use uuid::Uuid;
 
-#[cfg(feature = "standalone-provider-cli")]
-use crate::browser_bridge::helper_dir_from;
-#[cfg(feature = "standalone-provider-cli")]
-use crate::browser_bridge::LoginAccountParams;
-#[cfg(feature = "standalone-provider-cli")]
-use clap::{Parser, Subcommand};
-
 use self::{
     account_manager::AccountManager,
     accounts::{global_account, AccountStore, QwenAccount},
@@ -59,59 +55,6 @@ use self::{
     upload::{prepare_multimodal_uploads, upload_bytes_to_qwen, MediaUploadInput},
     watchdog::Watchdog,
 };
-
-#[cfg(feature = "standalone-provider-cli")]
-#[derive(Parser)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-#[derive(Subcommand)]
-enum Commands {
-    Server,
-    Login {
-        #[arg(long, default_value = "chromium")]
-        browser: String,
-        #[arg(long)]
-        account_id: Option<String>,
-    },
-    Accounts {
-        #[command(subcommand)]
-        command: AccountCommands,
-    },
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-#[derive(Subcommand)]
-enum AccountCommands {
-    List,
-    Add {
-        email: String,
-        #[arg(long, default_value = "")]
-        password: String,
-        #[arg(long)]
-        id: Option<String>,
-    },
-    Remove {
-        id: String,
-    },
-    LoginAll {
-        #[arg(long, default_value = "chromium")]
-        browser: String,
-    },
-    LoginOne {
-        id: String,
-        #[arg(long, default_value = "chromium")]
-        browser: String,
-    },
-    OpenLogin {
-        account_id: String,
-        #[arg(long, default_value = "chromium")]
-        browser: String,
-    },
-}
 
 #[derive(Clone)]
 struct AppState {
@@ -183,62 +126,6 @@ struct CloseLoginRequest {
     account_id: Option<String>,
 }
 
-#[cfg(feature = "standalone-provider-cli")]
-#[tokio::main]
-async fn main() -> Result<()> {
-    use self::config::load_config;
-
-    let cli = Cli::parse();
-    let config = load_config();
-    ensure_runtime_layout(&config)?;
-
-    let workspace_root = workspace_root();
-    let accounts = AccountStore::new(
-        config.db_path.clone(),
-        &legacy_db_candidates(&workspace_root),
-        &legacy_accounts_json_candidates(&workspace_root),
-    )?;
-    let metrics = Metrics::new().await;
-    let cache = MemoryCache::new(config.cache.default_ttl, 10_000, metrics.clone());
-    let model_registry = ModelRegistry::new().await;
-    let stream_registry = StreamRegistry::new();
-    let watchdog = Watchdog::start(
-        config.watchdog.clone(),
-        metrics.clone(),
-        stream_registry.clone(),
-        cache.clone(),
-        config.chat_timeout,
-    );
-
-    let bridge =
-        Arc::new(PlaywrightBridge::new(helper_dir_from(env!("CARGO_MANIFEST_DIR")), "qwen").await?);
-
-    match cli.command {
-        Commands::Server => {
-            run_server(
-                bridge,
-                config,
-                ServerRuntime {
-                    accounts,
-                    metrics,
-                    cache,
-                    model_registry,
-                    stream_registry,
-                    watchdog,
-                },
-            )
-            .await
-        }
-        Commands::Login {
-            browser,
-            account_id,
-        } => run_login(bridge, config, browser, account_id).await,
-        Commands::Accounts { command } => {
-            run_account_command(bridge, config, accounts, command).await
-        }
-    }
-}
-
 struct ServerRuntime {
     accounts: AccountStore,
     metrics: Metrics,
@@ -296,132 +183,6 @@ async fn run_server(
     println!("proxy-hub qwen listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
-    Ok(())
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-async fn run_login(
-    bridge: Arc<PlaywrightBridge>,
-    config: AppConfig,
-    browser: String,
-    account_id: Option<String>,
-) -> Result<()> {
-    bridge
-        .manual_login(ManualLoginParams {
-            runtime_dir: config.runtime_dir.to_string_lossy().to_string(),
-            browser,
-            account_id,
-        })
-        .await?;
-    println!("Qwen browser opened. Login, then press Enter here to close helper.");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    bridge.shutdown().await?;
-    Ok(())
-}
-
-#[cfg(feature = "standalone-provider-cli")]
-async fn run_account_command(
-    bridge: Arc<PlaywrightBridge>,
-    config: AppConfig,
-    accounts: AccountStore,
-    command: AccountCommands,
-) -> Result<()> {
-    match command {
-        AccountCommands::List => {
-            let rows = accounts.list_masked_accounts()?;
-            if rows.is_empty() {
-                println!("No Qwen accounts configured.");
-            } else {
-                for account in rows {
-                    println!("{}  {}  {}", account.id, account.email, account.password);
-                }
-            }
-        }
-        AccountCommands::Add {
-            email,
-            password,
-            id,
-        } => {
-            let account = accounts.add_account(&email, &password, id.as_deref())?;
-            println!("Added account {} ({})", account.email, account.id);
-        }
-        AccountCommands::Remove { id } => {
-            if accounts.remove_account(&id)? {
-                println!("Removed account {id}");
-            } else {
-                println!("Account {id} not found");
-            }
-        }
-        AccountCommands::LoginAll { browser } => {
-            let rows = accounts.list_accounts()?;
-            if rows.is_empty() {
-                println!("No accounts configured.");
-            }
-            for account in rows {
-                if account.password.is_empty() {
-                    println!("Skipping {} because it has no password.", account.email);
-                    continue;
-                }
-                bridge
-                    .login_account(LoginAccountParams {
-                        account_id: account.id.clone(),
-                        email: account.email.clone(),
-                        password: account.password.clone(),
-                        headless: config.headless,
-                        browser: browser.clone(),
-                    })
-                    .await?;
-                bridge
-                    .close_account(CloseAccountParams {
-                        account_id: account.id.clone(),
-                    })
-                    .await?;
-                println!("Saved login session for {}", account.email);
-            }
-        }
-        AccountCommands::LoginOne { id, browser } => {
-            let Some(account) = accounts.get_account(&id)? else {
-                return Err(anyhow!("account {id} not found"));
-            };
-            if account.password.is_empty() {
-                return Err(anyhow!("account {} has no password", account.email));
-            }
-            bridge
-                .login_account(LoginAccountParams {
-                    account_id: account.id.clone(),
-                    email: account.email.clone(),
-                    password: account.password.clone(),
-                    headless: config.headless,
-                    browser,
-                })
-                .await?;
-            bridge
-                .close_account(CloseAccountParams {
-                    account_id: account.id.clone(),
-                })
-                .await?;
-            println!("Saved login session for {}", account.email);
-        }
-        AccountCommands::OpenLogin {
-            account_id,
-            browser,
-        } => {
-            bridge
-                .manual_login(ManualLoginParams {
-                    runtime_dir: config.runtime_dir.to_string_lossy().to_string(),
-                    browser,
-                    account_id: Some(account_id.clone()),
-                })
-                .await?;
-            println!("Browser opened for account profile {account_id}. Press Enter when done.");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            bridge
-                .close_account(CloseAccountParams { account_id })
-                .await?;
-        }
-    }
     Ok(())
 }
 
@@ -1095,8 +856,12 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
     let model = body.model.clone();
     let stream_registry = state.stream_registry.clone();
     let metrics = state.metrics.clone();
+    /* frees the registry slot even if the client disconnects before the generator
+    reaches its explicit remove below */
+    let cleanup_guard = stream_registry.guard(completion_id.clone());
 
     let stream = stream! {
+        let _cleanup_guard = cleanup_guard;
         yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(": heartbeat\n\n"));
         yield Ok(sse_json(json!({
             "id": completion_id,
@@ -1957,14 +1722,6 @@ fn bad_gateway_error(err: impl std::fmt::Display) -> Response {
         StatusCode::BAD_GATEWAY,
         format!("upstream provider error (id={id})"),
     )
-}
-
-fn sse_json(value: Value) -> Bytes {
-    Bytes::from(format!("data: {}\n\n", value))
-}
-
-fn sse_done() -> Bytes {
-    Bytes::from("data: [DONE]\n\n")
 }
 
 fn stream_response<S>(stream: S) -> Response

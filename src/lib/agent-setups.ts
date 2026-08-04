@@ -11,7 +11,7 @@ export interface AgentSetup {
 
 const fallbackModels: Record<ProviderName, string[]> = {
   qwen: ['qwen-plus-2025-07-28'],
-  deepseek: ['deepseek-v4-pro', 'deepseek-v4-pro-thinking'],
+  deepseek: ['deepseek-v4-pro', 'deepseek-v4-pro-thinking', 'deepseek-v4-vision'],
   kimi: ['kimi-k2.6', 'kimi-k2.6-thinking'],
   chatgpt: ['chatgpt-web-session'],
   gemini: ['gemini-web-session'],
