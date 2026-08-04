@@ -31,7 +31,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
       | sh -s -- -y --profile minimal --default-toolchain stable \
-        --component clippy rustfmt \
+        -c clippy -c rustfmt \
     && cargo install cargo-audit --locked
 
 # ── pnpm 11 (matches the version pinned in ci.yml; reads lockfile 9.0) ──
