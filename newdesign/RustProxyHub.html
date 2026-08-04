@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HubDeProxy — Rust Native</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0F0F0F;
+  --card:#1A1A1A;
+  --border:#2A2A2A;
+  --text:#E5E5E5;
+  --orange:#FF9500;
+  --gray:#888;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:'JetBrains Mono','IBM Plex Mono',monospace;
+  -webkit-font-smoothing:antialiased;
+  letter-spacing:-0.02em;
+  overflow-x:hidden;
+}
+#bg{
+  position:fixed;top:0;left:0;width:100%;height:100%;
+  z-index:-1;opacity:0.15;pointer-events:none;
+}
+.top-banner{
+  background:var(--orange);
+  color:#000;
+  padding:10px 16px;
+  display:flex;align-items:center;justify-content:center;gap:16px;
+  font-size:11px;font-weight:700;text-transform:uppercase;
+  position:relative;z-index:100;
+}
+.top-banner .banner-text{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.top-banner button{
+  background:#000;color:var(--orange);border:none;
+  padding:6px 12px;font-family:inherit;font-weight:700;
+  font-size:10px;cursor:pointer;text-transform:uppercase;white-space:nowrap;
+  transition:transform .15s;
+}
+.top-banner button:hover{transform:translateX(2px)}
+
+.navbar{
+  background:rgba(15,15,15,0.9);
+  border-bottom:1px solid var(--border);
+  padding:14px 24px;
+  display:flex;align-items:center;justify-content:space-between;
+  position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
+}
+.nav-left{display:flex;align-items:center;gap:32px}
+.logo{font-weight:700;font-size:14px;letter-spacing:-0.5px}
+.logo span{color:var(--orange)}
+.nav-links{display:flex;gap:28px;align-items:center}
+.nav-link{
+  font-size:11px;color:var(--gray);text-decoration:none;
+  text-transform:uppercase;letter-spacing:0.5px;
+  transition:color .2s;position:relative;padding:4px 0;
+}
+.nav-link:hover{color:var(--text)}
+.nav-link.active{color:var(--text)}
+.nav-link.active::after{content:'';position:absolute;bottom:-15px;left:0;right:0;height:2px;background:var(--orange)}
+.nav-right{display:flex;align-items:center;gap:16px}
+.hamburger{display:none;background:none;border:none;color:var(--text);font-size:20px;cursor:pointer}
+
+.container{max-width:1400px;margin:0 auto;padding:24px;display:grid;grid-template-columns:1fr 320px;gap:24px;align-items:start}
+.status-bar{
+  background:#121212;border:1px solid var(--border);
+  padding:8px 14px;font-size:10px;color:var(--gray);
+  text-transform:uppercase;letter-spacing:0.8px;
+  display:flex;justify-content:space-between;align-items:center;
+  margin-bottom:20px;overflow-x:auto;white-space:nowrap;gap:16px;
+}
+.main-title{
+  font-size:12px;color:var(--gray);margin-bottom:24px;
+  text-transform:uppercase;letter-spacing:1px;min-height:16px;
+}
+.main-title::after{content:'_';animation:blink 1s infinite;color:var(--orange);margin-left:2px}
+@keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
+
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:32px}
+.card{background:var(--card);border:1px solid var(--border);position:relative;overflow:hidden;transition:border-color .2s}
+.card-hover:hover{border-color:#3a3a3a}
+.card-action{padding:28px 24px;min-height:160px;display:flex;flex-direction:column;justify-content:flex-end;cursor:pointer}
+.card-action::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--orange),transparent);opacity:0;transition:opacity .3s}
+.card-action:hover::before{opacity:0.5}
+.card-icon{position:absolute;top:20px;right:20px;width:32px;height:24px;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:10px;color:#666;background:#121212;font-weight:600}
+.card-action h2{font-size:18px;font-weight:600;text-transform:uppercase;letter-spacing:-0.5px;margin-bottom:8px;line-height:1.2}
+.card-action p{font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:0.3px;line-height:1.4}
+
+.tabs{display:flex;gap:32px;border-bottom:1px solid var(--border);margin-bottom:24px}
+.tab{padding:12px 0;font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px;cursor:pointer;position:relative;transition:color .2s;background:none;border:none;font-family:inherit}
+.tab:hover{color:#999}
+.tab.active{color:var(--text)}
+.tab.active::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;background:var(--orange)}
+
+.empty-state{padding:100px 20px;text-align:center;color:#555;font-size:11px;text-transform:uppercase;letter-spacing:1px;border:1px dashed var(--border);background:rgba(18,18,18,0.2)}
+
+.sidebar{display:flex;flex-direction:column;gap:16px}
+.sidebar-card{padding:20px}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:1px solid var(--border);margin-bottom:16px;background:#121212}
+.metric{padding:14px 8px;text-align:center;border-right:1px solid var(--border)}
+.metric:last-child{border-right:none}
+.metric-label{font-size:9px;color:#666;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px}
+.metric-value{font-size:22px;font-weight:500;color:var(--orange);line-height:1;font-variant-numeric:tabular-nums}
+.btn-comprar{width:100%;background:transparent;border:1px solid var(--border);color:var(--gray);padding:10px;font-family:inherit;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;cursor:pointer;transition:all .2s}
+.btn-comprar:hover{border-color:var(--orange);color:var(--orange);background:rgba(255,149,0,0.05)}
+
+.activity-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.activity-title{font-size:11px;text-transform:uppercase;color:var(--text);letter-spacing:0.5px}
+.activity-count{font-size:10px;color:#666}
+.heatmap{display:grid;grid-template-columns:repeat(13,1fr);gap:4px;margin-bottom:20px}
+.heat-cell{aspect-ratio:1;background:#1a1a1a;border-radius:2px;transition:all .2s;cursor:pointer}
+.heat-cell:hover{transform:scale(1.15);z-index:2}
+.heat-0{background:#1a1a1a}
+.heat-1{background:#2a1f00}
+.heat-2{background:#553f00}
+.heat-3{background:#805f00}
+.heat-4{background:var(--orange)}
+
+.chart-label{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px}
+.chart-container{height:70px;position:relative}
+
+.optimize-card{text-align:center;padding:24px 20px}
+.optimize-card p{font-size:11px;color:var(--gray);line-height:1.6;text-transform:uppercase;letter-spacing:0.3px}
+.optimize-card strong{color:var(--text);font-weight:600}
+
+.referral-title{font-size:11px;text-transform:uppercase;color:var(--text);margin-bottom:12px;letter-spacing:0.5px;display:flex;align-items:center;gap:6px}
+.referral-title::before{content:'↗';color:var(--orange)}
+.referral-box{display:flex;border:1px solid var(--border);background:#0F0F0F;overflow:hidden}
+.referral-input{flex:1;background:transparent;border:none;padding:10px 12px;color:#666;font-family:inherit;font-size:11px;outline:none}
+.btn-copy{background:#1A1A1A;border:none;border-left:1px solid var(--border);color:var(--orange);padding:10px 14px;cursor:pointer;font-family:inherit;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;transition:all .2s;white-space:nowrap}
+.btn-copy:hover{background:#222;color:#ffa733}
+.btn-copy.copied{background:var(--orange);color:#000}
+
+@media(max-width:1024px){
+  .container{grid-template-columns:1fr;padding:16px;gap:20px}
+  .sidebar{order:-1}
+}
+@media(max-width:768px){
+  .navbar{padding:12px 16px}
+  .nav-links{display:none;position:absolute;top:100%;left:0;right:0;background:#0F0F0F;border-bottom:1px solid var(--border);flex-direction:column;padding:16px;gap:16px;align-items:flex-start}
+  .nav-links.active{display:flex}
+  .hamburger{display:block}
+  .top-banner{font-size:10px;padding:8px 12px;gap:8px}
+  .top-banner .banner-text{display:none}
+  .top-banner::before{content:'★ SIGA @HUBDEPROXY NO X';letter-spacing:0.3px}
+  .actions{grid-template-columns:1fr}
+  .card-action{min-height:130px;padding:22px 20px}
+  .status-bar{font-size:9px;padding:6px 10px}
+  .tabs{gap:24px;overflow-x:auto}
+  .heatmap{gap:3px}
+  .metric-value{font-size:20px}
+}
+
+/* ── INTRO OVERLAY ─────────────────────────────────── */
+#intro-overlay {
+  position:fixed; inset:0; z-index:9999;
+  background:#000;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  font-family:'JetBrains Mono','IBM Plex Mono',monospace;
+  overflow:hidden;
+  pointer-events:all;
+}
+
+/* scanlines */
+#intro-overlay::before {
+  content:'';
+  position:absolute; inset:0;
+  background:repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.18) 2px,
+    rgba(0,0,0,0.18) 4px
+  );
+  pointer-events:none; z-index:2;
+  animation:scanMove 8s linear infinite;
+}
+@keyframes scanMove {
+  0%{background-position:0 0}
+  100%{background-position:0 100%}
+}
+
+/* moving scan line */
+#intro-overlay::after {
+  content:'';
+  position:absolute; left:0; right:0; height:2px;
+  background:linear-gradient(90deg,transparent,rgba(255,149,0,0.6),transparent);
+  top:0; z-index:3;
+  animation:scanLine 2.8s ease-in-out infinite;
+  pointer-events:none;
+}
+@keyframes scanLine {
+  0%{top:-2px;opacity:0}
+  10%{opacity:1}
+  90%{opacity:1}
+  100%{top:100%;opacity:0}
+}
+
+/* hex rain canvas */
+#hex-canvas {
+  position:absolute; inset:0; z-index:1;
+  opacity:0.18;
+}
+
+/* boot log */
+#boot-log {
+  position:absolute; top:0; left:0; right:0;
+  padding:28px 32px;
+  z-index:4;
+  font-size:11px; color:#444;
+  text-transform:uppercase; letter-spacing:0.5px;
+  line-height:2;
+}
+#boot-log .log-line { opacity:0; white-space:nowrap; overflow:hidden; }
+#boot-log .log-ok  { color:#FF9500; }
+#boot-log .log-dim { color:#2a2a2a; }
+
+/* centre stage */
+#intro-center {
+  position:relative; z-index:5;
+  display:flex; flex-direction:column; align-items:center;
+  gap:24px;
+}
+
+/* big logo */
+#intro-logo {
+  font-size:clamp(36px,7vw,80px);
+  font-weight:700; letter-spacing:-2px;
+  color:#fff;
+  opacity:0;
+  text-align:center;
+  position:relative;
+}
+#intro-logo .accent { color:#FF9500; }
+#intro-logo .glitch-copy {
+  position:absolute; inset:0;
+  color:#FF9500;
+  clip-path:polygon(0 30%,100% 30%,100% 50%,0 50%);
+  opacity:0;
+}
+
+/* tagline */
+#intro-tagline {
+  font-size:12px; color:#666;
+  text-transform:uppercase; letter-spacing:3px;
+  opacity:0;
+}
+
+/* progress bar */
+#intro-bar-wrap {
+  width:min(380px,70vw);
+  border:1px solid #2a2a2a;
+  height:2px;
+  position:relative;
+  overflow:hidden;
+  opacity:0;
+}
+#intro-bar-fill {
+  position:absolute; left:0; top:0; bottom:0;
+  width:0%;
+  background:var(--orange);
+  transition:width 0.05s linear;
+  box-shadow:0 0 10px rgba(255,149,0,0.6);
+}
+#intro-bar-pct {
+  font-size:10px; color:#555;
+  text-transform:uppercase; letter-spacing:1px;
+  margin-top:8px; text-align:right;
+  width:min(380px,70vw);
+  opacity:0;
+}
+
+/* skip hint */
+#intro-skip {
+  position:absolute; bottom:28px; right:32px;
+  font-size:9px; color:#333;
+  text-transform:uppercase; letter-spacing:1.5px;
+  cursor:pointer; z-index:10;
+  transition:color .2s;
+  border:none; background:none; font-family:inherit;
+}
+#intro-skip:hover { color:#666; }
+
+/* page hidden until intro done */
+#page-content { opacity:0; transition:opacity 0.5s ease; }
+#page-content.visible { opacity:1; }
+
+/* intro exit */
+#intro-overlay.exit {
+  animation:introExit 0.7s cubic-bezier(0.77,0,0.175,1) forwards;
+}
+@keyframes introExit {
+  0%  { clip-path:inset(0 0 0 0); opacity:1; }
+  60% { clip-path:inset(0 0 0 0); opacity:1; }
+  100%{ clip-path:inset(0 100% 0 0); opacity:0; }
+}
+</style>
+</head>
+<!-- ══ INTRO OVERLAY ══════════════════════════════════ -->
+<div id="intro-overlay">
+  <canvas id="hex-canvas"></canvas>
+
+  <div id="boot-log">
+    <div class="log-line" id="log0">SYS  ▸ LOADING KERNEL MODULES…</div>
+    <div class="log-line" id="log1">NET  ▸ BINDING PROXY ENGINE <span class="log-ok">OK</span></div>
+    <div class="log-line" id="log2">MEM  ▸ ALLOCATING BUFFER POOL (256MB) <span class="log-ok">OK</span></div>
+    <div class="log-line" id="log3">RUST ▸ COMPILING RELEASE TARGET… <span class="log-ok">DONE</span></div>
+    <div class="log-line" id="log4">SEC  ▸ TLS 1.3 HANDSHAKE VERIFIED <span class="log-ok">OK</span></div>
+    <div class="log-line" id="log5">HUB  ▸ STARTING HUBDEPROXY v0.9.3 <span class="log-ok">▶</span></div>
+  </div>
+
+  <div id="intro-center">
+    <div id="intro-logo">
+      HUB<span class="accent">DE</span>PROXY
+      <div class="glitch-copy">HUBDEPROXY</div>
+    </div>
+    <div id="intro-tagline">RUST NATIVE · PROXY ENGINE · HIGH THROUGHPUT</div>
+    <div id="intro-bar-wrap"><div id="intro-bar-fill"></div></div>
+    <div id="intro-bar-pct">0%</div>
+  </div>
+
+  <button id="intro-skip">SKIP ↵</button>
+</div>
+
+<!-- ══ PAGE CONTENT ═══════════════════════════════════ -->
+<div id="page-content">
+<canvas id="bg"></canvas>
+
+<nav class="navbar">
+  <div class="nav-left">
+    <div class="logo">HUB<span>DE</span>PROXY</div>
+    <div class="nav-links" id="navLinks">
+      <a href="#" class="nav-link active">HOME</a>
+      <a href="#" class="nav-link">GESTOR DE PROXIES</a>
+      <a href="#" class="nav-link">TESTAR ROTAS</a>
+      <a href="#" class="nav-link">AFILIAÇÃO</a>
+      <a href="#" class="nav-link">[BETA]</a>
+      <a href="#" class="nav-link">SUPORTE</a>
+      <a href="#" class="nav-link">CONFIG</a>
+    </div>
+  <div class="nav-right">
+    <button class="hamburger" id="hamburger">≡</button>
+  </div>
+</nav>
+
+<div class="container">
+  <main>
+    <div class="status-bar">
+      <span>FLT P-001 - STATUS ALL_PROXY - PEND - AVG - CRED 80</span>
+      <span style="color:#555">RUST v0.9.3</span>
+    </div>
+
+    <h1 class="main-title" id="typing"></h1>
+
+    <div class="actions">
+      <div class="card card-action card-hover">
+        <div class="card-icon">↵</div>
+        <h2>INICIAR NOVO PROXY</h2>
+        <p>TUDO OTIMIZADO · RUST NATIVE · CONTINUE SOMANDO XP</p>
+      </div>
+      <div class="card card-action card-hover">
+        <div class="card-icon">C</div>
+        <h2>GERENCIAR POOL</h2>
+        <p>GERE UM POOL DE PROXIES ROTATIVOS A PARTIR DO SEU HISTÓRICO</p>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active">TODOS</button>
+      <button class="tab">CONEXÕES</button>
+      <button class="tab">PROXIES</button>
+    </div>
+
+    <div class="empty-state">
+      NENHUMA CONEXÃO ATIVA. INICIE UM PROXY PARA COMEÇAR.
+    </div>
+  </main>
+
+  <aside class="sidebar">
+    <div class="card sidebar-card">
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-label">CRÉDITOS</div>
+          <div class="metric-value" id="metric-creditos">0</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">CONEXÕES</div>
+          <div class="metric-value" id="metric-conexoes">0</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">PROXIES ATIVOS</div>
+          <div class="metric-value" id="metric-proxies">0</div>
+        </div>
+      </div>
+      <button class="btn-comprar">COMPRAR CRÉDITOS</button>
+    </div>
+
+    <div class="card sidebar-card">
+      <div class="activity-header">
+        <span class="activity-title">ATIVIDADE</span>
+        <span class="activity-count">52 SEM</span>
+      </div>
+      <div class="heatmap" id="heatmap"></div>
+      <div class="chart-label">LATÊNCIA MS</div>
+      <div class="chart-container">
+        <canvas id="latencyChart"></canvas>
+      </div>
+    </div>
+
+    <div class="card sidebar-card optimize-card">
+      <p><strong>OTIMIZE SEU PRIMEIRO PROXY</strong><br>PARA COMEÇAR A ACUMULAR PONTOS</p>
+    </div>
+
+    <div class="card sidebar-card">
+      <div class="referral-title">INDICAÇÃO</div>
+      <div class="referral-box">
+        <input class="referral-input" id="refLink" value="hubdeproxy.gg/r/SEU_CODIGO" readonly>
+        <button class="btn-copy" onclick="copyReferral()">COPIAR</button>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script>
+/* ── HEX RAIN ─────────────────────────────────────── */
+(function(){
+  const canvas = document.getElementById('hex-canvas');
+  const ctx = canvas.getContext('2d');
+  let W, H, cols, drops;
+  const CHARS = '0123456789ABCDEF►◄▸▹→↔:;.'.split('');
+  const SIZE = 14;
+
+  function resize(){
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cols  = Math.ceil(W / SIZE);
+    drops = Array.from({length:cols}, ()=>Math.random()*H/SIZE*-1);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  let rafId;
+  function rain(){
+    rafId = requestAnimationFrame(rain);
+    ctx.fillStyle = 'rgba(0,0,0,0.06)';
+    ctx.fillRect(0,0,W,H);
+    ctx.font = SIZE+'px "JetBrains Mono",monospace';
+    for(let i=0;i<cols;i++){
+      const char = CHARS[Math.floor(Math.random()*CHARS.length)];
+      const y    = drops[i] * SIZE;
+      /* bright head */
+      ctx.fillStyle = '#FF9500';
+      ctx.fillText(char, i*SIZE, y);
+      /* trail tones */
+      ctx.fillStyle = 'rgba(255,149,0,0.3)';
+      ctx.fillText(CHARS[Math.floor(Math.random()*CHARS.length)], i*SIZE, y-SIZE);
+      ctx.fillStyle = 'rgba(255,149,0,0.08)';
+      ctx.fillText(CHARS[Math.floor(Math.random()*CHARS.length)], i*SIZE, y-SIZE*2);
+
+      if(y > H && Math.random() > 0.975) drops[i] = 0;
+      drops[i] += 0.5 + Math.random()*0.3;
+    }
+  }
+  rain();
+
+  /* stop rain after intro */
+  window._stopHexRain = ()=>{ cancelAnimationFrame(rafId); };
+})();
+</script>
+
+<script>
+/* ── INTRO SEQUENCER ──────────────────────────────── */
+(function(){
+  const overlay   = document.getElementById('intro-overlay');
+  const page      = document.getElementById('page-content');
+  const logo      = document.getElementById('intro-logo');
+  const glitch    = document.querySelector('.glitch-copy');
+  const tagline   = document.getElementById('intro-tagline');
+  const barWrap   = document.getElementById('intro-bar-wrap');
+  const barFill   = document.getElementById('intro-bar-fill');
+  const barPct    = document.getElementById('intro-bar-pct');
+  const skipBtn   = document.getElementById('intro-skip');
+
+  const logLines  = [0,1,2,3,4,5].map(i=>document.getElementById('log'+i));
+  const LOG_DELAY = 220;   /* ms between log lines */
+  const LOG_START = 150;
+
+  /* helper: fade in a single element */
+  function fadeIn(el, delay, dur=400){
+    return new Promise(res=>{
+      setTimeout(()=>{
+        el.style.transition = `opacity ${dur}ms ease`;
+        el.style.opacity    = '1';
+        setTimeout(res, dur);
+      }, delay);
+    });
+  }
+
+  /* progress bar ticker */
+  function animateBar(fromPct, toPct, durationMs){
+    return new Promise(res=>{
+      const start  = performance.now();
+      const range  = toPct - fromPct;
+      function tick(now){
+        const t   = Math.min((now - start)/durationMs, 1);
+        const eased = t < 0.5 ? 2*t*t : -1+(4-2*t)*t; /* ease-in-out */
+        const cur = Math.round(fromPct + range*eased);
+        barFill.style.width   = cur+'%';
+        barPct.textContent    = cur+'%';
+        if(t < 1) requestAnimationFrame(tick);
+        else res();
+      }
+      requestAnimationFrame(tick);
+    });
+  }
+
+  /* glitch burst */
+  function glitchBurst(){
+    return new Promise(res=>{
+      let count = 0;
+      const total = 7;
+      const interval = setInterval(()=>{
+        const on = count % 2 === 0;
+        glitch.style.opacity = on ? '0.55' : '0';
+        glitch.style.transform = on
+          ? `translateX(${(Math.random()-0.5)*8}px)`
+          : 'none';
+        if(++count >= total*2){ clearInterval(interval); glitch.style.opacity='0'; res(); }
+      }, 55);
+    });
+  }
+
+  /* full exit */
+  function exitIntro(){
+    window._stopHexRain?.();
+    overlay.classList.add('exit');
+    page.classList.add('visible');
+    setTimeout(()=>{
+      overlay.style.display='none';
+      overlay.remove();
+    }, 750);
+  }
+
+  skipBtn.addEventListener('click', exitIntro);
+
+  /* ── main sequence ── */
+  async function run(){
+    /* phase 1 – boot log cascade */
+    for(let i=0;i<logLines.length;i++){
+      await new Promise(r=>setTimeout(r, LOG_START + i*LOG_DELAY));
+      logLines[i].style.transition='opacity 200ms ease';
+      logLines[i].style.opacity='1';
+    }
+
+    await new Promise(r=>setTimeout(r,320));
+
+    /* phase 2 – show UI chrome */
+    barWrap.style.transition='opacity 300ms ease'; barWrap.style.opacity='1';
+    barPct.style.transition='opacity 300ms ease';  barPct.style.opacity='1';
+
+    /* phase 3 – logo reveal while bar loads 0→65 */
+    await Promise.all([
+      animateBar(0, 65, 900),
+      fadeIn(logo, 80, 500),
+      fadeIn(tagline, 300, 400),
+    ]);
+
+    /* phase 4 – glitch burst mid-load */
+    await glitchBurst();
+
+    /* phase 5 – bar 65→100 */
+    await animateBar(65, 100, 600);
+
+    await new Promise(r=>setTimeout(r,200));
+
+    /* phase 6 – flash orange then exit */
+    overlay.style.transition='background 120ms';
+    overlay.style.background='rgba(255,149,0,0.08)';
+    await new Promise(r=>setTimeout(r,140));
+    overlay.style.background='#000';
+    await new Promise(r=>setTimeout(r,200));
+
+    exitIntro();
+  }
+
+  run();
+})();
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+// Mobile menu
+document.getElementById('hamburger').addEventListener('click',()=>{
+  document.getElementById('navLinks').classList.toggle('active');
+});
+
+// Typing effect
+const typingEl=document.getElementById('typing');
+const fullText='HUBDEPROXY // RUST NATIVE PROXY ENGINE';
+let i=0;
+function type(){
+  if(i<=fullText.length){
+    typingEl.textContent=fullText.substring(0,i);
+    i++;
+    setTimeout(type,32);
+  }
+}
+setTimeout(type,600);
+
+// Heatmap
+const heatmap=document.getElementById('heatmap');
+for(let h=0;h<52;h++){
+  const cell=document.createElement('div');
+  const r=Math.random();
+  let lvl=0;
+  if(r>0.85) lvl=4; else if(r>0.7) lvl=3; else if(r>0.5) lvl=2; else if(r>0.3) lvl=1;
+  cell.className='heat-cell heat-'+lvl;
+  heatmap.appendChild(cell);
+}
+
+// Three.js network
+function initNetwork(){
+  const canvas=document.getElementById('bg');
+  const scene=new THREE.Scene();
+  const camera=new THREE.PerspectiveCamera(60,window.innerWidth/window.innerHeight,1,1000);
+  camera.position.z=280;
+  const renderer=new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+
+  const count=150;
+  const positions=new Float32Array(count*3);
+  const vels=[];
+  for(let i=0;i<count;i++){
+    positions[i*3]=(Math.random()-0.5)*700;
+    positions[i*3+1]=(Math.random()-0.5)*400;
+    positions[i*3+2]=(Math.random()-0.5)*300;
+    vels.push({x:(Math.random()-0.5)*0.25,y:(Math.random()-0.5)*0.25,z:(Math.random()-0.5)*0.25});
+  }
+  const pGeo=new THREE.BufferGeometry();
+  pGeo.setAttribute('position',new THREE.BufferAttribute(positions,3));
+  const pMat=new THREE.PointsMaterial({color:0xFF9500,size:2,transparent:true,opacity:0.85});
+  const points=new THREE.Points(pGeo,pMat);
+  scene.add(points);
+
+  const lGeo=new THREE.BufferGeometry();
+  const lPos=new Float32Array(count*count*3);
+  lGeo.setAttribute('position',new THREE.BufferAttribute(lPos,3));
+  const lMat=new THREE.LineBasicMaterial({color:0xFF9500,transparent:true,opacity:0.1});
+  const lines=new THREE.LineSegments(lGeo,lMat);
+  scene.add(lines);
+
+  function animate(){
+    requestAnimationFrame(animate);
+    const pos=pGeo.attributes.position.array;
+    let idx=0;
+    for(let a=0;a<count;a++){
+      pos[a*3]+=vels[a].x; pos[a*3+1]+=vels[a].y; pos[a*3+2]+=vels[a].z;
+      if(Math.abs(pos[a*3])>350) vels[a].x*=-1;
+      if(Math.abs(pos[a*3+1])>200) vels[a].y*=-1;
+      if(Math.abs(pos[a*3+2])>150) vels[a].z*=-1;
+      for(let b=a+1;b<count;b++){
+        const dx=pos[a*3]-pos[b*3], dy=pos[a*3+1]-pos[b*3+1], dz=pos[a*3+2]-pos[b*3+2];
+        const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
+        if(d<90){
+          lPos[idx++]=pos[a*3]; lPos[idx++]=pos[a*3+1]; lPos[idx++]=pos[a*3+2];
+          lPos[idx++]=pos[b*3]; lPos[idx++]=pos[b*3+1]; lPos[idx++]=pos[b*3+2];
+        }
+      }
+    }
+    lGeo.setDrawRange(0,idx/3);
+    lGeo.attributes.position.needsUpdate=true;
+    pGeo.attributes.position.needsUpdate=true;
+    points.rotation.y+=0.0004;
+    lines.rotation.y+=0.0004;
+    renderer.render(scene,camera);
+  }
+  animate();
+  window.addEventListener('resize',()=>{
+    camera.aspect=window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth,window.innerHeight);
+  });
+}
+initNetwork();
+
+// Anime numbers
+anime({targets:{v:0},v:1284,round:1,duration:2000,delay:400,easing:'easeOutExpo',update:a=>{document.getElementById('metric-creditos').textContent=Math.floor(a.animations[0].currentValue).toLocaleString('pt-BR')}});
+anime({targets:{v:0},v:47,round:1,duration:1800,delay:700,easing:'easeOutExpo',update:a=>{document.getElementById('metric-conexoes').textContent=Math.floor(a.animations[0].currentValue)}});
+anime({targets:{v:0},v:12,round:1,duration:1600,delay:900,easing:'easeOutExpo',update:a=>{document.getElementById('metric-proxies').textContent=Math.floor(a.animations[0].currentValue)}});
+
+// Card entrance
+anime({targets:'.card-action,.sidebar-card',translateY:[24,0],opacity:[0,1],delay:anime.stagger(100,{start:200}),duration:800,easing:'easeOutQuad'});
+
+// GSAP hover
+document.querySelectorAll('.card-hover').forEach(card=>{
+  card.addEventListener('mouseenter',()=>gsap.to(card,{scale:1.015,y:-2,duration:0.2,ease:'power1.out'}));
+  card.addEventListener('mouseleave',()=>gsap.to(card,{scale:1,y:0,duration:0.2,ease:'power1.out'}));
+});
+
+// Chart.js latency
+const ctx=document.getElementById('latencyChart').getContext('2d');
+new Chart(ctx,{
+  type:'line',
+  data:{labels:['D-6','D-5','D-4','D-3','D-2','D-1','HJ'],datasets:[{data:[42,38,45,32,28,35,29],borderColor:'#FF9500',backgroundColor:'rgba(255,149,0,0.12)',borderWidth:1.5,tension:0.4,pointRadius:0,fill:true}]},
+  options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{enabled:false}},scales:{x:{display:false},y:{display:false,min:20,max:50}}}
+});
+
+// Copy referral
+function copyReferral(){
+  const input=document.getElementById('refLink');
+  navigator.clipboard.writeText(input.value).then(()=>{
+    const btn=document.querySelector('.btn-copy');
+    btn.textContent='COPIADO';
+    btn.classList.add('copied');
+    setTimeout(()=>{btn.textContent='COPIAR';btn.classList.remove('copied')},1800);
+  });
+}
+
+// Tabs
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');
+}));
+</script>
+</div><!-- /page-content -->
+
+<script>(function(){document.addEventListener("click",function(e){var a=e.target.closest("[data-product-id]");if(!a)return;e.preventDefault();var pid=a.getAttribute("data-product-id");if(pid)parent.postMessage({type:"ecto-artifact-link-click",productId:pid},"*")})})();</script>
+</body>
+</html>

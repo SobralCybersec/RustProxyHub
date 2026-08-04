@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RustProxyHub — Preview B</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Hanken+Grotesk:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+html,body{width:100%;height:100%;margin:0;overflow:hidden;background:var(--stage-bg,#20242e);}
+.deck-viewport{position:fixed;inset:0;overflow:hidden;background:var(--stage-bg,#20242e);}
+.deck-stage{position:absolute;left:0;top:0;width:1920px;height:1080px;overflow:hidden;transform-origin:0 0;background:var(--slide-bg,#F0EBDE);}
+.slide{position:absolute;inset:0;width:1920px;height:1080px;overflow:hidden;}
+
+:root{--stage-bg:#20242e;--slide-bg:#F0EBDE;--paper:#F0EBDE;--paper2:#E6E0CE;--ink:#1F2BE0;--ink-soft:#5560E5;--text:#1b1b1a;--muted:#5a564b;}
+.slide{background:var(--paper);color:var(--text);font-family:'Hanken Grotesk',sans-serif;}
+/* permanent graph-paper grid */
+.slide::before{content:"";position:absolute;inset:0;
+  background-image:linear-gradient(rgba(31,43,224,.10) 1px,transparent 1px),linear-gradient(90deg,rgba(31,43,224,.10) 1px,transparent 1px);
+  background-size:48px 48px;pointer-events:none;}
+/* hairline frame */
+.frame-t,.frame-b{position:absolute;left:64px;right:64px;height:1.5px;background:var(--ink);}
+.frame-t{top:64px;}.frame-b{bottom:64px;}
+
+.wrap{position:absolute;inset:0;padding:120px 96px;display:flex;flex-direction:column;}
+.masthead{display:flex;justify-content:space-between;align-items:baseline;font-family:'DM Mono',monospace;
+  font-size:20px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink);}
+.masthead .r{color:var(--muted);}
+.toprule{margin-top:20px;height:1.5px;background:var(--ink);}
+
+.body{margin-top:auto;margin-bottom:auto;max-width:1320px;}
+.eyebrow{font-family:'DM Mono',monospace;font-size:22px;letter-spacing:.2em;text-transform:uppercase;color:var(--ink);margin-bottom:26px;}
+.title{font-family:'Newsreader',serif;font-weight:500;font-size:172px;line-height:.9;letter-spacing:-.015em;margin:0;color:#12131a;}
+.title em{font-style:italic;color:var(--ink);}
+.sub{font-family:'Newsreader',serif;font-size:42px;line-height:1.32;color:#2a2b34;margin-top:34px;max-width:1180px;font-weight:400;}
+
+.index{margin-top:52px;max-width:1120px;}
+.irow{display:grid;grid-template-columns:64px 1fr auto;gap:24px;align-items:baseline;
+  font-family:'DM Mono',monospace;font-size:22px;padding:16px 0;border-top:1px solid rgba(31,43,224,.28);color:#22232c;}
+.irow .num{color:var(--ink);}
+.irow .val{letter-spacing:.05em;color:var(--muted);text-transform:uppercase;}
+
+/* pixel-glitch column, right edge */
+.glitch{position:absolute;right:64px;top:150px;display:flex;flex-direction:column;gap:9px;}
+.glitch i{width:26px;height:26px;background:var(--ink);opacity:.9;}
+.glitch i:nth-child(2){margin-right:26px;opacity:.6;}
+.glitch i:nth-child(3){margin-right:52px;}
+.glitch i:nth-child(4){margin-right:26px;opacity:.45;}
+.glitch i:nth-child(5){opacity:.75;}
+.qr{position:absolute;right:64px;bottom:150px;display:grid;grid-template-columns:repeat(6,16px);grid-auto-rows:16px;gap:3px;}
+.qr i{background:var(--ink);}
+.footer{position:absolute;left:96px;right:96px;bottom:92px;display:flex;justify-content:space-between;
+  font-family:'DM Mono',monospace;font-size:19px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);}
+.footer b{color:var(--ink);}
+</style>
+</head>
+<body>
+<div class="deck-viewport">
+  <div class="deck-stage" id="stage">
+    <section class="slide">
+      <div class="frame-t"></div><div class="frame-b"></div>
+      <div class="glitch"><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="qr" id="qr"></div>
+      <div class="wrap">
+        <div class="masthead"><span>RustProxyHub — Field Guide</span><span class="r">Rust · Tauri · Vue 3 / v2.11.2</span></div>
+        <div class="toprule"></div>
+
+        <div class="body">
+          <div class="eyebrow">A guided walkthrough · No.01</div>
+          <h1 class="title">One API,<br><em>seven</em> models</h1>
+          <p class="sub">A single OpenAI-compatible proxy that unifies Qwen, ChatGPT, Gemini, Mistral, DeepSeek, Kimi &amp; Zai — routed by model prefix, streamed over SSE, bundled in one desktop app.</p>
+
+          <div class="index">
+            <div class="irow"><span class="num">01</span><span class="ttl">The fragmentation problem</span><span class="val">why a hub</span></div>
+            <div class="irow"><span class="num">02</span><span class="ttl">Architecture · Tauri + axum</span><span class="val">request → provider</span></div>
+            <div class="irow"><span class="num">03</span><span class="ttl">Streaming &amp; browser sessions</span><span class="val">SSE · Playwright</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="footer"><span>Introduction</span><span>localhost:<b>3100</b> · /v1/chat/completions</span></div>
+    </section>
+  </div>
+</div>
+<script>
+var qr=document.getElementById('qr');for(var i=0;i<36;i++){var c=document.createElement('i');c.style.opacity=Math.random()>0.5?'1':'0';qr.appendChild(c);}
+function fit(){var s=document.getElementById('stage');var k=Math.min(innerWidth/1920,innerHeight/1080);
+s.style.transform='translate('+(innerWidth-1920*k)/2+'px,'+(innerHeight-1080*k)/2+'px) scale('+k+')';}
+addEventListener('resize',fit);fit();
+</script>
+</body>
+</html>
