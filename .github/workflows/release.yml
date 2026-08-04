@@ -27,7 +27,7 @@ jobs:
       matrix:
         platform: [ubuntu-24.04, windows-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -43,7 +43,7 @@ jobs:
       - uses: pnpm/action-setup@v6
         with:
           version: 11
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -61,7 +61,7 @@ jobs:
       # ponytail: pinned to the long-standing @v0 major. Confirm the current
       # tauri-action major before your first tagged release and bump if needed.
       - name: Build + publish release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
