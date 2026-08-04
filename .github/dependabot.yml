@@ -1,0 +1,50 @@
+# ============================================================
+# Dependabot — weekly dependency PRs across all three ecosystems.
+# Lives at .github/dependabot.yml (NOT under workflows/ — it's config,
+# not a workflow). Updates are grouped to one PR per ecosystem to
+# cut noise; the github-actions entry keeps workflow action versions
+# (and any SHA pins) current.
+# ============================================================
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm # detects pnpm via pnpm-lock.yaml
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      npm:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
