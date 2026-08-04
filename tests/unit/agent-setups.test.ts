@@ -48,7 +48,9 @@ describe('agent setup helpers', () => {
   })
 
   it('builds a Claude settings snippet for browser-backed Anthropic compatibility', () => {
-    const setup = buildClaudeSetup(makeProvider({ name: 'kimi', base_url: 'http://127.0.0.1:3002', models: ['kimi-k2.6'] }))
+    const setup = buildClaudeSetup(
+      makeProvider({ name: 'kimi', base_url: 'http://127.0.0.1:3002', models: ['kimi-k2.6'] })
+    )
 
     expect(setup.supported).toBe(true)
     expect(setup.target).toBe('~/.claude/settings.json')

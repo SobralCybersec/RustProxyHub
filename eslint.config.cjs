@@ -13,7 +13,19 @@ module.exports = [
 
   {
     name: 'app/files-to-ignore',
-    ignores: ['**/dist/**', '**/dist-ssr/**', '**/coverage/**', '**/test-results/**', '*.config.*', 'src/components/effects/**', 'src-tauri/**', 'scripts/**', '*.cjs', '**/*.mjs', '**/__global-api-script.js'],
+    ignores: [
+      '**/dist/**',
+      '**/dist-ssr/**',
+      '**/coverage/**',
+      '**/test-results/**',
+      '*.config.*',
+      'src/components/effects/**',
+      'src-tauri/**',
+      'scripts/**',
+      '*.cjs',
+      '**/*.mjs',
+      '**/__global-api-script.js',
+    ],
   },
 
   {
@@ -23,7 +35,38 @@ module.exports = [
       'no-console': process.env.NODE_ENV === 'production' ? 'warn' : 'off',
       'no-debugger': process.env.NODE_ENV === 'production' ? 'warn' : 'off',
       'comma-dangle': ['error', 'only-multiline'],
-      'id-length': [2, { exceptions: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '_'] }],
+      'id-length': [
+        2,
+        {
+          exceptions: [
+            'a',
+            'b',
+            'c',
+            'd',
+            'e',
+            'f',
+            'g',
+            'h',
+            'i',
+            'j',
+            'k',
+            'm',
+            'n',
+            'p',
+            'q',
+            'r',
+            's',
+            't',
+            'u',
+            'v',
+            'w',
+            'x',
+            'y',
+            'z',
+            '_',
+          ],
+        },
+      ],
       '@typescript-eslint/no-unused-vars': [
         'error',
         {

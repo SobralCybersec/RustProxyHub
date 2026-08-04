@@ -37,7 +37,7 @@ describe('runtime diagnostics ui', () => {
     // issue strings surface in the .banner.banner-error list
     expect(wrapper.text()).toContain('Bundled node.exe not found in Tauri resources.')
     expect(wrapper.text()).toContain(
-      'No supported browser found. Install Microsoft Edge, Google Chrome, or Chromium to run browser-backed providers.',
+      'No supported browser found. Install Microsoft Edge, Google Chrome, or Chromium to run browser-backed providers.'
     )
   })
 

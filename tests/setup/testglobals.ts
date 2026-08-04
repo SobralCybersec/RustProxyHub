@@ -6,10 +6,18 @@ const localStorageMock = (() => {
   let store: Record<string, string> = {}
   return {
     getItem: (key: string) => store[key] ?? null,
-    setItem: (key: string, value: string) => { store[key] = value },
-    removeItem: (key: string) => { delete store[key] },
-    clear: () => { store = {} },
-    get length() { return Object.keys(store).length },
+    setItem: (key: string, value: string) => {
+      store[key] = value
+    },
+    removeItem: (key: string) => {
+      delete store[key]
+    },
+    clear: () => {
+      store = {}
+    },
+    get length() {
+      return Object.keys(store).length
+    },
     key: (index: number) => Object.keys(store)[index] ?? null,
   }
 })()
@@ -32,7 +40,8 @@ if (!window.matchMedia) {
   })
 }
 if (!window.requestAnimationFrame) {
-  window.requestAnimationFrame = ((cb: FrameRequestCallback) => window.setTimeout(() => cb(performance.now()), 16)) as typeof window.requestAnimationFrame
+  window.requestAnimationFrame = ((cb: FrameRequestCallback) =>
+    window.setTimeout(() => cb(performance.now()), 16)) as typeof window.requestAnimationFrame
   window.cancelAnimationFrame = ((handle: number) => window.clearTimeout(handle)) as typeof window.cancelAnimationFrame
 }
 

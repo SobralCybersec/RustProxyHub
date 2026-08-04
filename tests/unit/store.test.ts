@@ -65,7 +65,7 @@ describe('store runtime flow', () => {
     store.overview = makeOverview()
     store.qwenEmail = 'pilot@example.com'
 
-    mockedInvoke.mockImplementation(async (command) => {
+    mockedInvoke.mockImplementation(async command => {
       if (command === 'add_qwen_account') {
         return [
           {

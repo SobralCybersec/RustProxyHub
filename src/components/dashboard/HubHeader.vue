@@ -9,7 +9,7 @@ const store = useStore()
 const { overview, runtimeReady, runtimeIssues, openLoginCount } = storeToRefs(store)
 
 // ponytail: filter runs on every render tick — acceptable at ≤8 providers; lift to computed if list grows large.
-const runningProviders = computed(() => overview.value?.providers.filter((p) => p.running).length ?? 0)
+const runningProviders = computed(() => overview.value?.providers.filter(p => p.running).length ?? 0)
 </script>
 
 <template>

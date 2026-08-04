@@ -5,16 +5,7 @@ import { invoke as mockInvoke } from '@/lib/mock-backend'
  * Canonical provider order. Lives here (not in mock-backend) so the production
  * path never imports the mock. The mock re-exports its own copy for dev seeds.
  */
-export const providerOrder: ProviderName[] = [
-  'qwen',
-  'deepseek',
-  'kimi',
-  'chatgpt',
-  'gemini',
-  'mistral',
-  'zai',
-  'meta',
-]
+export const providerOrder: ProviderName[] = ['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai', 'meta']
 
 const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 

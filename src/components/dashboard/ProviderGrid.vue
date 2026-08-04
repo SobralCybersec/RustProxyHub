@@ -105,11 +105,7 @@ function dotClass(p: ProviderOverview): string {
             {{ store.t('providers.actions.start') }}
           </button>
 
-          <button
-            type="button"
-            class="btn btn-utility"
-            @click="store.openProviderDrawer(p.name)"
-          >
+          <button type="button" class="btn btn-utility" @click="store.openProviderDrawer(p.name)">
             <HugeiconsIcon :icon="ArrowRight01Icon" :size="16" aria-hidden="true" />
             {{ store.t('providers.actions.dossier') }}
           </button>
