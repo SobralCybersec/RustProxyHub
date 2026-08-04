@@ -22,7 +22,24 @@ pub struct FunctionToolSpec {
 pub struct FunctionToolDefinition {
     #[serde(rename = "type")]
     pub tool_type: String,
-    pub function: FunctionToolSpec,
+    /* function tools nest name/params here; custom (freeform, type:"custom") tools omit it */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionToolSpec>,
+    /* custom-tool name/description live at the top level, not under `function` */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl FunctionToolDefinition {
+    /* the callable name whether this is a function or a custom tool */
+    pub fn tool_name(&self) -> Option<&str> {
+        self.function
+            .as_ref()
+            .map(|spec| spec.name.as_str())
+            .or(self.name.as_deref())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -289,17 +306,57 @@ fn tool_instructions(tools: &[FunctionToolDefinition], tool_choice: Option<&Valu
         "\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n{tools_json}\n\nThese tools are REAL and executable in this session.\nDo NOT claim you cannot access tools, that tools are only pasted text, or that tool execution is unavailable.\nIf the user asks to test, use, inspect, read, write, search, or run tools, you MUST answer by emitting tool calls.\n\n# TOOL CALLING FORMAT (MANDATORY)\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{{\"name\": \"tool_name\", \"arguments\": {{\"param_name\": \"value\"}}}}\n</tool_call>\n\nCRITICAL RULES:\n1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n2. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n3. Do NOT output any other text after your <tool_call> blocks.\n4. The JSON inside the tags MUST be valid and include the \"arguments\" field.\n5. NEVER invent tool names. Only use tools from the list above.\n"
     );
 
-    if let Some(name) = tool_choice
-        .and_then(|value| value.get("function"))
-        .and_then(|value| value.get("name"))
-        .and_then(Value::as_str)
-    {
+    /* a forced tool names itself under `function.name` OR at the top level
+    ({type:"function"|"custom", name}) */
+    let forced_name = tool_choice.and_then(|value| {
+        value
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .or_else(|| value.get("name"))
+            .and_then(Value::as_str)
+    });
+    let choice_type = tool_choice
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str);
+
+    if let Some(name) = forced_name {
         out.push_str(&format!(
             "\nCRITICAL: You MUST call the tool \"{name}\" in this response.\n"
         ));
+    } else if choice_type == Some("allowed_tools") {
+        /* restrict the callable subset without dropping tools from the list above */
+        let names: Vec<&str> = tool_choice
+            .and_then(|value| value.get("tools"))
+            .and_then(Value::as_array)
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter_map(|tool| {
+                        tool.get("name")
+                            .or_else(|| tool.get("function").and_then(|f| f.get("name")))
+                            .and_then(Value::as_str)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !names.is_empty() {
+            let verb = if tool_choice
+                .and_then(|v| v.get("mode"))
+                .and_then(Value::as_str)
+                == Some("required")
+            {
+                "You MUST call"
+            } else {
+                "You may only call"
+            };
+            out.push_str(&format!(
+                "\nCRITICAL: {verb} one of these tools: {}.\n",
+                names.join(", ")
+            ));
+        }
     } else if tool_choice.and_then(Value::as_str) == Some("required") {
         out.push_str("\nCRITICAL: You MUST call one of the available tools in this response.\n");
-    } else if tool_choice.and_then(Value::as_str) == Some("none") {
+    } else if tool_choice.and_then(Value::as_str) == Some("none") || choice_type == Some("none") {
         out.push_str("\nCRITICAL: Do NOT call tools in this response.\n");
     }
 
@@ -948,6 +1005,61 @@ mod tests {
     }
 
     #[test]
+    fn custom_tool_deserializes_without_400_and_names_itself() {
+        /* a type:"custom" tool has no `function` object — it must not fail the request */
+        let req: OpenAIRequest = serde_json::from_value(json!({
+            "model": "m",
+            "messages": [],
+            "tools": [
+                { "type": "function", "function": { "name": "read_file" } },
+                { "type": "custom", "name": "code_exec", "description": "run code" }
+            ]
+        }))
+        .expect("custom tool must not break deserialization");
+        let tools = req.tools.expect("tools present");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].tool_name(), Some("read_file"));
+        assert_eq!(tools[1].tool_type, "custom");
+        assert_eq!(tools[1].tool_name(), Some("code_exec"));
+    }
+
+    #[test]
+    fn tool_instructions_restricts_to_allowed_tools() {
+        let tools = vec![FunctionToolDefinition {
+            tool_type: "function".to_owned(),
+            function: Some(FunctionToolSpec {
+                name: "alpha".to_owned(),
+                description: None,
+                parameters: None,
+                strict: None,
+            }),
+            name: None,
+            description: None,
+        }];
+        let choice = json!({
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{ "type": "function", "name": "alpha" }]
+        });
+        let out = tool_instructions(&tools, Some(&choice));
+        assert!(out.contains("You MUST call one of these tools: alpha"));
+    }
+
+    #[test]
+    fn tool_instructions_forces_top_level_named_tool() {
+        let tools = vec![FunctionToolDefinition {
+            tool_type: "custom".to_owned(),
+            function: None,
+            name: Some("code_exec".to_owned()),
+            description: None,
+        }];
+        /* Responses/custom style: name at the top level, not under `function` */
+        let choice = json!({ "type": "custom", "name": "code_exec" });
+        let out = tool_instructions(&tools, Some(&choice));
+        assert!(out.contains("You MUST call the tool \"code_exec\""));
+    }
+
+    #[test]
     fn streaming_parser_lifts_bare_json_tool_call_without_tags() {
         let mut parser = StreamingToolParser::new();
         let parsed = parser.feed(r#"{"name":"bash","arguments":{"command":"ls"}}"#);
@@ -1031,12 +1143,14 @@ mod tests {
             web_search: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
-                function: FunctionToolSpec {
+                function: Some(FunctionToolSpec {
                     name: "read_file".to_owned(),
                     description: None,
                     parameters: None,
                     strict: None,
-                },
+                }),
+                name: None,
+                description: None,
             }]),
             tool_choice: Some(json!("required")),
             stream_options: None,
@@ -1174,12 +1288,14 @@ mod tests {
             web_search: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
-                function: FunctionToolSpec {
+                function: Some(FunctionToolSpec {
                     name: "get_weather".to_owned(),
                     description: None,
                     parameters: None,
                     strict: None,
-                },
+                }),
+                name: None,
+                description: None,
             }]),
             tool_choice: None,
             stream_options: None,
@@ -1253,8 +1369,6 @@ mod tests {
         assert!(enforce_loopback_guard("0.0.0.0", Some("secret")).is_ok());
     }
 
-    // ── estimate_tokens / usage_from_text ──────────────────────────────────
-
     #[test]
     fn estimate_tokens_rounds_up() {
         // 7 chars / 3.5 = 2.0 exactly
@@ -1279,8 +1393,6 @@ mod tests {
         let detail = u.prompt_tokens_details.expect("detail present");
         assert_eq!(detail["cached_tokens"], 0);
     }
-
-    // ── content_to_text ────────────────────────────────────────────────────
 
     #[test]
     fn content_to_text_handles_none() {
@@ -1321,8 +1433,6 @@ mod tests {
         assert!(result.contains("42"));
     }
 
-    // ── robust_parse_json ──────────────────────────────────────────────────
-
     #[test]
     fn robust_parse_json_strips_markdown_fence() {
         let raw = "```json\n{\"key\": \"value\"}\n```";
@@ -1355,8 +1465,6 @@ mod tests {
         let val = robust_parse_json("[1, 2, 3]").expect("parsed array");
         assert_eq!(val.as_array().unwrap().len(), 3);
     }
-
-    // ── StreamingToolParser flush ──────────────────────────────────────────
 
     #[test]
     fn flush_recovers_partial_open_tag_as_text() {
@@ -1391,8 +1499,6 @@ mod tests {
             Value::String("Cargo.toml".to_owned())
         );
     }
-
-    // ── split_prompt multi-turn ────────────────────────────────────────────
 
     fn make_msg(role: &str, text: &str) -> Message {
         Message {
