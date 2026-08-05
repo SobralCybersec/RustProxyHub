@@ -59,5 +59,4 @@ describe('runtime diagnostics ui', () => {
     // run button is present; store validates before firing — not disabled at UI level
     expect(wrapper.find('.btn.btn-primary').exists()).toBe(true)
   })
-
 })

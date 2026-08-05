@@ -59,5 +59,4 @@ describe('store runtime flow', () => {
     expect(store.error).toBe('Bundled node.exe not found in Tauri resources.')
     expect(mockedInvoke).not.toHaveBeenCalled()
   })
-
 })
