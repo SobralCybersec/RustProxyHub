@@ -701,24 +701,26 @@ async function getChatGPTBasicHeaders() {
   }
 }
 
+// chatgpt.com's web conversation endpoint silently drops client-supplied
+// `author.role: "system"` turns — the trusted system prompt is composed
+// server-side (account Custom Instructions), never from an inline message. The
+// only per-request way to make instructions land is to fold them into the user
+// turn, matching the "User:/Assistant:" transcript that split_prompt builds.
+function foldChatGPTSystemPrompt(systemPrompt, prompt) {
+  const sys = (systemPrompt || '').trim()
+  if (!sys) return prompt
+  return `System: ${sys}\n\n${prompt}`
+}
+
 function buildChatGPTMessages(prompt, webSearch, systemPrompt) {
   const messages = []
-  if (systemPrompt && systemPrompt.trim()) {
-    messages.push({
-      id: randomUUID(),
-      author: { role: 'system' },
-      create_time: Date.now() / 1000,
-      content: { content_type: 'text', parts: [systemPrompt.trim()] },
-      metadata: {},
-    })
-  }
   messages.push({
     id: randomUUID(),
     author: { role: 'user' },
     create_time: Date.now() / 1000,
     content: {
       content_type: 'text',
-      parts: [prompt],
+      parts: [foldChatGPTSystemPrompt(systemPrompt, prompt)],
     },
     metadata: {
       developer_mode_connector_ids: [],
@@ -824,21 +826,15 @@ function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch, sys
   delete nextPayload.history_and_training_disabled
 
   const builtMessages = []
-  if (systemPrompt && systemPrompt.trim()) {
-    builtMessages.push({
-      id: randomUUID(),
-      author: { role: 'system' },
-      create_time: Date.now() / 1000,
-      content: { content_type: 'text', parts: [systemPrompt.trim()] },
-      metadata: {},
-    })
-  }
   builtMessages.push({
     ...templateMessage,
     id: randomUUID(),
     create_time: Date.now() / 1000,
     author: { ...(templateMessage.author || {}), role: 'user' },
-    content: replaceChatGPTMessageContent(templateMessage.content, prompt),
+    content: replaceChatGPTMessageContent(
+      templateMessage.content,
+      foldChatGPTSystemPrompt(systemPrompt, prompt),
+    ),
     metadata: {
       ...templateMetadata,
       selected_sources: webSearch ? ['web'] : [],

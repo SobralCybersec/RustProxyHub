@@ -363,9 +363,11 @@ fn tool_instructions(tools: &[FunctionToolDefinition], tool_choice: Option<&Valu
     out
 }
 
-/// Returns `(system_prompt, conversation)` split so providers with a native system channel
-/// (e.g. ChatGPT web) can deliver instructions through the correct lane instead of prepending
-/// them to the user message where they may be ignored or filtered.
+/// Returns `(system_prompt, conversation)` split so each provider can place the
+/// system instructions the way its channel actually accepts them. NOTE: the
+/// chatgpt.com web endpoint has no working system lane — it silently drops inline
+/// `role:"system"` turns — so the bridge folds the system prompt into the user
+/// message there (see `foldChatGPTSystemPrompt` in the Playwright bridge).
 pub fn split_prompt(request: &OpenAIRequest) -> (String, String) {
     let mut system_prompt = String::new();
     let mut prompt = String::new();
