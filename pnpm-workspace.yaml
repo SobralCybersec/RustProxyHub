@@ -1,19 +1,17 @@
-packages:
-  - frontend
+# pnpm 11 moved all pnpm-specific config OUT of package.json — overrides,
+# build-script approvals, everything lives here now (even for a single-package
+# repo, no monorepo required).
+#
+# postcss override: pin ≥8.5.23 to clear GHSA-fxqj-rqcc-2cmp / GHSA-r28c-9q8g-f849,
+# pulled transitively through Vue's @vue/compiler-sfc.
+overrides:
+  postcss: ^8.5.23
+
+# Only esbuild ships a postinstall build in this tree; approve it explicitly
+# instead of blanket-allowing every dependency's install scripts.
+onlyBuiltDependencies:
+  - esbuild
 
 allowBuilds:
-  '@nestjs/core': true
-  '@openapitools/openapi-generator-cli': true
-  '@swc/core': true
-  electron: true
-  esbuild: true
-dangerouslyAllowAllBuilds: true
-minimumReleaseAge: 1440
-onlyBuiltDependencies:
-  - '@nestjs/core'
-  - '@openapitools/openapi-generator-cli'
-  - '@swc/core'
-  - '@tailwindcss/oxide'
-  - electron
-  - esbuild
-  - vue-demi
+  electron: set this to true or false
+  esbuild: set this to true or false
