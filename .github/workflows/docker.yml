@@ -105,16 +105,40 @@ jobs:
           provenance: true
           sbom: true
 
-      - name: Trivy scan (pushed image)
+      # Trivy here scans the OS layer of the image — nothing else. Rust and npm
+      # dependency CVEs are owned by cargo-audit + pnpm-audit (security.yml),
+      # which resolve the ACTUAL shipped tree from src-tauri/Cargo.lock and
+      # pnpm-lock.yaml. Left unscoped, Trivy instead scraped every crate-source
+      # Cargo.lock sitting in the cargo registry cache — reqwest 0.13.3 (we ship
+      # 0.12.28), cargo-audit's own rustsec-0.33.0 lock, aws-lc/openssl we don't
+      # even depend on — and filed dozens of phantom alerts for versions that
+      # never reach the product. Scope it to what an image scan is actually for.
+      - name: Trivy scan (OS layer of the pushed image)
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Scan the concrete amd64 manifest, NOT the provenance/SBOM OCI index
+          # that :latest resolves to. Scanning the attestation manifest is what
+          # produced library findings with empty artifactLocation.uri — a SARIF
+          # that uploads "successfully" but GitHub's async ingest then rejects
+          # ("failed to process"). Refs: trivy #8141, discussion #10196.
+          TRIVY_PLATFORM: linux/amd64
         with:
           image-ref: ${{ steps.repo.outputs.image }}:latest
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
+          # OS packages only. Must be the input, not TRIVY_PKG_TYPES env — the
+          # action always passes --vuln-type (default os,library) on the CLI,
+          # and the CLI flag beats the env var.
+          vuln-type: os
           ignore-unfixed: true # keep the Security tab actionable
+          limit-severities-for-sarif: true # else SARIF ignores `severity` and dumps every level
+          # Don't walk the toolchain caches — pointless for an OS scan and slow.
+          skip-dirs: /usr/local/cargo,/usr/local/rustup,/root/.local/share/pnpm,/app/node_modules
 
+      # No `category:` — keep the default so this clean analysis supersedes the
+      # earlier one and auto-closes the stale library alerts it had filed.
       - name: Upload Trivy SARIF
         if: github.event_name != 'pull_request'
         uses: github/codeql-action/upload-sarif@v3
