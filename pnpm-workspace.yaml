@@ -1,17 +1,16 @@
-# pnpm 11 moved all pnpm-specific config OUT of package.json — overrides,
-# build-script approvals, everything lives here now (even for a single-package
-# repo, no monorepo required).
+# pnpm 11 moved all pnpm-specific config OUT of package.json — overrides and
+# build-script approvals live here now (even for a single-package repo).
 #
 # postcss override: pin ≥8.5.23 to clear GHSA-fxqj-rqcc-2cmp / GHSA-r28c-9q8g-f849,
 # pulled transitively through Vue's @vue/compiler-sfc.
 overrides:
   postcss: ^8.5.23
 
-# Only esbuild ships a postinstall build in this tree; approve it explicitly
-# instead of blanket-allowing every dependency's install scripts.
-onlyBuiltDependencies:
-  - esbuild
-
+# pnpm 11 defaults strict-dep-builds=true: any dependency with an UNREVIEWED
+# install script hard-fails the install (ERR_PNPM_IGNORED_BUILDS). Decide each
+# one explicitly. `allowBuilds` is the successor to onlyBuiltDependencies —
+# a map, not a list; the old key is silently ignored on pnpm 11.
 allowBuilds:
-  electron: set this to true or false
-  esbuild: set this to true or false
+  esbuild: true # bundler binary — genuinely needs its postinstall
+  electron: false # dev-only, dragged in transitively via @vue/devtools-electron;
+  # nothing here runs Electron, so skip the multi-hundred-MB binary download
