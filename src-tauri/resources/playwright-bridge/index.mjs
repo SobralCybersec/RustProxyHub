@@ -8,6 +8,22 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 // See: https://github.com/microsoft/playwright/issues/20784
 dns.setDefaultResultOrder('ipv4first')
 
+// Host check that survives scrutiny: parse the URL and compare the hostname
+// exactly (or as a dot-boundary subdomain). `url.includes('kimi.com')` also
+// matches 'kimi.com.evil.com' and 'evil.com/?x=kimi.com' — this does not.
+function isOnHost(rawUrl, ...hosts) {
+  let host
+  try {
+    host = new URL(rawUrl).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+  return hosts.some((h) => {
+    const target = h.toLowerCase()
+    return host === target || host.endsWith(`.${target}`)
+  })
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 async function importPlaywright() {
   const candidateUrls = [
@@ -490,7 +506,7 @@ async function captureDeepSeekHeaders(forceNew = false) {
   if (!page) throw new Error('DeepSeek Playwright not initialized')
 
   const currentUrl = page.url()
-  const isOnDeepSeek = currentUrl.includes('chat.deepseek.com')
+  const isOnDeepSeek = isOnHost(currentUrl, 'chat.deepseek.com')
   const isOnSpecificChat = isOnDeepSeek && /\/chat\/\d+/.test(currentUrl)
   if (!isOnDeepSeek || forceNew || isOnSpecificChat) {
     try {
@@ -594,7 +610,7 @@ async function captureChatGPTTemplate(forceNew = false) {
     return state.chatgpt.cachedHeaders
   }
 
-  if (!page.url().includes('chatgpt.com') || forceNew) {
+  if (!isOnHost(page.url(), 'chatgpt.com') || forceNew) {
     await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
   }
 
@@ -863,7 +879,7 @@ function extractChatGPTAssistantText(payload) {
 async function listChatGPTModels() {
   const page = state.chatgpt.page
   if (!page) throw new Error('ChatGPT Playwright not initialized')
-  if (!page.url().includes('chatgpt.com')) {
+  if (!isOnHost(page.url(), 'chatgpt.com')) {
     await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
   }
 
@@ -1048,7 +1064,7 @@ async function captureGeminiTemplate(forceNew = false) {
     return state.gemini.cachedHeaders
   }
 
-  if (!page.url().includes('gemini.google.com') || forceNew) {
+  if (!isOnHost(page.url(), 'gemini.google.com') || forceNew) {
     await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' })
   }
 
@@ -1193,7 +1209,7 @@ function normalizeGeminiText(value) {
 async function listGeminiModels() {
   const page = state.gemini.page
   if (!page) throw new Error('Gemini Playwright not initialized')
-  if (!page.url().includes('gemini.google.com')) {
+  if (!isOnHost(page.url(), 'gemini.google.com')) {
     await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded' })
   }
 
@@ -1312,7 +1328,7 @@ async function captureMistralTemplate(forceNew = false) {
     return state.mistral.cachedHeaders
   }
 
-  if (!page.url().includes('chat.mistral.ai') || forceNew) {
+  if (!isOnHost(page.url(), 'chat.mistral.ai') || forceNew) {
     await page.goto('https://chat.mistral.ai/chat', { waitUntil: 'domcontentloaded' })
   }
 
@@ -1489,7 +1505,7 @@ function extractMistralText(body) {
 async function listMistralModels() {
   const page = state.mistral.page
   if (!page) throw new Error('Mistral Playwright not initialized')
-  if (!page.url().includes('chat.mistral.ai')) {
+  if (!isOnHost(page.url(), 'chat.mistral.ai')) {
     await page.goto('https://chat.mistral.ai/chat', { waitUntil: 'domcontentloaded' })
   }
 
@@ -1581,7 +1597,7 @@ async function captureZaiTemplate(forceNew = false) {
     return state.zai.cachedHeaders
   }
 
-  if (!page.url().includes('chat.z.ai') || forceNew) {
+  if (!isOnHost(page.url(), 'chat.z.ai') || forceNew) {
     await page.goto('https://chat.z.ai/', { waitUntil: 'domcontentloaded' })
   }
 
@@ -1710,7 +1726,7 @@ function extractOpenAIStyleResponse(body) {
 async function listZaiModels() {
   const page = state.zai.page
   if (!page) throw new Error('Z.AI Playwright not initialized')
-  if (!page.url().includes('chat.z.ai')) {
+  if (!isOnHost(page.url(), 'chat.z.ai')) {
     await page.goto('https://chat.z.ai/', { waitUntil: 'domcontentloaded' })
   }
 
@@ -1820,7 +1836,7 @@ async function captureMetaTemplate(forceNew = false) {
     return state.meta.cachedHeaders
   }
 
-  if (!page.url().includes('meta.ai') || forceNew) {
+  if (!isOnHost(page.url(), 'meta.ai') || forceNew) {
     await page.goto('https://www.meta.ai/', { waitUntil: 'domcontentloaded' })
   }
 
@@ -1946,7 +1962,7 @@ function extractFlexibleResponse(body) {
 async function listMetaModels() {
   const page = state.meta.page
   if (!page) throw new Error('Meta AI Playwright not initialized')
-  if (!page.url().includes('meta.ai')) {
+  if (!isOnHost(page.url(), 'meta.ai')) {
     await page.goto('https://www.meta.ai/', { waitUntil: 'domcontentloaded' })
   }
 
@@ -2072,7 +2088,7 @@ async function captureKimiHeaders(forceNew = false) {
   }
 
   const currentUrl = page.url()
-  if (!currentUrl.includes('kimi.com') || forceNew) {
+  if (!isOnHost(currentUrl, 'kimi.com') || forceNew) {
     await page.goto('https://www.kimi.com/', { waitUntil: 'domcontentloaded' })
   }
 
@@ -2280,7 +2296,7 @@ async function captureQwenHeaders(forceNew = false, accountId = null) {
   }
 
   const currentUrl = page.url()
-  const isOnQwen = currentUrl.includes('chat.qwen.ai')
+  const isOnQwen = isOnHost(currentUrl, 'chat.qwen.ai')
   const isOnSpecificChat = isOnQwen && /\/c\//.test(currentUrl)
   if (!isOnQwen || forceNew || isOnSpecificChat) {
     await page.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' })
