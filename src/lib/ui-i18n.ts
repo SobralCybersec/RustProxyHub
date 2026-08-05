@@ -43,14 +43,12 @@ export const messages: Record<UiLocale, MessageTree> = {
         overview: 'Início',
         providers: 'Gestor de proxies',
         access: 'Testar rotas',
-        qwen: 'Contas Qwen',
         workbench: 'Config',
       },
       panelTabs: {
         overview: 'Todos',
         providers: 'Conexões',
         access: 'Proxies',
-        qwen: 'Contas',
         workbench: 'Lab',
       },
       emptyState: 'Nenhuma conexao ativa. Inicie hub ou abra uma sessao para comecar.',
@@ -75,7 +73,6 @@ export const messages: Record<UiLocale, MessageTree> = {
         quickLinks: {
           access: 'Logins',
           workbench: 'Workbench',
-          qwen: 'Contas Qwen',
           providers: 'Providers',
         },
         openProviderManager: 'Abrir gestor de providers',
@@ -185,11 +182,6 @@ export const messages: Record<UiLocale, MessageTree> = {
       reopenSession: 'Reabrir sessão',
       markDone: 'Marcar concluído',
       guides: {
-        qwen: [
-          'abrir perfil padrão quando cookies expirarem',
-          'usar perfis por conta quando precisar isolar sessões',
-          'marcar concluído depois de salvar estado',
-        ],
         deepseek: [
           'abrir chat.deepseek.com',
           'finalizar login e aguardar caixa de chat',
@@ -226,18 +218,6 @@ export const messages: Record<UiLocale, MessageTree> = {
           'selectors e ids dependem de probe runtime após login',
         ],
       },
-    },
-    qwen: {
-      passwordPlaceholder: 'login opcional para seed',
-      saveAccount: 'Salvar conta',
-      passwordSet: 'senha configurada',
-      manualOnly: 'somente perfil manual',
-      profileOpen: '[ perfil aberto ]',
-      saved: '[ salvo ]',
-      openProfile: 'abrir perfil',
-      complete: 'Concluir',
-      remove: 'remover',
-      empty: 'Nenhuma conta Qwen combina com filtro atual.',
     },
     workbench: {
       terminalReady: 'Console de probe inicializado.',
@@ -350,14 +330,12 @@ export const messages: Record<UiLocale, MessageTree> = {
         overview: 'Home',
         providers: 'Proxy Manager',
         access: 'Route Tests',
-        qwen: 'Qwen Accounts',
         workbench: 'Config',
       },
       panelTabs: {
         overview: 'All',
         providers: 'Connections',
         access: 'Proxies',
-        qwen: 'Accounts',
         workbench: 'Lab',
       },
       emptyState: 'No active connection. Start the hub or open a session to begin.',
@@ -382,7 +360,6 @@ export const messages: Record<UiLocale, MessageTree> = {
         quickLinks: {
           access: 'Logins',
           workbench: 'Workbench',
-          qwen: 'Qwen Accounts',
           providers: 'Providers',
         },
         openProviderManager: 'Open provider manager',
@@ -492,11 +469,6 @@ export const messages: Record<UiLocale, MessageTree> = {
       reopenSession: 'Reopen session',
       markDone: 'Mark complete',
       guides: {
-        qwen: [
-          'open default profile when cookies expire',
-          'use per-account profiles when you need isolated sessions',
-          'mark complete after saving state',
-        ],
         deepseek: [
           'open chat.deepseek.com',
           'finish login and wait for chat box',
@@ -529,18 +501,6 @@ export const messages: Record<UiLocale, MessageTree> = {
           'selectors and model ids depend on runtime probing after login',
         ],
       },
-    },
-    qwen: {
-      passwordPlaceholder: 'optional login seed',
-      saveAccount: 'Save account',
-      passwordSet: 'password configured',
-      manualOnly: 'manual profile only',
-      profileOpen: '[ profile open ]',
-      saved: '[ saved ]',
-      openProfile: 'Open profile',
-      complete: 'Complete',
-      remove: 'Remove',
-      empty: 'No Qwen account matches the current filter.',
     },
     workbench: {
       terminalReady: 'Probe console initialized.',

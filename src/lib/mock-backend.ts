@@ -4,7 +4,6 @@ import type {
   ProviderLogs,
   ProviderName,
   ProviderOverview,
-  QwenAccountSummary,
   ServiceName,
 } from '@/lib/types'
 
@@ -64,9 +63,7 @@ class MockWorld {
   runtimeIssues: string[] = []
 
   providers: Record<ProviderName, ProviderState>
-  qwenAccounts: QwenAccountSummary[]
   openProviderLogins = new Set<ProviderName>()
-  openQwenLogins = new Set<string>()
   logs: Record<ServiceName, string[]>
 
   // Rolling time-series used by arcade charts (newest last)
@@ -96,11 +93,6 @@ class MockWorld {
       },
       {} as Record<ProviderName, ProviderState>
     )
-
-    this.qwenAccounts = [
-      { id: 'qwen-ace-01', email: 'arcade.operator@rustproxy.io', has_password: true, created_at: '2026-05-02' },
-      { id: 'qwen-ace-02', email: 'pixel.runner@rustproxy.io', has_password: false, created_at: '2026-05-19' },
-    ]
 
     this.logs = {
       hub: [],
@@ -220,9 +212,7 @@ class MockWorld {
           : null,
       },
       providers,
-      qwen_account_count: this.qwenAccounts.length,
       open_provider_login_sessions: [...this.openProviderLogins],
-      open_qwen_account_login_sessions: [...this.openQwenLogins],
       // extended telemetry series
       throughput_series: [...this.throughputSeries],
       latency_series: [...this.latencySeries],
@@ -291,7 +281,6 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
           web_search: overview.web_search_supported,
         },
         logs: [...world.logs[provider]],
-        qwen_accounts: provider === 'qwen' ? [...world.qwenAccounts] : null,
       }
       return details as T
     }
@@ -300,30 +289,6 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
       const provider = args?.provider as ServiceName
       const response: ProviderLogs = { provider, entries: [...world.logs[provider]] }
       return response as T
-    }
-
-    case 'list_qwen_accounts':
-      return [...world.qwenAccounts] as T
-
-    case 'add_qwen_account': {
-      const request = args?.request as { email: string; password?: string }
-      world.qwenAccounts = [
-        ...world.qwenAccounts,
-        {
-          id: `qwen-ace-${String(world.qwenAccounts.length + 1).padStart(2, '0')}`,
-          email: request.email,
-          has_password: Boolean(request.password),
-          created_at: new Date().toISOString().slice(0, 10),
-        },
-      ]
-      return [...world.qwenAccounts] as T
-    }
-
-    case 'remove_qwen_account': {
-      const accountId = args?.accountId as string
-      world.qwenAccounts = world.qwenAccounts.filter(a => a.id !== accountId)
-      world.openQwenLogins.delete(accountId)
-      return [...world.qwenAccounts] as T
     }
 
     case 'start_provider_login_session': {
@@ -336,18 +301,6 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
       const provider = args?.provider as ProviderName
       world.openProviderLogins.delete(provider)
       world.providers[provider].login_state = 'authenticated'
-      return [] as unknown as T
-    }
-
-    case 'start_qwen_account_login_session': {
-      const request = args?.request as { account_id: string }
-      world.openQwenLogins.add(request.account_id)
-      return [] as unknown as T
-    }
-
-    case 'stop_qwen_account_login_session': {
-      const accountId = args?.account_id as string
-      world.openQwenLogins.delete(accountId)
       return [] as unknown as T
     }
 
