@@ -115,21 +115,6 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEscape))
             <pre class="log-frame">{{ JSON.stringify(activeProviderDetails.detail, null, 2) }}</pre>
           </div>
 
-          <!-- Qwen accounts (non-null, non-empty array) -->
-          <div v-if="activeProviderDetails.qwen_accounts?.length" class="card">
-            <div class="eyebrow" style="margin-bottom: var(--xs)">Qwen accounts</div>
-            <div class="stack" style="gap: var(--xs)">
-              <span
-                v-for="account in activeProviderDetails.qwen_accounts"
-                :key="account.id"
-                class="faint"
-                style="font-size: 13px"
-              >
-                {{ account.email }}
-              </span>
-            </div>
-          </div>
-
           <!-- Logs -->
           <div class="card">
             <div class="eyebrow" style="margin-bottom: var(--xs)">Logs</div>

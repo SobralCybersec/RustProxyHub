@@ -53,26 +53,16 @@ export interface DashboardOverview {
   startup_config: StartupConfig
   hub: HubOverview
   providers: ProviderOverview[]
-  qwen_account_count: number
   open_provider_login_sessions: ProviderName[]
-  open_qwen_account_login_sessions: string[]
   // Live telemetry series (provided by the mock backend)
   throughput_series?: number[]
   latency_series?: number[]
-}
-
-export interface QwenAccountSummary {
-  id: string
-  email: string
-  has_password: boolean
-  created_at: string | null
 }
 
 export interface ProviderDetails {
   overview: ProviderOverview
   detail: Record<string, unknown> | null
   logs: string[]
-  qwen_accounts: QwenAccountSummary[] | null
 }
 
 export interface ProviderLogs {

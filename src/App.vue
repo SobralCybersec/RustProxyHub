@@ -7,12 +7,11 @@ import DetailsDrawer from '@/components/dashboard/DetailsDrawer.vue'
 import HubHeader from '@/components/dashboard/HubHeader.vue'
 import LoginStudio from '@/components/dashboard/LoginStudio.vue'
 import ProviderGrid from '@/components/dashboard/ProviderGrid.vue'
-import QwenAccountsPanel from '@/components/dashboard/QwenAccountsPanel.vue'
 import WorkbenchPanel from '@/components/dashboard/WorkbenchPanel.vue'
 import { useStore } from '@/store'
 import type { UiLocale } from '@/lib/ui-i18n'
 
-type Tab = 'overview' | 'providers' | 'access' | 'qwen' | 'workbench'
+type Tab = 'overview' | 'providers' | 'access' | 'workbench'
 
 const store = useStore()
 const { error, notice } = storeToRefs(store)
@@ -24,7 +23,6 @@ const tabs = computed<Array<{ key: Tab; label: string }>>(() => [
   { key: 'overview', label: t('app.headerTabs.overview') },
   { key: 'providers', label: t('app.headerTabs.providers') },
   { key: 'access', label: t('app.headerTabs.access') },
-  { key: 'qwen', label: t('app.headerTabs.qwen') },
   { key: 'workbench', label: t('app.headerTabs.workbench') },
 ])
 
@@ -106,7 +104,6 @@ onBeforeUnmount(() => store.disposeApp())
       <HubHeader v-if="activeTab === 'overview'" />
       <ProviderGrid v-else-if="activeTab === 'providers'" />
       <LoginStudio v-else-if="activeTab === 'access'" />
-      <QwenAccountsPanel v-else-if="activeTab === 'qwen'" />
       <WorkbenchPanel v-else-if="activeTab === 'workbench'" />
     </main>
 

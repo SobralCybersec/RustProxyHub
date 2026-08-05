@@ -60,40 +60,4 @@ describe('store runtime flow', () => {
     expect(mockedInvoke).not.toHaveBeenCalled()
   })
 
-  it('adds a qwen account and refreshes overview counts', async () => {
-    const store = useStore()
-    store.overview = makeOverview()
-    store.qwenEmail = 'pilot@example.com'
-
-    mockedInvoke.mockImplementation(async command => {
-      if (command === 'add_qwen_account') {
-        return [
-          {
-            id: 'acct-1',
-            email: 'pilot@example.com',
-            has_password: true,
-            created_at: '2026-06-09T00:00:00Z',
-          },
-        ]
-      }
-
-      if (command === 'dashboard_overview') {
-        return makeOverview({ qwen_account_count: 1 })
-      }
-
-      throw new Error(`unexpected invoke: ${String(command)}`)
-    })
-
-    await store.addQwenAccount('secret')
-
-    expect(mockedInvoke).toHaveBeenCalledWith('add_qwen_account', {
-      request: {
-        email: 'pilot@example.com',
-        password: 'secret',
-      },
-    })
-    expect(store.qwenAccounts).toHaveLength(1)
-    expect(store.overview?.qwen_account_count).toBe(1)
-    expect(store.qwenEmail).toBe('')
-  })
 })

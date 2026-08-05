@@ -103,10 +103,6 @@ const runningProviders = computed(() => overview.value?.providers.filter(p => p.
         <span class="faint">{{ store.t('hub.stats.models') }}</span>
       </div>
       <div class="tile stat-tile">
-        <span class="stat-num strong">{{ overview.qwen_account_count }}</span>
-        <span class="faint">Qwen accounts</span>
-      </div>
-      <div class="tile stat-tile">
         <span class="stat-num strong">{{ openLoginCount }}</span>
         <span class="faint">Open sessions</span>
       </div>

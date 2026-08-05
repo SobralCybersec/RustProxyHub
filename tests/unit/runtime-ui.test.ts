@@ -2,7 +2,6 @@ import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it } from 'vitest'
 import HubHeader from '@/components/dashboard/HubHeader.vue'
-import QwenAccountsPanel from '@/components/dashboard/QwenAccountsPanel.vue'
 import WorkbenchPanel from '@/components/dashboard/WorkbenchPanel.vue'
 import { useStore } from '@/store'
 import { makeOverview } from './factories'
@@ -61,28 +60,4 @@ describe('runtime diagnostics ui', () => {
     expect(wrapper.find('.btn.btn-primary').exists()).toBe(true)
   })
 
-  it('renders qwen account actions from live store state', () => {
-    const store = useStore()
-    store.qwenAccounts = [
-      {
-        id: 'acct-1',
-        email: 'pilot@example.com',
-        has_password: true,
-        created_at: '2026-06-09T00:00:00Z',
-      },
-    ]
-    store.overview = makeOverview({
-      open_qwen_account_login_sessions: ['acct-1'],
-    })
-
-    const wrapper = mount(QwenAccountsPanel, {
-      global: { plugins: [pinia] },
-    })
-
-    expect(wrapper.text()).toContain('pilot@example.com')
-    // session is open → "Close login" button (inline English in template)
-    expect(wrapper.text()).toContain('Close login')
-    // remove button label via qwen.remove i18n key (pt-BR default = 'remover')
-    expect(wrapper.text()).toContain('remover')
-  })
 })

@@ -61,9 +61,7 @@ export function makeOverview(overrides: Partial<DashboardOverview> = {}): Dashbo
       detail: null,
     },
     providers,
-    qwen_account_count: 0,
     open_provider_login_sessions: [],
-    open_qwen_account_login_sessions: [],
     ...overrides,
   }
 }

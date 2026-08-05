@@ -10,7 +10,6 @@ import type {
   ProviderLogs,
   ProviderName,
   ProviderOverview,
-  QwenAccountSummary,
 } from '@/lib/types'
 
 export { providerOrder }
@@ -71,14 +70,12 @@ export const useStore = defineStore('main', {
     overview: null as DashboardOverview | null,
     providerDetails: {} as Partial<Record<ProviderName, ProviderDetails>>,
     providerLogs: {} as Partial<Record<ProviderName | 'hub', string[]>>,
-    qwenAccounts: [] as QwenAccountSummary[],
     searchQuery: '',
     activeDrawer: null as ProviderName | null,
     browserPrefs: structuredClone(defaultBrowserPrefs) as BrowserPrefs,
     busy: {} as BusyMap,
     refreshTimer: null as number | null,
     unlistenDashboard: null as UnlistenFn | null,
-    qwenEmail: '',
     workbenchModel: '',
     workbenchPrompt: defaultWorkbenchPrompt(loadLocale()),
     workbenchWebSearch: false,
@@ -122,14 +119,6 @@ export const useStore = defineStore('main', {
       return Array.from(new Set(models))
     },
 
-    filteredQwenAccounts(): QwenAccountSummary[] {
-      const query = this.searchQuery.trim().toLowerCase()
-      if (!query) return this.qwenAccounts
-      return this.qwenAccounts.filter(account =>
-        [account.email, account.id, account.created_at ?? ''].join(' ').toLowerCase().includes(query)
-      )
-    },
-
     activeProviderDetails(state): ProviderDetails | null {
       return state.activeDrawer ? (state.providerDetails[state.activeDrawer] ?? null) : null
     },
@@ -139,10 +128,7 @@ export const useStore = defineStore('main', {
     },
 
     openLoginCount(state): number {
-      return (
-        (state.overview?.open_provider_login_sessions.length ?? 0) +
-        (state.overview?.open_qwen_account_login_sessions.length ?? 0)
-      )
+      return state.overview?.open_provider_login_sessions.length ?? 0
     },
 
     localeCode(state): string {
@@ -229,16 +215,11 @@ export const useStore = defineStore('main', {
       this.providerLogs[provider] = response.entries
     },
 
-    async loadQwenAccounts() {
-      this.qwenAccounts = await invoke<QwenAccountSummary[]>('list_qwen_accounts')
-    },
-
     async initApp() {
       if (this.isInitialized) return
       this.isInitialized = true
       await this.refreshOverview()
       this.syncWorkbenchModel()
-      await this.loadQwenAccounts()
 
       // Real Tauri: subscribe to push events from Rust for zero-latency dashboard updates.
       // Mock/dev mode: falls back to polling below.
@@ -283,29 +264,6 @@ export const useStore = defineStore('main', {
       this.activeDrawer = null
     },
 
-    async addQwenAccount(password: string) {
-      const email = this.qwenEmail.trim()
-      if (!email) {
-        this.error = this.t('store.emailRequired')
-        return
-      }
-      // ponytail: password passed as arg, never stored in reactive state.
-      await this.runTask('qwen-account:add', async () => {
-        this.qwenAccounts = await invoke<QwenAccountSummary[]>('add_qwen_account', {
-          request: { email, password },
-        })
-        this.qwenEmail = ''
-        await this.refreshOverview()
-      })
-    },
-
-    async removeQwenAccount(accountId: string) {
-      await this.runTask(`qwen-account:remove:${accountId}`, async () => {
-        this.qwenAccounts = await invoke<QwenAccountSummary[]>('remove_qwen_account', { accountId })
-        await this.refreshOverview()
-      })
-    },
-
     async startProviderLogin(provider: ProviderName) {
       await this.runTask(`login:start:${provider}`, async () => {
         await invoke<string[]>('start_provider_login_session', {
@@ -318,22 +276,6 @@ export const useStore = defineStore('main', {
     async stopProviderLogin(provider: ProviderName) {
       await this.runTask(`login:stop:${provider}`, async () => {
         await invoke<string[]>('stop_provider_login_session', { provider })
-        await this.refreshOverview()
-      })
-    },
-
-    async startQwenAccountLogin(accountId: string) {
-      await this.runTask(`login:qwen-account:start:${accountId}`, async () => {
-        await invoke<string[]>('start_qwen_account_login_session', {
-          request: { account_id: accountId, browser: this.browserPrefs.qwen },
-        })
-        await this.refreshOverview()
-      })
-    },
-
-    async stopQwenAccountLogin(accountId: string) {
-      await this.runTask(`login:qwen-account:stop:${accountId}`, async () => {
-        await invoke<string[]>('stop_qwen_account_login_session', { account_id: accountId })
         await this.refreshOverview()
       })
     },
