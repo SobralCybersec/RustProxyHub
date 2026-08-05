@@ -58,10 +58,5 @@
     "vite-plugin-vue-devtools": "^8.1.1",
     "vitest": "^4.1.8",
     "vue-tsc": "^3.3.4"
-  },
-  "pnpm": {
-    "overrides": {
-      "postcss": "^8.5.23"
-    }
   }
 }
