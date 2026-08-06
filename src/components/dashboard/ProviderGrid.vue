@@ -76,15 +76,15 @@ function dotClass(p: ProviderOverview): string {
           </span>
           <span class="strong provider-name">{{ p.name }}</span>
           <span :class="['dot', dotClass(p)]" />
-          <span class="faint small">{{ p.health_status }}</span>
+          <span class="faint small">{{ store.statusLabel(p.health_status) }}</span>
         </div>
 
         <!-- chips -->
         <div class="row chips-row">
-          <span class="chip">{{ p.login_state }}</span>
+          <span class="chip">{{ store.statusLabel(p.login_state) }}</span>
           <span v-if="p.web_search_supported" class="chip">
             <HugeiconsIcon :icon="Globe02Icon" :size="12" aria-hidden="true" />
-            web search
+            {{ store.t('providers.webSearch') }}
           </span>
           <span class="faint small">{{ p.model_count }} {{ store.t('providers.fields.models') }}</span>
         </div>

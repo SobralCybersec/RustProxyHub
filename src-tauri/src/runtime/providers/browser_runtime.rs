@@ -47,7 +47,7 @@ impl BrowserProviderKind {
 
     fn default_model(self) -> &'static str {
         match self {
-            Self::Chatgpt => "chatgpt-web-session",
+            Self::Chatgpt => "gpt-5.4-mini",
             Self::Gemini => "gemini-web-session",
             Self::Mistral => "mistral-web-session",
             Self::Zai => "glm-5.2",
@@ -274,7 +274,7 @@ async fn discover_models(state: &AppState) -> Value {
         cached.as_ref().map(|(v, _)| v.clone())
     };
 
-    let discovered = tokio::time::timeout(Duration::from_secs(4), async {
+    let discovered = tokio::time::timeout(model_discovery_timeout(state.config.kind), async {
         ensure_headless_ready(state).await?;
         state
             .bridge
@@ -306,6 +306,13 @@ async fn discover_models(state: &AppState) -> Value {
                 )],
             )
         }),
+    }
+}
+
+fn model_discovery_timeout(kind: BrowserProviderKind) -> Duration {
+    match kind {
+        BrowserProviderKind::Chatgpt => Duration::from_secs(15),
+        _ => Duration::from_secs(4),
     }
 }
 
@@ -1456,8 +1463,8 @@ mod tests {
     use super::{
         anthropic_message_to_openai_messages, anthropic_tool_choice_to_openai,
         anthropic_tools_from_value, coerce_agent_model, fallback_model_payload_for,
-        openai_tools_from_value, parse_browser_output, require_api_key, response_input_to_messages,
-        BrowserProviderKind,
+        model_discovery_timeout, openai_tools_from_value, parse_browser_output, require_api_key,
+        response_input_to_messages, BrowserProviderKind,
     };
     use crate::proxy_core::{FunctionToolDefinition, FunctionToolSpec, OpenAIRequest};
     use axum::http::{header, HeaderMap, HeaderValue};
@@ -1490,6 +1497,18 @@ mod tests {
                 .and_then(|items| items.first())
                 .and_then(Value::as_str),
             Some("discovery failed")
+        );
+    }
+
+    #[test]
+    fn chatgpt_model_discovery_allows_oauth_refresh() {
+        assert_eq!(
+            model_discovery_timeout(BrowserProviderKind::Chatgpt),
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(
+            model_discovery_timeout(BrowserProviderKind::Gemini),
+            std::time::Duration::from_secs(4)
         );
     }
 
@@ -1569,7 +1588,7 @@ mod tests {
     fn claude_model_names_fall_back_to_provider_default() {
         assert_eq!(
             coerce_agent_model(BrowserProviderKind::Chatgpt, "claude-sonnet-4-5"),
-            "chatgpt-web-session"
+            "gpt-5.4-mini"
         );
     }
 
@@ -1756,13 +1775,13 @@ mod tests {
     }
 
     #[test]
-    fn fallback_payload_chatgpt_uses_web_session_id() {
+    fn fallback_payload_chatgpt_uses_codex_model_id() {
         let payload = fallback_model_payload_for(BrowserProviderKind::Chatgpt, Vec::new());
         let first = payload["data"]
             .as_array()
             .and_then(|a| a.first())
             .expect("model item");
-        assert_eq!(first["id"], "chatgpt-web-session");
+        assert_eq!(first["id"], "gpt-5.4-mini");
         assert_eq!(first["owned_by"], "chatgpt");
     }
 

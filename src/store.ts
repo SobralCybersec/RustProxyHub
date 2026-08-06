@@ -1,7 +1,7 @@
 import { acceptHMRUpdate, defineStore } from 'pinia'
 import { buildClaudeSetup, buildKiloSetup, buildPiSetup, type AgentSetupKind } from '@/lib/agent-setups'
 import { invoke, providerOrder } from '@/lib/backend'
-import { DEFAULT_LOCALE, defaultWorkbenchPrompt, translate, type UiLocale } from '@/lib/ui-i18n'
+import { DEFAULT_LOCALE, defaultWorkbenchPrompt, translate, translateStatus, type UiLocale } from '@/lib/ui-i18n'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import type {
   BrowserPrefs,
@@ -147,6 +147,10 @@ export const useStore = defineStore('main', {
   actions: {
     t(key: string, params?: Record<string, string | number>) {
       return translate(this.locale, key, params)
+    },
+
+    statusLabel(status: string) {
+      return translateStatus(this.locale, status)
     },
 
     setLocale(locale: UiLocale) {

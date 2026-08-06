@@ -15,7 +15,7 @@ const runningProviders = computed(() => overview.value?.providers.filter(p => p.
 <template>
   <!-- Loading guard -->
   <div v-if="!overview" class="loading-shell">
-    <p class="muted">Loading…</p>
+    <p class="muted">{{ store.t('hubHeader.loading') }}</p>
   </div>
 
   <div v-else class="stack">
@@ -25,14 +25,14 @@ const runningProviders = computed(() => overview.value?.providers.filter(p => p.
         {{ runtimeReady ? store.t('app.runtimeReady') : store.t('app.runtimePending') }}
       </span>
       <h1>RustProxyHub</h1>
-      <p class="lead">One local gateway for every browser-backed LLM provider.</p>
+      <p class="lead">{{ store.t('hubHeader.tagline') }}</p>
     </div>
 
     <!-- 2a. Runtime issues banner (conditional) -->
     <div v-if="runtimeIssues.length" class="banner banner-error">
       <div class="row">
         <HugeiconsIcon :icon="Alert02Icon" :size="18" aria-hidden="true" />
-        <span>Runtime issues</span>
+        <span>{{ store.t('hubHeader.runtimeIssues') }}</span>
       </div>
       <ul class="issue-list">
         <li v-for="issue in runtimeIssues" :key="issue">{{ issue }}</li>
@@ -43,15 +43,15 @@ const runningProviders = computed(() => overview.value?.providers.filter(p => p.
     <div class="card diag-card">
       <div class="row">
         <span class="dot" :class="overview.runtime.browser_available ? 'ok' : 'err'" />
-        <span class="muted">Browser available</span>
+        <span class="muted">{{ store.t('hubHeader.browserAvailable') }}</span>
         <span class="spacer" />
-        <span class="mono faint">{{ overview.runtime.browser_available ? 'yes' : 'no' }}</span>
+        <span class="mono faint">{{ overview.runtime.browser_available ? store.t('common.yes') : store.t('common.no') }}</span>
       </div>
       <div class="row">
         <span class="dot" :class="overview.runtime.single_runner_ready ? 'ok' : 'warn'" />
-        <span class="muted">Single runner</span>
+        <span class="muted">{{ store.t('hubHeader.singleRunner') }}</span>
         <span class="spacer" />
-        <span class="mono faint">{{ overview.runtime.single_runner_ready ? 'ready' : 'blocked' }}</span>
+        <span class="mono faint">{{ store.statusLabel(overview.runtime.single_runner_ready ? 'ready' : 'blocked') }}</span>
       </div>
     </div>
 
@@ -73,17 +73,17 @@ const runningProviders = computed(() => overview.value?.providers.filter(p => p.
 
       <div class="hub-fields">
         <div class="row">
-          <span class="field-label">Base URL</span>
+          <span class="field-label">{{ store.t('hubHeader.baseUrl') }}</span>
           <span class="spacer" />
           <span class="mono muted">{{ overview.hub.base_url || '--' }}</span>
         </div>
         <div class="row">
-          <span class="field-label">Port</span>
+          <span class="field-label">{{ store.t('hubHeader.port') }}</span>
           <span class="spacer" />
           <span class="mono muted">{{ overview.hub.port }}</span>
         </div>
         <div class="row">
-          <span class="field-label">API Key</span>
+          <span class="field-label">{{ store.t('hubHeader.apiKey') }}</span>
           <span class="spacer" />
           <span class="chip">
             {{ overview.hub.api_key_enabled ? store.t('common.enabled') : store.t('common.disabled') }}
@@ -96,15 +96,15 @@ const runningProviders = computed(() => overview.value?.providers.filter(p => p.
     <div class="grid">
       <div class="tile stat-tile">
         <span class="stat-num strong">{{ runningProviders }}</span>
-        <span class="faint">Running</span>
+        <span class="faint">{{ store.t('hubHeader.runningProviders') }}</span>
       </div>
       <div class="tile stat-tile">
-        <span class="stat-num strong">{{ overview.hub.model_count }}</span>
+        <span class="stat-num strong">{{ store.hubModelOptions.length }}</span>
         <span class="faint">{{ store.t('hub.stats.models') }}</span>
       </div>
       <div class="tile stat-tile">
         <span class="stat-num strong">{{ openLoginCount }}</span>
-        <span class="faint">Open sessions</span>
+        <span class="faint">{{ store.t('hubHeader.openSessions') }}</span>
       </div>
     </div>
   </div>

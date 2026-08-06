@@ -57,7 +57,7 @@ A local-first, **keyless** LLM proxy cockpit. One desktop app turns your own log
 | **DeepSeek** | native | 3001 | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **Qwen** | native | 3000 | ✓ | ✓ | ✓ | ~¹ | ✓ |
 | **Kimi** | native | 3002 | ✓ | ✓ | ✓ | ✗ | ✗ |
-| **ChatGPT** | browser | 3003 | ✓ | ✓ | ✓ | ✗ | ✗ |
+| **ChatGPT** | OAuth + Codex | 3003 | ✓ | ✓ | ✓ | ✗ | ✗ |
 | **Gemini** | browser | 3004 | ✓ | ✓ | ✓ | ✗ | ✗ |
 | **Mistral** | browser | 3005 | ✓ | ✓ | ✓ | ✗ | ✗ |
 | **Z.ai** (GLM) | browser | 3006 | ✓ | ✓ | ✓ | ✗ | ✗ |
@@ -195,7 +195,7 @@ pnpm verify
  Architecture
 </h1>
 
-RustProxyHub is a Tauri v2 app: a Vue dashboard calls typed Rust **IPC commands** to manage provider lifecycle and logins, while the same Rust process runs the whole proxy stack in-process. Each provider replays requests against a logged-in browser session driven by a Node + Playwright helper.
+RustProxyHub is a Tauri v2 app: a Vue dashboard calls typed Rust **IPC commands** to manage provider lifecycle and logins, while the same Rust process runs the whole proxy stack in-process. Browser-backed providers replay requests through a Node + Playwright helper. ChatGPT uses OAuth credentials and the Codex `/responses` upstream; Playwright only presents its OAuth login page.
 
 ```mermaid
 flowchart LR
@@ -220,13 +220,13 @@ flowchart LR
     CR -.starts.-> HUB
     HUB --> P1 & P2
     P1 & P2 --> CORE
-    P1 & P2 <-->|capture / replay| PW
-    PW --> WEB[(logged-in provider site · per-profile jar)]
+    P1 & P2 <-->|provider RPC| PW
+    PW --> WEB[(provider site or ChatGPT Codex OAuth)]
 ```
 
 ### Real-time streaming (SSE)
 
-Every provider streams its reply back as OpenAI `chat.completion.chunk` events over `text/event-stream`. One shared framing layer (`proxy_core::sse_json` / `sse_done`) owns the wire shape, and a single `StreamingToolParser` reclassifies tool calls out of the text mid-stream so agents receive real `tool_calls`.
+Every provider streams its reply back as OpenAI `chat.completion.chunk` events over `text/event-stream`. One shared framing layer (`proxy_core::sse_json` / `sse_done`) owns the wire shape, and a single `StreamingToolParser` reclassifies tool calls out of the text mid-stream so agents receive real `tool_calls`. ChatGPT requests use stateless Codex `/responses` payloads with system instructions kept in the trusted `instructions`/developer channel instead of folded into user text.
 
 ```mermaid
 sequenceDiagram

@@ -45,15 +45,15 @@ export default defineConfig({
   clearScreen: false,
   envPrefix: ['VITE_', 'TAURI_'],
   server: {
-    port: 1420,
+    port: 1421,
     strictPort: true,
     host: HOST || false,
     hmr: HOST
       ? {
-          protocol: 'ws',
-          host: HOST,
-          port: 1421,
-        }
+        protocol: 'ws',
+        host: HOST,
+        port: 1421,
+      }
       : undefined,
     watch: {
       ignored: ['**/src-tauri/**'],

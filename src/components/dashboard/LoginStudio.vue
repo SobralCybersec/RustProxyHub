@@ -46,16 +46,16 @@ function closeLogin(name: ProviderName) {
     <!-- ── Hub access ── -->
     <div class="card stack">
       <div class="row">
-        <span class="strong">Hub access</span>
+        <span class="strong">{{ t('login.hubAccess') }}</span>
         <div class="spacer" />
         <span v-if="hub" class="chip">
-          API key: {{ hub.api_key_enabled ? t('common.enabled') : t('common.disabled') }}
+          {{ t('login.apiKey') }}: {{ hub.api_key_enabled ? t('common.enabled') : t('common.disabled') }}
         </span>
       </div>
 
       <template v-if="hub">
         <div class="row">
-          <span class="field-label muted">Base URL</span>
+          <span class="field-label muted">{{ t('login.baseUrl') }}</span>
           <span class="mono spacer url-text">{{ hub.base_url }}</span>
           <button class="btn btn-utility" type="button" @click="copyHubUrl">
             <HugeiconsIcon :icon="Copy01Icon" :size="16" aria-hidden="true" />
@@ -64,16 +64,16 @@ function closeLogin(name: ProviderName) {
         </div>
 
         <div class="row">
-          <span class="field-label muted">OpenAPI</span>
+          <span class="field-label muted">{{ t('login.openApi') }}</span>
           <span class="mono spacer url-text">{{ hub.openapi_url }}</span>
           <a :href="hub.openapi_url" target="_blank" rel="noopener" class="btn btn-utility">
             <HugeiconsIcon :icon="LinkSquare01Icon" :size="16" aria-hidden="true" />
-            Open docs
+            {{ t('login.openDocs') }}
           </a>
         </div>
       </template>
 
-      <p v-else class="faint">Waiting for hub data…</p>
+      <p v-else class="faint">{{ t('login.waitingHubData') }}</p>
     </div>
 
     <!-- ── Provider login sessions ── -->
@@ -81,7 +81,7 @@ function closeLogin(name: ProviderName) {
       <!-- status dot + name + state label -->
       <span :class="dotClass(p.login_state)" />
       <span class="strong">{{ p.name }}</span>
-      <span class="muted">{{ p.login_state }}</span>
+      <span class="muted">{{ store.statusLabel(p.login_state) }}</span>
 
       <div class="spacer" />
 
@@ -108,7 +108,7 @@ function closeLogin(name: ProviderName) {
         @click="closeLogin(p.name)"
       >
         <HugeiconsIcon :icon="Logout03Icon" :size="16" aria-hidden="true" />
-        Close session
+        {{ t('login.closeSession') }}
       </button>
       <button
         v-else
@@ -124,8 +124,9 @@ function closeLogin(name: ProviderName) {
 
     <!-- ── Workbench block notice ── -->
     <div v-if="store.openLoginCount > 0" class="banner banner-notice">
-      {{ store.openLoginCount }} open browser {{ store.openLoginCount === 1 ? 'session' : 'sessions' }} — the workbench
-      is blocked until all login windows are closed.
+      {{ store.openLoginCount }}
+      {{ t(store.openLoginCount === 1 ? 'login.browserSession' : 'login.browserSessions') }} —
+      {{ t('login.workbenchBlocked') }}
     </div>
   </div>
 </template>

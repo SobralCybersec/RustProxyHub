@@ -59,4 +59,34 @@ describe('store runtime flow', () => {
     expect(store.error).toBe('Bundled node.exe not found in Tauri resources.')
     expect(mockedInvoke).not.toHaveBeenCalled()
   })
+
+  it('opens and closes manual login with browser preferences for every provider', async () => {
+    const store = useStore()
+    for (const provider of providerOrder) {
+      mockedInvoke.mockResolvedValueOnce([])
+      mockedInvoke.mockResolvedValueOnce(makeOverview())
+      mockedInvoke.mockResolvedValueOnce([])
+      mockedInvoke.mockResolvedValueOnce(makeOverview())
+
+      await store.startProviderLogin(provider)
+      await store.stopProviderLogin(provider)
+
+      expect(mockedInvoke).toHaveBeenCalledWith('start_provider_login_session', {
+        request: { provider, browser: 'msedge' },
+      })
+      expect(mockedInvoke).toHaveBeenCalledWith('stop_provider_login_session', { provider })
+      expect(store.isBusy(`login:start:${provider}`)).toBe(false)
+      expect(store.isBusy(`login:stop:${provider}`)).toBe(false)
+    }
+  })
+
+  it('surfaces manual login connection errors and clears busy state', async () => {
+    mockedInvoke.mockRejectedValueOnce(new Error('provider did not become ready'))
+    const store = useStore()
+
+    await expect(store.startProviderLogin('qwen')).rejects.toThrow('provider did not become ready')
+
+    expect(store.error).toBe('provider did not become ready')
+    expect(store.isBusy('login:start:qwen')).toBe(false)
+  })
 })

@@ -52,7 +52,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEscape))
           class="faint"
           style="padding: var(--lg) 0; text-align: center; font-size: 14px"
         >
-          Loading…
+          {{ store.t('details.loading') }}
         </div>
 
         <!-- Content -->
@@ -63,10 +63,10 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEscape))
             <div class="row" style="flex-wrap: wrap; gap: var(--xs)">
               <span :class="['dot', dotMod(activeProviderDetails.overview)]" />
               <span class="muted" style="font-size: 13px">
-                {{ activeProviderDetails.overview.health_status }}
+                {{ store.statusLabel(activeProviderDetails.overview.health_status) }}
               </span>
               <div class="spacer" />
-              <span class="chip">{{ activeProviderDetails.overview.login_state }}</span>
+              <span class="chip">{{ store.statusLabel(activeProviderDetails.overview.login_state) }}</span>
             </div>
 
             <!-- Base URL -->
@@ -79,7 +79,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEscape))
 
             <!-- Web search chip -->
             <div v-if="activeProviderDetails.overview.web_search_supported" class="row">
-              <span class="chip">web search</span>
+              <span class="chip">{{ store.t('details.webSearch') }}</span>
             </div>
 
             <!-- Last error -->
@@ -110,14 +110,14 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onEscape))
 
           <!-- Detail JSON (non-null only) -->
           <div v-if="activeProviderDetails.detail" class="card">
-            <div class="eyebrow" style="margin-bottom: var(--xs)">Detail</div>
+            <div class="eyebrow" style="margin-bottom: var(--xs)">{{ store.t('details.detail') }}</div>
             <!-- ponytail: plain pre instead of a code component; upgrade if syntax highlighting is ever needed -->
             <pre class="log-frame">{{ JSON.stringify(activeProviderDetails.detail, null, 2) }}</pre>
           </div>
 
           <!-- Logs -->
           <div class="card">
-            <div class="eyebrow" style="margin-bottom: var(--xs)">Logs</div>
+            <div class="eyebrow" style="margin-bottom: var(--xs)">{{ store.t('details.logs') }}</div>
             <pre v-if="activeProviderLogs.length" class="log-frame">{{ activeProviderLogs.join('\n') }}</pre>
             <span v-else class="faint" style="font-size: 13px">{{ store.t('details.noLogs') }}</span>
           </div>

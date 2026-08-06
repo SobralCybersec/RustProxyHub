@@ -3,6 +3,7 @@ import dns from 'node:dns'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { ChatGptOAuthClient } from './chatgpt-oauth.mjs'
 
 // Fix IPv6/IPv4 resolution issue in Node 17+ (localhost resolves to ::1 instead of 127.0.0.1)
 // See: https://github.com/microsoft/playwright/issues/20784
@@ -175,6 +176,7 @@ const state = {
     context: null,
     page: null,
     headless: null,
+    oauth: null,
     cachedHeaders: null,
     lastHeadersTime: 0,
   },
@@ -337,21 +339,6 @@ function modelListResponse(ids, provider, fallbackModel) {
   const data = [...ids].length ? [...ids] : [fallbackModel]
   return {
     data: data.map(id => ({ id, provider })),
-  }
-}
-
-function addKnownChatGPTModels(target) {
-  for (const id of [
-    'gpt-5-3',
-    'gpt-5.5',
-    'gpt-5.5-thinking',
-    'gpt-5',
-    'gpt-4.1',
-    'o3',
-    'o4-mini',
-    'chatgpt-web-session',
-  ]) {
-    addModelCandidate(target, 'chatgpt', id)
   }
 }
 
@@ -572,6 +559,12 @@ async function openDeepSeekLogin({ runtime_dir, browser }) {
 
 async function initChatGPT({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
+  if (!state.chatgpt.oauth || state.chatgpt.oauth.runtimeDir !== process.cwd()) {
+    await state.chatgpt.oauth?.close()
+    state.chatgpt.oauth = new ChatGptOAuthClient(process.cwd())
+  }
+  // API traffic uses OAuth directly; Playwright is needed only to present login.
+  if (headless) return
   if (state.chatgpt.context && state.chatgpt.headless === headless) return
   if (state.chatgpt.context) {
     await closeContext(state.chatgpt.context)
@@ -603,421 +596,35 @@ async function initChatGPT({ runtime_dir, headless, browser }) {
 }
 
 async function captureChatGPTTemplate(forceNew = false) {
-  const page = state.chatgpt.page
-  if (!page) throw new Error('ChatGPT Playwright not initialized')
-
-  if (!forceNew && state.chatgpt.cachedHeaders && Date.now() - state.chatgpt.lastHeadersTime < 5 * 60 * 1000) {
-    return state.chatgpt.cachedHeaders
-  }
-
-  if (!isOnHost(page.url(), 'chatgpt.com') || forceNew) {
-    await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
-  }
-
-  const inputSelector = 'textarea:visible, #prompt-textarea:visible, div[contenteditable="true"]:visible'
-  await page.waitForSelector(inputSelector, { timeout: 30000 }).catch(() => {
-    throw new Error('Timeout waiting for ChatGPT input. Are you logged in?')
-  })
-
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Timeout waiting for ChatGPT request template')), 60000)
-    const routeHandler = async (route, request) => {
-      clearTimeout(timeout)
-      const reqHeaders = request.headers()
-      const postData = request.postData() || ''
-      let payloadModel = 'chatgpt-web-session'
-
-      try {
-        payloadModel = JSON.parse(postData).model || payloadModel
-      } catch {}
-
-      const headers = {
-        authorization: reqHeaders.authorization || '',
-        accept: reqHeaders.accept || 'text/event-stream',
-        'accept-language': reqHeaders['accept-language'] || 'en-US,en;q=0.9',
-        'content-type': reqHeaders['content-type'] || 'application/json',
-        origin: reqHeaders.origin || 'https://chatgpt.com',
-        referer: reqHeaders.referer || 'https://chatgpt.com/',
-        'user-agent': reqHeaders['user-agent'] || '',
-        'oai-client-build-number': reqHeaders['oai-client-build-number'] || '',
-        'oai-client-version': reqHeaders['oai-client-version'] || '',
-        'oai-device-id': reqHeaders['oai-device-id'] || '',
-        'oai-language': reqHeaders['oai-language'] || 'en-US',
-        'oai-session-id': reqHeaders['oai-session-id'] || '',
-        'openai-sentinel-chat-requirements-token': reqHeaders['openai-sentinel-chat-requirements-token'] || '',
-        'openai-sentinel-proof-token': reqHeaders['openai-sentinel-proof-token'] || '',
-        'openai-sentinel-turnstile-token': reqHeaders['openai-sentinel-turnstile-token'] || '',
-        'x-conduit-token': reqHeaders['x-conduit-token'] || '',
-        'x-oai-turn-trace-id': reqHeaders['x-oai-turn-trace-id'] || '',
-        'x-openai-target-path': reqHeaders['x-openai-target-path'] || '/backend-api/f/conversation',
-        'x-openai-target-route': reqHeaders['x-openai-target-route'] || '/backend-api/f/conversation',
-      }
-
-      if (!headers.authorization) {
-        await route.continue()
-        return
-      }
-
-      state.chatgpt.cachedHeaders = {
-        headers,
-        payload: postData,
-        model: payloadModel,
-        url: request.url(),
-      }
-      state.chatgpt.lastHeadersTime = Date.now()
-
-      await route.abort('aborted')
-      await page.unroute('**/backend-api/f/conversation*', routeHandler)
-      resolve(state.chatgpt.cachedHeaders)
-    }
-
-    page.route('**/backend-api/f/conversation*', routeHandler).then(async () => {
-      await page.focus(inputSelector)
-      await page.fill(inputSelector, '')
-      await page.type(inputSelector, 'a', { delay: 50 })
-      await sleep(1500)
-      await page.keyboard.press('Enter')
-    })
-  })
+  if (!state.chatgpt.oauth) throw new Error('ChatGPT OAuth not initialized')
+  await state.chatgpt.oauth.loadSession()
+  return { headers: {}, model: 'gpt-5.4-mini', oauth: true, refreshed: forceNew }
 }
 
 async function getChatGPTBasicHeaders() {
-  const page = state.chatgpt.page
-  if (!page) throw new Error('ChatGPT Playwright not initialized')
-
-  const cookies = await page.context().cookies()
-  const cookie = cookies.map((item) => `${item.name}=${item.value}`).join('; ')
-  const userAgent = await page.evaluate(() => navigator.userAgent)
-  const template = state.chatgpt.cachedHeaders
-
-  return {
-    headers: {
-      cookie,
-      authorization: template?.headers?.authorization || '',
-      'user-agent': userAgent,
-      origin: 'https://chatgpt.com',
-      referer: 'https://chatgpt.com/',
-    },
-  }
-}
-
-// chatgpt.com's web conversation endpoint silently drops client-supplied
-// `author.role: "system"` turns — the trusted system prompt is composed
-// server-side (account Custom Instructions), never from an inline message. The
-// only per-request way to make instructions land is to fold them into the user
-// turn, matching the "User:/Assistant:" transcript that split_prompt builds.
-function foldChatGPTSystemPrompt(systemPrompt, prompt) {
-  const sys = (systemPrompt || '').trim()
-  if (!sys) return prompt
-  return `System: ${sys}\n\n${prompt}`
-}
-
-function buildChatGPTMessages(prompt, webSearch, systemPrompt) {
-  const messages = []
-  messages.push({
-    id: randomUUID(),
-    author: { role: 'user' },
-    create_time: Date.now() / 1000,
-    content: {
-      content_type: 'text',
-      parts: [foldChatGPTSystemPrompt(systemPrompt, prompt)],
-    },
-    metadata: {
-      developer_mode_connector_ids: [],
-      selected_sources: webSearch ? ['web'] : [],
-      selected_github_repos: [],
-      selected_all_github_repos: false,
-      serialization_metadata: { custom_symbol_offsets: [] },
-    },
-  })
-  return messages
-}
-
-function buildChatGPTPayload(prompt, model, webSearch, systemPrompt) {
-  return {
-    action: 'next',
-    messages: buildChatGPTMessages(prompt, webSearch, systemPrompt),
-    parent_message_id: 'client-created-root',
-    model,
-    client_prepare_state: 'success',
-    timezone_offset_min: -new Date().getTimezoneOffset(),
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-    conversation_mode: { kind: 'primary_assistant' },
-    enable_message_followups: true,
-    system_hints: [],
-    supports_buffering: true,
-    supported_encodings: ['v1'],
-    client_contextual_info: {
-      app_name: 'chatgpt.com',
-    },
-    paragen_cot_summary_display_override: 'allow',
-    force_parallel_switch: 'auto',
-    thinking_effort: model.includes('thinking') ? 'extended' : 'auto',
-  }
-}
-
-function cloneJson(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value))
-}
-
-function replaceChatGPTMessageContent(content, prompt) {
-  if (!content || typeof content !== 'object') {
-    return {
-      content_type: 'text',
-      parts: [prompt],
-    }
-  }
-
-  if (Array.isArray(content.parts)) {
-    return {
-      ...content,
-      parts: [prompt],
-    }
-  }
-
-  return {
-    ...content,
-    text: prompt,
-  }
-}
-
-function compactChatGPTPrompt(prompt, maxChars = 18000) {
-  if (typeof prompt !== 'string') return { text: '', truncated: false }
-  const clean = prompt.trim()
-  if (clean.length <= maxChars) return { text: clean, truncated: false }
-
-  const marker = '\n\n[Earlier conversation trimmed to fit ChatGPT limit]\n\n'
-  const headBudget = Math.min(6000, Math.floor((maxChars - marker.length) * 0.4))
-  const tailBudget = Math.max(2000, maxChars - marker.length - headBudget)
-  return {
-    text: `${clean.slice(0, headBudget)}${marker}${clean.slice(-tailBudget)}`,
-    truncated: true,
-  }
-}
-
-function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch, systemPrompt) {
-  let payload = null
-  try {
-    payload = template?.payload ? JSON.parse(template.payload) : null
-  } catch {}
-
-  if (!payload || typeof payload !== 'object') {
-    return buildChatGPTPayload(prompt, model, webSearch, systemPrompt)
-  }
-
-  const nextPayload = cloneJson(payload)
-  const messages = Array.isArray(nextPayload.messages) ? nextPayload.messages : []
-  const templateMessage = messages.find((message) => message?.author?.role === 'user') || messages[0] || {}
-  const templateMetadata =
-    templateMessage?.metadata && typeof templateMessage.metadata === 'object'
-      ? templateMessage.metadata
-      : {}
-
-  nextPayload.model = model
-  delete nextPayload.conversation_id
-  delete nextPayload.conversationId
-  delete nextPayload.current_node
-  delete nextPayload.currentNode
-  delete nextPayload.parent_id
-  delete nextPayload.parentId
-  delete nextPayload.response_id
-  delete nextPayload.responseId
-  delete nextPayload.suggestions
-  delete nextPayload.history_and_training_disabled
-
-  const builtMessages = []
-  builtMessages.push({
-    ...templateMessage,
-    id: randomUUID(),
-    create_time: Date.now() / 1000,
-    author: { ...(templateMessage.author || {}), role: 'user' },
-    content: replaceChatGPTMessageContent(
-      templateMessage.content,
-      foldChatGPTSystemPrompt(systemPrompt, prompt),
-    ),
-    metadata: {
-      ...templateMetadata,
-      selected_sources: webSearch ? ['web'] : [],
-    },
-  })
-  nextPayload.messages = builtMessages
-
-  nextPayload.parent_message_id = 'client-created-root'
-  if (!nextPayload.action || typeof nextPayload.action !== 'string') {
-    nextPayload.action = 'next'
-  }
-
-  return nextPayload
-}
-
-function extractChatGPTAssistantText(payload) {
-  if (!payload || typeof payload !== 'object') return ''
-  const mapping = payload.mapping && typeof payload.mapping === 'object' ? Object.values(payload.mapping) : []
-  const messages = mapping
-    .map((entry) => entry?.message)
-    .filter((message) => message?.author?.role === 'assistant')
-    .sort((left, right) => (left?.create_time || 0) - (right?.create_time || 0))
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const content = messages[index]?.content
-    if (!content) continue
-    const parts = Array.isArray(content.parts) ? content.parts : []
-    const text = parts
-      .filter((part) => typeof part === 'string')
-      .join('\n')
-      .trim()
-    if (text) return text
-  }
-
-  return ''
+  if (!state.chatgpt.oauth) throw new Error('ChatGPT OAuth not initialized')
+  await state.chatgpt.oauth.loadSession()
+  return { headers: {} }
 }
 
 async function listChatGPTModels() {
-  const page = state.chatgpt.page
-  if (!page) throw new Error('ChatGPT Playwright not initialized')
-  if (!isOnHost(page.url(), 'chatgpt.com')) {
-    await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
-  }
-
-  await waitForInteractiveSelector(page, [
-    'textarea:visible',
-    '#prompt-textarea:visible',
-    'div[contenteditable="true"]:visible',
-  ])
-
-  const ids = await scanPageModelHintsWithRetries(page, 'chatgpt', [
-    '/backend-api/models',
-    '/backend-api/f/models',
-    '/backend-api/model_slug_availability',
-  ])
-  addKnownChatGPTModels(ids)
-  if (state.chatgpt.cachedHeaders?.model) addModelCandidate(ids, 'chatgpt', state.chatgpt.cachedHeaders.model)
-  return modelListResponse(ids, 'chatgpt', 'chatgpt-web-session')
+  if (!state.chatgpt.oauth) throw new Error('ChatGPT OAuth not initialized')
+  return state.chatgpt.oauth.listModels()
 }
 
 async function chatChatGPT({ model, prompt, system_prompt, web_search = false }) {
-  const page = state.chatgpt.page
-  if (!page) throw new Error('ChatGPT Playwright not initialized')
-
-  const template = await captureChatGPTTemplate(true)
-  const requestHeaders = { ...template.headers }
-  delete requestHeaders.cookie
-
-  const sendConversation = async (preparedPrompt) => {
-    const payload = buildChatGPTPayloadFromTemplate(
-      template,
-      preparedPrompt.text,
-      ensureSessionText(model, template.model || 'chatgpt-web-session'),
-      web_search,
-      system_prompt || null,
-    )
-    const requestResult = await page.evaluate(async ({ headers, payload }) => {
-      const response = await fetch('https://chatgpt.com/backend-api/f/conversation', {
-        method: 'POST',
-        credentials: 'include',
-        headers,
-        body: JSON.stringify(payload),
-      })
-      const reader = response.body?.getReader()
-      const decoder = new TextDecoder()
-      let raw = ''
-      let conversationId = ''
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          raw += decoder.decode(value, { stream: true })
-          const lines = raw.split('\n')
-          raw = lines.pop() || ''
-          for (const line of lines) {
-            const trimmed = line.trim()
-            if (!trimmed.startsWith('data:')) continue
-            const chunk = trimmed.slice(5).trim()
-            if (!chunk || chunk === '[DONE]') continue
-            try {
-              const parsed = JSON.parse(chunk)
-              conversationId =
-                parsed.conversation_id ||
-                parsed.token?.conversation_id ||
-                parsed.options?.[0]?.conversation_id ||
-                conversationId
-            } catch {}
-          }
-        }
-      }
-
-      return {
-        ok: response.ok,
-        status: response.status,
-        conversationId,
-        body: raw,
-      }
-    }, { headers: requestHeaders, payload })
-    return { payload, requestResult, preparedPrompt }
-  }
-
-  let sent = await sendConversation(compactChatGPTPrompt(prompt, 18000))
-  if (!sent.requestResult.ok && sent.requestResult.status === 413) {
-    sent = await sendConversation(compactChatGPTPrompt(prompt, 9000))
-  }
-
-  const conversationId = sent.requestResult.conversationId || sent.payload.conversation_id || ''
-  if (!sent.requestResult.ok || !conversationId) {
-    const detail = sent.requestResult.body?.trim()
-    throw new Error(
-      detail
-        ? `ChatGPT upstream request failed with status ${sent.requestResult.status}: ${detail.slice(0, 400)}`
-        : `ChatGPT upstream request failed with status ${sent.requestResult.status}`,
-    )
-  }
-
-  const conversationJson = await page.evaluate(async ({ headers, conversationId }) => {
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      const response = await fetch(`https://chatgpt.com/backend-api/conversation/${conversationId}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers,
-      })
-
-      if (response.ok) {
-        const text = await response.text()
-        if (text && text !== 'null') {
-          return text
-        }
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-    }
-
-    return ''
-  }, { headers: requestHeaders, conversationId })
-
-  const text = extractChatGPTAssistantText(conversationJson ? JSON.parse(conversationJson) : null)
-  if (!text) {
-    throw new Error('ChatGPT response was empty. Confirm session is active, then retry.')
-  }
-
-  return {
-    text,
-    model: sent.payload.model,
-    conversation_id: conversationId,
-    warning: [
-      web_search
-        ? 'ChatGPT web search toggle not mapped yet. Current web-session defaults were used.'
-        : null,
-      sent.preparedPrompt.truncated
-        ? 'Prompt was compacted before ChatGPT send to avoid message_length_exceeds_limit.'
-        : null,
-    ]
-      .filter(Boolean)
-      .join(' | ') || null,
-  }
+  if (!state.chatgpt.oauth) throw new Error('ChatGPT OAuth not initialized')
+  return state.chatgpt.oauth.chat({
+    model: ensureSessionText(model, 'gpt-5.4-mini'),
+    prompt,
+    systemPrompt: system_prompt || '',
+    webSearch: web_search,
+  })
 }
 
 async function openChatGPTLogin({ runtime_dir, browser }) {
   await initChatGPT({ runtime_dir, headless: false, browser })
-  await state.chatgpt.page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
+  await state.chatgpt.oauth.startLogin(state.chatgpt.page)
 }
 
 async function initGemini({ runtime_dir, headless, browser }) {
@@ -2406,6 +2013,8 @@ async function closeQwenAccount({ account_id = null }) {
 }
 
 async function closeAll() {
+  await state.chatgpt.oauth?.close()
+  state.chatgpt.oauth = null
   for (const key of ['deepseek', 'chatgpt', 'gemini', 'mistral', 'zai', 'meta', 'kimi', 'qwen']) {
     if (state[key].context) {
       await closeContext(state[key].context)

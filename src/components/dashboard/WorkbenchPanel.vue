@@ -11,8 +11,7 @@ const busy = computed(() => store.isBusy('workbench:run'))
 const hasModels = computed(() => store.hubModelOptions.length > 0)
 const hubRunning = computed(() => store.overview?.hub.running ?? false)
 
-// surface the first runtime issue, fall back to plain English
-const runtimeHint = computed(() => store.runtimeIssues[0] ?? 'Runtime preflight pending — fix issues before running.')
+const runtimeHint = computed(() => store.runtimeIssues[0] ?? t('workbench.runtimePending'))
 
 onMounted(() => store.syncWorkbenchModel())
 
@@ -33,7 +32,7 @@ function runWorkbench() {
           {{ model }}
         </option>
       </select>
-      <span v-if="!hasModels" class="faint models-hint"> Start the hub and providers to load models </span>
+      <span v-if="!hasModels" class="faint models-hint">{{ t('workbench.modelHint') }}</span>
     </div>
 
     <!-- Prompt -->
@@ -58,7 +57,7 @@ function runWorkbench() {
     <div v-if="!store.runtimeReady" class="banner banner-error">
       {{ runtimeHint }}
     </div>
-    <p v-else-if="!hubRunning" class="faint hint-text">Start the hub first to send a request.</p>
+    <p v-else-if="!hubRunning" class="faint hint-text">{{ t('workbench.startHubHint') }}</p>
 
     <!-- Run -->
     <div class="row">

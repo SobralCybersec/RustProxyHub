@@ -46,6 +46,9 @@ const ZAI_PORT: u16 = 3006;
 const META_PORT: u16 = 3007;
 const DEFAULT_BROWSER: &str = "msedge";
 const LOG_LIMIT: usize = 240;
+const PROVIDER_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MANUAL_LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Default)]
 struct ServiceRuntimeStatus {
@@ -629,6 +632,71 @@ impl ControlState {
             .unwrap_or_default()
     }
 
+    async fn ensure_provider_ready(&self, provider: &str) -> Result<()> {
+        if !self.runtime.single_runner_ready {
+            return Err(anyhow!(
+                "runtime preflight is blocking {provider} login: {}",
+                self.runtime.issues.join(" | ")
+            ));
+        }
+
+        if !self.service_status(provider).await.running {
+            if let Some(stale) = self
+                .tasks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(provider)
+            {
+                stale.abort();
+            }
+            {
+                let mut statuses = self.statuses.lock().await;
+                statuses.entry(provider.to_owned()).or_default().last_error = None;
+            }
+            self.ensure_service_dir(provider);
+            self.spawn_service_by_name(provider)
+                .map_err(|err| anyhow!("failed to start {provider} for manual login: {err}"))?;
+        }
+
+        self.wait_for_provider_ready_at(
+            provider,
+            &provider_base_url(provider),
+            PROVIDER_READY_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn wait_for_provider_ready_at(
+        &self,
+        provider: &str,
+        base_url: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let started = std::time::Instant::now();
+        let health_url = format!("{base_url}/health");
+        loop {
+            if self.client.get(&health_url).send().await.is_ok() {
+                return Ok(());
+            }
+
+            let status = self.service_status(provider).await;
+            if !status.running {
+                if let Some(error) = status.last_error {
+                    return Err(anyhow!(
+                        "{provider} failed to start for manual login: {error}"
+                    ));
+                }
+            }
+            if started.elapsed() >= timeout {
+                return Err(anyhow!(
+                    "{provider} did not become ready for manual login within {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+            tokio::time::sleep(PROVIDER_READY_POLL_INTERVAL).await;
+        }
+    }
+
     async fn service_logs(&self, name: &str) -> Vec<String> {
         self.logs
             .lock()
@@ -748,6 +816,18 @@ impl ControlState {
         api_key: Option<&str>,
         payload: &Value,
     ) -> Result<(u16, Value)> {
+        self.call_json_post_with_timeout(base_url, path, api_key, payload, None)
+            .await
+    }
+
+    async fn call_json_post_with_timeout(
+        &self,
+        base_url: &str,
+        path: &str,
+        api_key: Option<&str>,
+        payload: &Value,
+        timeout: Option<Duration>,
+    ) -> Result<(u16, Value)> {
         let url = format!("{base_url}{path}");
         let mut request = self
             .client
@@ -756,6 +836,9 @@ impl ControlState {
             .json(payload);
         if let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) {
             request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+        }
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
         }
         let response = request.send().await?;
         let status = response.status().as_u16();
@@ -843,13 +926,15 @@ impl ControlState {
 
         let (health, models) = if login_open {
             (
-                self.call_json_get(&base_url, "/health", None).await.ok(),
+                self.call_json_get(&base_url, "/health", self.hub_api_key.as_deref())
+                    .await
+                    .ok(),
                 None,
             )
         } else {
             let (health, models) = tokio::join!(
-                self.call_json_get(&base_url, "/health", None),
-                self.call_json_get(&base_url, "/v1/models", None),
+                self.call_json_get(&base_url, "/health", self.hub_api_key.as_deref()),
+                self.call_json_get(&base_url, "/v1/models", self.hub_api_key.as_deref()),
             );
             (health.ok(), models.ok())
         };
@@ -1131,12 +1216,18 @@ async fn start_provider_login_session(
         "browser": request.browser.unwrap_or_else(|| DEFAULT_BROWSER.to_owned()),
     });
 
+    state
+        .ensure_provider_ready(provider)
+        .await
+        .map_err(|err| err.to_string())?;
+
     let (status, response) = state
-        .call_json_post(
+        .call_json_post_with_timeout(
             &provider_base_url(provider),
             "/admin/manual_login",
-            None,
+            state.hub_api_key.as_deref(),
             &payload,
+            Some(MANUAL_LOGIN_TIMEOUT),
         )
         .await
         .map_err(|err| err.to_string())?;
@@ -1165,11 +1256,12 @@ async fn stop_provider_login_session(
 ) -> Result<Vec<String>, String> {
     let provider = normalize_provider(&provider).map_err(|err| err.to_string())?;
     let _ = state
-        .call_json_post(
+        .call_json_post_with_timeout(
             &provider_base_url(provider),
             "/admin/close_login",
-            None,
+            state.hub_api_key.as_deref(),
             &json!({}),
+            Some(MANUAL_LOGIN_TIMEOUT),
         )
         .await;
 
@@ -1199,12 +1291,18 @@ async fn start_qwen_account_login_session(
         "account_id": account_id.clone(),
     });
 
+    state
+        .ensure_provider_ready("qwen")
+        .await
+        .map_err(|err| err.to_string())?;
+
     let (status, response) = state
-        .call_json_post(
+        .call_json_post_with_timeout(
             &provider_base_url("qwen"),
             "/admin/manual_login",
-            None,
+            state.hub_api_key.as_deref(),
             &payload,
+            Some(MANUAL_LOGIN_TIMEOUT),
         )
         .await
         .map_err(|err| err.to_string())?;
@@ -1240,11 +1338,12 @@ async fn stop_qwen_account_login_session(
     }
 
     let _ = state
-        .call_json_post(
+        .call_json_post_with_timeout(
             &provider_base_url("qwen"),
             "/admin/close_login",
-            None,
+            state.hub_api_key.as_deref(),
             &json!({ "account_id": account_id.clone() }),
+            Some(MANUAL_LOGIN_TIMEOUT),
         )
         .await;
 
@@ -1424,6 +1523,12 @@ mod tests {
         add_qwen_account_db, ensure_qwen_db, normalize_provider, provider_base_url, service_names,
         ControlState, RuntimeDiagnostics, ServiceRuntimeStatus, StartupConfig,
     };
+    use axum::{
+        http::{header, HeaderMap, StatusCode},
+        routing::{get, post},
+        Json, Router,
+    };
+    use serde_json::{json, Value};
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         fs,
@@ -1433,6 +1538,10 @@ mod tests {
     };
     use tokio::sync::Mutex;
 
+    const MANUAL_LOGIN_PROVIDERS: [&str; 8] = [
+        "qwen", "deepseek", "kimi", "chatgpt", "gemini", "mistral", "zai", "meta",
+    ];
+
     fn temp_dir(name: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1441,6 +1550,113 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rustproxyhub-control-room-{name}-{unique}"));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn test_control_state(runtime_ready: bool, api_key: Option<&str>) -> ControlState {
+        let root = temp_dir("state");
+        let mut statuses = HashMap::new();
+        let mut logs = HashMap::new();
+        for name in service_names() {
+            statuses.insert(name.to_owned(), ServiceRuntimeStatus::default());
+            logs.insert(name.to_owned(), VecDeque::new());
+        }
+
+        ControlState {
+            workspace_root: root.clone(),
+            app_data_dir: root.join("app-data"),
+            qwen_runtime_dir: root.join("app-data/providers/qwen"),
+            runtime: RuntimeDiagnostics {
+                node_path: runtime_ready.then(|| "node".to_owned()),
+                node_source: runtime_ready.then(|| "test".to_owned()),
+                helper_dir: runtime_ready.then(|| "helper".to_owned()),
+                browser_available: runtime_ready,
+                single_runner_ready: runtime_ready,
+                issues: if runtime_ready {
+                    Vec::new()
+                } else {
+                    vec!["test runtime unavailable".to_owned()]
+                },
+            },
+            startup_config: StartupConfig {
+                mode: "manual".to_owned(),
+                services: Vec::new(),
+            },
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_millis(100))
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            hub_api_key: api_key.map(str::to_owned),
+            statuses: Arc::new(Mutex::new(statuses)),
+            logs: Arc::new(Mutex::new(logs)),
+            open_provider_login_sessions: Arc::new(Mutex::new(HashSet::new())),
+            open_qwen_account_login_sessions: Arc::new(Mutex::new(HashSet::new())),
+            tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            app_handle: None,
+            dashboard_notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn mock_provider_server() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
+            .route(
+                "/v1/models",
+                get(|headers: HeaderMap| async move {
+                    let authorized = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer test-key");
+                    if authorized {
+                        (StatusCode::OK, Json(json!({ "data": [] })))
+                    } else {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({ "error": { "message": "bad request" } })),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/admin/manual_login",
+                post(|headers: HeaderMap, Json(body): Json<Value>| async move {
+                    let authorized = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer test-key");
+                    if authorized && body["browser"] == "chrome" {
+                        (StatusCode::OK, Json(json!({ "ok": true })))
+                    } else {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({ "error": { "message": "bad request" } })),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/admin/close_login",
+                post(|headers: HeaderMap| async move {
+                    let authorized = headers
+                        .get(header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer test-key");
+                    if authorized {
+                        (StatusCode::OK, Json(json!({ "ok": true })))
+                    } else {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            Json(json!({ "error": { "message": "bad request" } })),
+                        )
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), handle)
     }
 
     #[test]
@@ -1456,11 +1672,102 @@ mod tests {
     }
 
     #[test]
-    fn provider_normalization_accepts_mistral_zai_and_meta() {
-        assert_eq!(normalize_provider(" MISTRAL ").unwrap(), "mistral");
-        assert_eq!(normalize_provider(" ZAI ").unwrap(), "zai");
-        assert_eq!(normalize_provider(" META ").unwrap(), "meta");
+    fn provider_normalization_accepts_every_manual_login_provider() {
+        for provider in MANUAL_LOGIN_PROVIDERS {
+            assert_eq!(
+                normalize_provider(&provider.to_uppercase()).unwrap(),
+                provider
+            );
+        }
         assert!(normalize_provider("claude").is_err());
+    }
+
+    #[tokio::test]
+    async fn manual_login_preflight_rejects_every_provider_when_runtime_is_blocked() {
+        let state = test_control_state(false, None);
+        for provider in MANUAL_LOGIN_PROVIDERS {
+            let error = state.ensure_provider_ready(provider).await.unwrap_err();
+            assert!(error.to_string().contains(provider));
+            assert!(error.to_string().contains("test runtime unavailable"));
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_and_authenticated_admin_post_use_shared_provider_path() {
+        let state = test_control_state(true, Some("test-key"));
+        let (base_url, server) = mock_provider_server().await;
+
+        for provider in MANUAL_LOGIN_PROVIDERS {
+            state
+                .wait_for_provider_ready_at(provider, &base_url, Duration::from_secs(1))
+                .await
+                .unwrap();
+        }
+
+        let (status, response) = state
+            .call_json_post_with_timeout(
+                &base_url,
+                "/admin/manual_login",
+                state.hub_api_key.as_deref(),
+                &json!({ "browser": "chrome" }),
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(response["ok"], true);
+
+        let (status, _) = state
+            .call_json_post(
+                &base_url,
+                "/admin/manual_login",
+                None,
+                &json!({ "browser": "chrome" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, 401);
+
+        let (status, response) = state
+            .call_json_post(
+                &base_url,
+                "/admin/close_login",
+                state.hub_api_key.as_deref(),
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(response["ok"], true);
+
+        let (status, _) = state
+            .call_json_get(&base_url, "/v1/models", state.hub_api_key.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(status, 200);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn readiness_surfaces_provider_start_failure() {
+        let state = test_control_state(true, None);
+        state.statuses.lock().await.insert(
+            "qwen".to_owned(),
+            ServiceRuntimeStatus {
+                running: false,
+                started_at: None,
+                last_error: Some("listener failed".to_owned()),
+            },
+        );
+
+        let error = state
+            .wait_for_provider_ready_at("qwen", "http://127.0.0.1:0", Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "qwen failed to start for manual login: listener failed"
+        );
     }
 
     #[tokio::test]
