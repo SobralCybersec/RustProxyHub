@@ -45,13 +45,17 @@ const runningProviders = computed(() => overview.value?.providers.filter(p => p.
         <span class="dot" :class="overview.runtime.browser_available ? 'ok' : 'err'" />
         <span class="muted">{{ store.t('hubHeader.browserAvailable') }}</span>
         <span class="spacer" />
-        <span class="mono faint">{{ overview.runtime.browser_available ? store.t('common.yes') : store.t('common.no') }}</span>
+        <span class="mono faint">{{
+          overview.runtime.browser_available ? store.t('common.yes') : store.t('common.no')
+        }}</span>
       </div>
       <div class="row">
         <span class="dot" :class="overview.runtime.single_runner_ready ? 'ok' : 'warn'" />
         <span class="muted">{{ store.t('hubHeader.singleRunner') }}</span>
         <span class="spacer" />
-        <span class="mono faint">{{ store.statusLabel(overview.runtime.single_runner_ready ? 'ready' : 'blocked') }}</span>
+        <span class="mono faint">{{
+          store.statusLabel(overview.runtime.single_runner_ready ? 'ready' : 'blocked')
+        }}</span>
       </div>
     </div>
 
