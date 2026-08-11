@@ -4,7 +4,7 @@
  RustProxyHub
 </h1>
 
-Um cockpit de proxy de LLM local-first e **sem chaves** (keyless). Um único app desktop transforma suas próprias sessões de navegador já logadas em oito provedores de IA em um único endpoint compatível com OpenAI e Anthropic — aponte qualquer agente de código para ele: sem API keys, sem cobrança por token, sem nuvem, seus cookies nunca saem da máquina. Feito com Tauri v2 (Rust) + Vue 3.
+Um cockpit de proxy de LLM local-first e **sem chaves** (keyless). Um único app desktop transforma suas próprias sessões de navegador já logadas em oito provedores de IA em um único endpoint compatível com OpenAI e Anthropic — aponte qualquer agente de código para ele: sem chaves de API do provedor nas sessões via navegador, sem relay cloud do RustProxyHub e com estado de sessão local. Feito com Tauri v2 (Rust) + Vue 3.
 
 <p align="center">
  <img src="https://img.shields.io/badge/providers-8-2b6cb0" alt="8 provedores" />
@@ -94,15 +94,47 @@ flowchart TD
 </h1>
 
 * **Um endpoint, oito provedores**: o hub expõe uma única superfície compatível com OpenAI **e** Anthropic (`/v1/chat/completions`, `/v1/messages`, `/v1/models`, `/v1/responses`) e roteia pelo nome do modelo — seu agente nunca sabe que existem oito backends
-* **Sem API keys**: cada provedor é dirigido por uma **sessão de navegador real e logada**; o proxy captura o template de requisição ao vivo e o reexecuta — sua assinatura, sem cobrança por token
+* **Sem chaves de API do provedor**: provedores via navegador usam uma **sessão de navegador real e logada**; o proxy captura o template de requisição ao vivo e o reexecuta. O hub local ainda pode ativar `RUST_PROXY_HUB_API_KEY` para autenticar clientes
 * **Streaming SSE ao vivo**: as respostas voltam como eventos OpenAI `chat.completion.chunk` com um `finish_reason` de encerramento — uma única camada de framing compartilhada por todos os provedores
 * **Tool calling que realmente dispara**: um único `StreamingToolParser` extrai as chamadas de ferramenta seja o modelo emitindo tags `<tool_call>` **ou** JSON puro / em bloco ```` ``` ```` (única, múltipla, ou dividida entre chunks do stream) — então Kilo, Pi e Claude Code recebem `tool_calls` reais, não texto vazado
 * **DeepSeek Vision**: `deepseek-v4-vision` alterna o chat para o modo visão (só disponível no chat da web, alcançável apenas pela sessão do navegador)
-* **Múltiplas contas Qwen**: sessões logadas por conta em um SQLite local, mascaradas em toda resposta de API/IPC
+* **Múltiplas contas Qwen**: sessões logadas por conta em um SQLite local, com senhas omitidas das respostas serializadas de API/IPC
 * **Snippets de configuração de agente**: um clique gera config pronta para colar no Pi (`models.json`), Claude Code (`settings.json`) e Kilo apontando para o hub
 * **Login Studio**: abra, acompanhe e feche o login de navegador de cada provedor pelo dashboard; as sessões persistem no app-data
 * **Detecção de runtime multiplataforma**: encontra qualquer navegador da família Chromium instalado (Edge / Chrome / Chromium) e o binário certo do Node por plataforma
-* **Local-first**: SQLite em disco, sessões no diretório app-data do SO; nada sai da máquina
+* **Local-first**: SQLite e estado de sessão ficam no diretório app-data do SO; não existe servidor ou relay cloud do RustProxyHub
+
+---
+
+<h1 align="center">
+ <img src="https://i.imgur.com/dwyUWDH.gif" width="30"/> O que ele economiza
+</h1>
+
+O RustProxyHub elimina trabalho repetido de gateway, provedor e agente. São economias de fluxo visíveis no código e na UI, não alegações inventadas de velocidade ponta a ponta.
+
+| Trabalho normalmente repetido | Caminho no RustProxyHub | O que economiza |
+|---|---|---|
+| Configurar cada cliente de código para cada provedor | Um hub em `127.0.0.1:3100` com rotas OpenAI + Anthropic | URLs base, adapters e trocas de provedor duplicados |
+| Manter integrações separadas por provedor | `route by model name` em um único hub Rust | Lógica de roteamento repetida no cliente |
+| Reimplementar parsing de tool-call em streaming | Um `StreamingToolParser` + framing SSE compartilhado | Divergência de parser entre oito caminhos de provedor |
+| Redigitar credenciais do navegador a cada requisição | Login Studio + sessões locais persistentes | Login e configuração de headers repetidos |
+| Diagnosticar uma falha de provedor | `/health`, `/providers`, logs, Qwen `/metrics`, `/admin/status` | Retries cegos e coleta manual de logs |
+| Preparar configuração de agente | Snippets do dashboard para Pi, Claude Code e Kilo | Copiar config específica de provedor à mão |
+| Hospedar um gateway separado | App Tauri + serviços Rust embutidos | Hosting cloud, deploy e manutenção de gateway |
+
+### Benefícios para CV / portfólio
+
+Este projeto é útil para CV porque um único repositório mostra visão de produto e profundidade de implementação no mesmo artefato:
+
+- **Design de sistemas**: oito runtimes de provedor convergem para um contrato compatível com OpenAI/Anthropic.
+- **Backend**: Rust, Tokio, Axum, roteamento, health checks, SSE, cancelamento e erros upstream limitados.
+- **Frontend**: Vue 3 + Pinia com health dos provedores, ciclo de login, descoberta de modelos, logs e workbench.
+- **Integrações**: Rust dirige uma bridge Node + Playwright embutida e normaliza sessões de provedores via navegador.
+- **Confiabilidade**: o stream registry do Qwen usa `ActiveStreamGuard`; cache, watchdog, health e logs expõem o estado do runtime.
+- **Segurança**: defaults em loopback, autenticação opcional do hub, respostas de conta mascaradas, armazenamento local e testes SSRF/segredos.
+- **Entrega**: CI cobre lint, typecheck, Vitest, testes Node, build Vite, formatação Rust, testes Rust e Clippy.
+
+**Resumo pronto para CV:** *Desenvolvi um gateway LLM local-first em Rust/Tauri que roteia oito provedores via navegador por APIs compatíveis com OpenAI e Anthropic, com parsing SSE de tool-calls, UI de observabilidade em Vue/Pinia, integração Playwright, gestão local de contas/sessões e gates de segurança no CI.*
 
 ---
 
@@ -115,13 +147,13 @@ flowchart TD
 </p>
 
 * **Shell / Runtime**: Tauri v2 (núcleo Rust + WebView do sistema), binário desktop único
-* **Backend**: Rust 2021 · `tokio` async · HTTP `axum` · cliente upstream `reqwest` (rustls) · `rusqlite` (SQLite embutido) · erros com `anyhow` · **newtypes** de ids de domínio
-* **Frontend**: Vue 3 · TypeScript · Vite · estado com Pinia · HugeIcons · um design system escuro estilo macOS feito à mão (tokens em `src/assets/main.css`)
-* **Ponte de navegador**: um helper **Node + Playwright** embutido (`resources/playwright-bridge/index.mjs`) que o lado Rust dirige via JSON para automatizar a sessão logada; `node.exe` + runtime do Playwright vão dentro do bundle no Windows
-* **Armazenamento**: SQLite (contas Qwen) no diretório app-data; as sessões dos provedores persistem por perfil
-* **CI/CD**: GitHub Actions — ESLint · typecheck `vue-tsc` · Vitest · build do frontend · `cargo fmt --check` · `cargo test` · `cargo clippy -D warnings`
-* **Qualidade**: `rustfmt` · Clippy · ESLint · Prettier · Vitest
-* **Empacotamento**: Windows NSIS `-setup.exe` + `tauri-app.exe` portátil (empacota Node + o helper Playwright)
+* **Backend**: Rust 2021 · `tokio` async · `axum` 0.8 · `reqwest` 0.12 com rustls · `rusqlite` 0.31 com SQLite embutido · `serde` · `anyhow`
+* **Frontend**: Vue 3.5 · TypeScript 6 · Vite 8 · Pinia 3 · HugeIcons · tokens do control-room escuro em `src/assets/main.css`
+* **Ponte de navegador**: helper Node + Playwright 1.60 embutido (`src-tauri/resources/playwright-bridge/index.mjs`) dirigido pelo Rust; `node.exe` e recursos Playwright são preparados antes do empacotamento Tauri
+* **Armazenamento**: contas Qwen em SQLite local; dados de runtime/sessão dos provedores no diretório app-data do Tauri
+* **CI/CD**: GitHub Actions — ESLint · typecheck `vue-tsc` · Vitest · testes Node bridge · build do frontend · `cargo fmt --check` · `cargo test` · `cargo clippy -D warnings`
+* **Qualidade**: `rustfmt` · Clippy · ESLint · Prettier · Vitest · CodeQL · Gitleaks · cargo-audit
+* **Empacotamento**: matriz Tauri para Linux `.deb`/AppImage e Windows NSIS/portátil; runtime Node + Playwright embutido
 
 ---
 
@@ -195,7 +227,7 @@ pnpm verify
  Arquitetura
 </h1>
 
-RustProxyHub é um app Tauri v2: um dashboard Vue chama **comandos IPC** Rust tipados para gerenciar o ciclo de vida e os logins dos provedores, enquanto o mesmo processo Rust roda toda a pilha de proxy in-process. Cada provedor reexecuta as requisições contra uma sessão de navegador logada dirigida por um helper Node + Playwright.
+RustProxyHub é um app Tauri v2: um dashboard Vue chama **comandos IPC** Rust tipados para gerenciar o ciclo de vida e os logins dos provedores, enquanto o mesmo processo Rust roda toda a pilha de proxy in-process. Provedores via navegador reexecutam requisições por um helper Node + Playwright. O ChatGPT suporta sessões web no navegador e credenciais OAuth para o upstream Codex `/responses`.
 
 ```mermaid
 flowchart LR
@@ -212,8 +244,8 @@ flowchart LR
       CORE[proxy_core · tipos · prompt · parse de tool · SSE · ids]
     end
 
-    subgraph BR[Sidecar Node]
-      PW[playwright-bridge · index.mjs]
+    subgraph BR[Sidecar Node embutido]
+      PW[resources/playwright-bridge · index.mjs]
     end
 
     INV -->|invoke| CR
@@ -350,22 +382,18 @@ flowchart LR
 
 ### Métricas
 
-O runtime do Qwen já expõe telemetria real — `GET /metrics` (Prometheus) e `/admin/status` (JSON), registrados a cada requisição — então qualquer número vem da *sua* máquina, não de marketing:
+O runtime do Qwen expõe telemetria local em `GET /metrics` (texto Prometheus) e `GET /admin/status` (JSON). O hub expõe health em `GET /health`, health dos provedores em `GET /providers` e logs em `GET /providers/{provider}/logs`.
 
-| Métrica | Tipo | Mede |
+| Família de métrica | Tipo | Mede |
 |---|---|---|
-| `latency.request` | histograma | Latência da requisição (ms), buckets 5 → 5000 |
-| `requests.total` · `requests.errors` | counter | Contagem de requisições + erros → taxa de erro |
-| `cache.hit` · `cache.miss` | counter | Taxa de acerto do cache de modelos |
-| `streams.active` | gauge | Streams SSE ativos |
-| `memory.heap.used` | gauge | Memória do processo |
+| `requests.total` · `requests.errors` | counters | Volume e erros de requisições Qwen |
+| `streams.active` · `streams.errors` | gauge/counter | Streams SSE ativos e falhas de stream |
+| `cache.*` | counters/histograms | Operações de cache, hits, misses, tamanho e latência |
+| `watchdog.*` | gauges/counters | Status de RAM/geral e tentativas de recuperação |
+| `memory.heap.*` | gauges | Memória usada e memória total |
+| `latency.request` | histograma | Latência com buckets de 5–5000 ms |
 
-**Benchmark honesto** — dois números, nunca fundidos num único número de vitrine:
-- **Overhead do hub** (a velocidade real do código Rust): parse da requisição + roteamento por modelo, medido contra um provedor *mock* com `oha`/`vegeta` — de forma crível **sub-milissegundo a poucos ms**. É o único lugar onde uma afirmação de "rápido" se sustenta.
-- **TTFT ponta a ponta**: dominado pela **sessão de navegador** (segundos), não pelo proxy — uma característica do produto medida com `llmperf`/AIPerf contra o endpoint real, nunca um gabarito de velocidade do proxy.
-- **Não afirmado**: throughput / req-s / tokens-s / "*N×* mais rápido que *&lt;gateway&gt;*". Uma sessão de navegador é serial e limitada pelo provedor, então esses números descreveriam um mock, não a realidade.
-
-> O sistema de `Métricas` hoje está ligado apenas ao provedor Qwen; estendê-lo para todo o hub é um follow-up rastreado.
+O código registra **19 definições de métricas Qwen**. Use `/metrics` ou `/admin/status` na instância em execução para valores reais; o README não faz alegação de velocidade do proxy ou TTFT ponta a ponta, pois a latência do provedor/navegador domina.
 
 ---
 
@@ -415,17 +443,18 @@ mindmap
         agent-setups · pi/claude/kilo
         types
     src-tauri · Rust
-      control_room · ciclo de vida + IPC + contas qwen
+      control_room · ciclo de vida + IPC + contas Qwen
       runtime
         proxy_core · tipos · prompt · parse de tool · SSE
-        ids · NewType
+        ids · newtypes de domínio
         hub · roteia por modelo
         providers
           deepseek · kimi · qwen (multi-arquivo)
           browser_runtime · chatgpt/gemini/mistral/zai/meta
         browser_bridge · driver Node/Playwright
-    resources
-      playwright-bridge · index.mjs
+    src-tauri/resources
+      playwright-bridge · index.mjs + módulos de sessão
+      node · runtime embutido
     docs
       reference · proxy-repos · refactor-summary
       REFACTOR_PLAN.md
@@ -441,27 +470,27 @@ mindmap
 
 | # | Objetivo | Entrega no RustProxyHub | Métrica verificável |
 |---|---|---|---|
-| 1 | **Olhar para o negócio** | Um endpoint único compatível com OpenAI **e** Anthropic consolida oito provedores; o objetivo de negócio (custo zero de token) vira a arquitetura | 8 provedores → 1 endpoint · 2 dialetos de API |
-| 2 | **Medir o desempenho da área** | Telemetria real registrada a cada requisição — `GET /metrics` (Prometheus) + `/admin/status` (JSON) | 5 séries: histograma de latência, requests/errors, cache hit/miss, streams ativos, heap |
-| 3 | **Alocar custos** | Counters por requisição, erro e cache permitem atribuir consumo por provedor/conta | `requests.total` · `requests.errors` segmentáveis por provedor |
-| 4 | **Manter níveis de serviço interno** | Fallback para qualquer Chromium instalado + aviso de login explícito em vez de falha silenciosa | Saúde por requisição exposta em `/admin/status` |
-| 5 | **Reduzir custo** | 100% keyless: reusa sessões de navegador já logadas em vez de API keys pagas | US$ 0/token · US$ 0/mês de gateway · 0 chaves |
-| 6 | **Otimizar estrutura** | Hotspots O(n²) de streaming eliminados; framing SSE unificado | O(n²) → O(n) · 4 cópias de SSE → 1 |
-| 7 | **Ser ágil** | Refactor conduzido por fases, cada fase entregue verde no CI antes de avançar | Cada fase = 1 barra verde antes do merge |
-| 8 | **Inovar nas soluções propostas** | Abordagem keyless: sessão de navegador real no lugar de chave/headless | 0 chaves · cookies 100% locais |
-| 9 | **Fazer previsões acuradas** | Histograma de latência (buckets 5 → 5000 ms) + gauges alimentam projeção de capacidade | p50/p95 direto dos buckets do histograma |
-| 10 | **Não focar em "commodities"** | HTTP/SSE/DB vêm de stacks maduras (axum, tokio, rusqlite); código próprio só no diferencial (roteamento multi-provider) | Lógica autoral concentrada no hub de roteamento |
-| 11 | **Gerar informação correta** | Newtypes de ID barram troca em tempo de compilação; zero `unwrap()` fora de teste | 4 newtypes (Model/Session/Account/ParentMessage) · 0 unwrap não-teste |
-| 12 | **Manter um Business Intelligence** | Endpoint Prometheus scrapeável (pronto p/ Grafana) + dashboard ao vivo | `/metrics` no formato Prometheus |
-| 13 | **Focar em ações de valor** | Testes cobrem parse de tool-call, roteamento, invocação CLI, interações prompt/tool-result, histórico de benchmark, leitura de logs, agendamento de modelos, descoberta Qwen ao vivo e erros upstream, não getters triviais | 187 testes Rust + 29 Node; benchmark CLI isolado verifica 8 rotas, 2 protocolos, auth, tool calls SSE, interações, histórico JSONL/Markdown e limite de modelos por provedor |
-| 14 | **Manter os processos críticos** | Guard RAII (`ActiveStreamGuard`) libera o slot do stream-registry mesmo em desconexão abrupta | 0 vazamento de slot em disconnect |
-| 15 | **Manter o ambiente seguro** | Cookies/sessões nunca deixam a máquina; senhas em SQLite local, nunca serializadas em IPC/API | 0 segredos na rede · 0 chaves em disco |
-| 16 | **Manter 24×7×365 a infraestrutura** | App local-first sem dependência de nuvem — não há servidor RustProxyHub para cair | 0 dependências de nuvem no caminho crítico |
-| 17 | **Modelo reutilizável** | Um parser de tool-call compartilhado por todos os provedores; framing SSE centralizado | 1 parser p/ 8 provedores · 1 dono do framing |
-| 18 | **Conquistar o pessoal do negócio** | README bilíngue (EN/pt-BR) + quick-start que realmente roda | 2 idiomas · setup documentado ponta a ponta |
-| 19 | **Ser mais eficiente, ser mais eficaz** | CI roda `clippy -D warnings` + `fmt --check` a cada push | 0 warnings no build padrão |
-| 20 | **Padronizar processos** | Um job de CI, um contrato: frontend e Rust na mesma barra verde | 7 gates em 1 pipeline por push/PR |
-| 21 | **Automatizar tarefas dos usuários** | Detecção cross-platform de browser/node automática, sem configuração manual de caminho | 0 config manual de path |
+| 1 | **Olhar para o negócio** | Um endpoint único compatível com OpenAI **e** Anthropic consolida oito provedores; o objetivo é acesso mais simples dos agentes e menos duplicação de gateway | 8 provedores → 1 endpoint · 2 dialetos de API |
+| 2 | **Medir o desempenho da área** | Qwen expõe `/metrics` Prometheus e `/admin/status` JSON; o hub expõe `/health` e `/providers` | 19 definições de métricas Qwen registradas |
+| 3 | **Alocar custos** | Counters de requisição, erro, cache, stream e watchdog criam uma base local para revisar uso por provedor/conta | `requests.total` · `requests.errors` · `cache.*` |
+| 4 | **Manter níveis de serviço interno** | Health no dashboard, readiness dos provedores, estado de login, últimos erros e status degraded evitam falha silenciosa | `/health` + `/providers` + cards de status |
+| 5 | **Reduzir custo** | Sessões via navegador evitam API key obrigatória do provedor e hosting separado do gateway; termos da assinatura continuam valendo | 1 hub local · 0 serviços cloud do RustProxyHub |
+| 6 | **Otimizar estrutura** | Roteamento, framing SSE, parsing de tools, storage de sessão e ciclo dos provedores compartilhados reduzem código duplicado | 1 dono do roteamento · 1 parser compartilhado |
+| 7 | **Ser ágil** | Módulos pequenos de provedor compartilham um contrato estável e um workbench local, permitindo exercitar um provedor sem mudar todo cliente | 8 adapters de provedor atrás de um contrato |
+| 8 | **Inovar nas soluções propostas** | Uma sessão de navegador real e logada vira a fronteira de integração em vez de um conector obrigatório por API key | Browser bridge + Login Studio local |
+| 9 | **Fazer previsões acuradas** | Histograma de latência, gauges de streams, counters de cache, estado do watchdog e workflow semanal de custo de build fornecem entradas mensuráveis | buckets de 5–5000 ms · relatório semanal de build |
+| 10 | **Não focar em "commodities"** | Crates maduras cuidam de HTTP, async, JSON e SQLite; o código do projeto concentra-se em roteamento, normalização, browser e compatibilidade com agentes | `axum` · `tokio` · `reqwest` · `rusqlite` reutilizados |
+| 11 | **Gerar informação correta** | Newtypes de domínio, DTOs tipados, resumos de conta mascarados, erros limitados e testes de roteamento protegem a qualidade da informação | 4 newtypes de ID · DTOs tipados de health/modelos |
+| 12 | **Manter um Business Intelligence** | Prometheus, status JSON, logs de provedor, gráficos do dashboard e histórico de benchmark append-only expõem evidência operacional | `/metrics` · `/admin/status` · `benchmark-history/` |
+| 13 | **Focar em ações de valor** | Testes focam routing, parsing de tools, sessões OAuth/web, compactação de prompt, contas, limpeza de streams, smoke dos provedores e fluxos UI | 197 attrs de teste Rust · 33 testes Node · 20 testes Vitest |
+| 14 | **Manter os processos críticos** | Guard RAII (`ActiveStreamGuard`) libera o slot do stream registry quando o cliente desconecta antes da limpeza normal | Testes dedicados de descarte do guard |
+| 15 | **Manter o ambiente seguro** | Defaults em loopback, auth opcional do hub, chaves encaminhadas somente a serviços locais, contas mascaradas, guards SSRF e secret scans reduzem exposição | workflows Gitleaks + CodeQL + cargo-audit |
+| 16 | **Manter 24×7×365 a infraestrutura** | O caminho crítico é local e não depende de servidor RustProxyHub; health checks e watchdog tornam degradação visível | 0 dependências cloud do RustProxyHub |
+| 17 | **Modelo reutilizável** | Um `StreamingToolParser`, helpers SSE, IDs tipados e comandos comuns de ciclo dos provedores servem múltiplos runtimes | 1 parser compartilhado entre runtimes |
+| 18 | **Conquistar o pessoal do negócio** | UI/README bilíngues, snippets de setup de agentes, status no dashboard e quick-start traduzem capacidade técnica em fluxo de usuário | Português + English · snippets Pi/Claude/Kilo |
+| 19 | **Ser mais eficiente, ser mais eficaz** | CI combina checks frontend/Rust; workflows de release e performance deixam custo de build e artefatos visíveis | 8 gates de CI · workflow semanal de custo |
+| 20 | **Padronizar processos** | GitHub Actions pinados, um contrato `pnpm verify`, rotas compartilhadas e endpoints consistentes de health/log padronizam a entrega | 7 workflows · um comando local de verificação |
+| 21 | **Automatizar tarefas dos usuários** | Login Studio, descoberta de modelos, roteamento, snippets, detecção de browser, startup de sessão e cancelamento removem tarefas manuais | 8 sessões de provedor gerenciadas por um dashboard |
 
 ---
 
@@ -470,17 +499,17 @@ mindmap
 </h1>
 
 ### Fora do Escopo
-- **Nenhum provedor por API key**: tudo roda por uma sessão de navegador real e logada; não há modelo headless nem fallback por chave embutido
-- **Sem nuvem / sem contas**: tudo é local-first; não existe um servidor RustProxyHub
+- **Sem fallback por API key de provedor**: provedores via navegador exigem sessão real e logada; a API key local opcional protege o acesso do cliente, não o billing upstream
+- **Sem nuvem / sem control plane hospedado**: tudo é local-first; não existe um servidor RustProxyHub
 - **Visão é só-chat no upstream**: `deepseek-v4-vision` alcança o modo visão da web pela sessão; o *upload* de imagem pela ponte é um follow-up rastreado
-- **Empacotamento Windows-first**: os artefatos de release são o NSIS `-setup.exe` + exe portátil (Node + Playwright embutidos); Linux/macOS rodam via `pnpm tauri dev`
+- **Matriz de empacotamento**: releases com tag geram Linux `.deb`/AppImage e Windows NSIS/portátil; Linux/macOS podem rodar via `pnpm tauri dev`
 
 ### Notas & Garantias
-- **Cookies nunca saem da máquina** — sessão de navegador por perfil no diretório app-data
+- **Estado de sessão local** — dados de runtime dos provedores ficam no app-data; requisições do navegador ainda vão para os sites dos provedores
 - **Login antes de usar** — uma sessão perdida retorna um aviso claro de login em vez de travar em silêncio (abra pelo Login Studio)
 - **Tool calls são corretas no fio** — JSON puro/em bloco é reclassificado em `tool_calls` com um `finish_reason:"tool_calls"` de encerramento (usuários do Kilo: defina `toolFormat: native` no provedor)
 - **O build padrão continua verde** — o CI roda `clippy -D warnings` a cada push
-- **Senhas são locais** — as senhas das contas Qwen vivem no SQLite do app-data, nunca serializadas em respostas de IPC/API
+- **Senhas são locais e mascaradas** — as senhas Qwen vivem no SQLite do app-data e são omitidas das respostas IPC/API; criptografia em repouso continua como follow-up
 
 ### Aviso Legal
 
