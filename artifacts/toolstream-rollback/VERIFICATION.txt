@@ -1,0 +1,38 @@
+TOOLSTREAM_INDEX_ROLLBACK
+
+Target:
+- src-tauri/resources/playwright-bridge/index.mjs
+
+Rollback source:
+- /tmp/rph-toolstream-implementation/rollback-source-index.mjs
+- SHA-256: 74a2df9158387dc5e7020f7d629c320e530b7b34d36aa679f3e5614daed02135
+
+Previous target before rollback:
+- SHA-256: 05f8326580c310c586e82c459c172c368f610b5d0e124d86c988e211e157ac89
+
+Scope:
+The supplied rollback script restores `index.mjs` only. Other repository files remain unchanged.
+
+RESTORE exact command/result:
+`/tmp/rph-toolstream-implementation/ROLLBACK.sh`
+Input: default target `src-tauri/resources/playwright-bridge/index.mjs`.
+Literal result: `restored target hash: 74a2df9158387dc5e7020f7d629c320e530b7b34d36aa679f3e5614daed02135`, `restored target lines: 2795`, `syntax: ok`.
+Exit: 0.
+
+MODIFIED exact command/result:
+`node --test tests/node/chatgpt-oauth.test.mjs tests/node/chatgpt-web-response.test.mjs`
+Input: repository after index rollback.
+Literal result: `ℹ tests 16; ℹ pass 16; ℹ fail 0; ℹ duration_ms 92.997029`.
+Exit: 0.
+
+ROLLBACK copy test exact command/result:
+`artifacts/toolstream-rollback/ROLLBACK.sh /tmp/rph-toolstream-rollback-copy.mjs`
+Input: temporary copy of index plus rollback source.
+Literal result: `rollback copy compare: restored baseline`.
+Exit: 0.
+
+Artifacts:
+- /home/satu/Documents/RustProxyHub/artifacts/toolstream-rollback/MODIFIED_FILE
+- /home/satu/Documents/RustProxyHub/artifacts/toolstream-rollback/DIFF_FILE
+- /home/satu/Documents/RustProxyHub/artifacts/toolstream-rollback/VERIFICATION.txt
+- /home/satu/Documents/RustProxyHub/artifacts/toolstream-rollback/ROLLBACK.sh

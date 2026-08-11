@@ -810,7 +810,9 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
 }
 
 fn browser_tool_system_instructions(body: &OpenAIRequest) -> Option<String> {
-    body.tools.as_ref()?;
+    if body.tools.is_none() {
+        return None;
+    }
 
     let mut prefix = String::from(
         "BROWSER TOOL MODE\n\

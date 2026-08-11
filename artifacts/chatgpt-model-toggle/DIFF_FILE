@@ -1,0 +1,88 @@
+MODEL_COUNT_DISCOVERY_DIFF
+--- chatgpt-oauth.mjs ---
+diff --git 1/tmp/rph-model-count-baseline/chatgpt-oauth.mjs 2/src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs
+index ed84456..9c338f8 100644
+--- 1/tmp/rph-model-count-baseline/chatgpt-oauth.mjs
++++ 2/src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs
+@@ -70,11 +70,11 @@ function isCodexApiModelSlug(slug) {
+ }
+ 
+ function codexModelItems(payload) {
+-  const raw = Array.isArray(payload?.models)
+-    ? payload.models
+-    : Array.isArray(payload?.data)
+-      ? payload.data
+-      : []
++  const raw = [
++    ...(Array.isArray(payload?.models) ? payload.models : []),
++    ...(Array.isArray(payload?.data) ? payload.data : []),
++  ]
++  const seen = new Set()
+   return raw
+     .map(item => {
+       if (typeof item === 'string') return { slug: item }
+@@ -83,6 +83,11 @@ function codexModelItems(payload) {
+       return typeof slug === 'string' && slug.trim() ? { ...item, slug: slug.trim() } : null
+     })
+     .filter(Boolean)
++    .filter(item => {
++      if (seen.has(item.slug)) return false
++      seen.add(item.slug)
++      return true
++    })
+ }
+ 
+ export function shouldRefreshAccessToken(accessToken, lastRefresh, now = Date.now()) {
+@@ -497,6 +502,7 @@ export class ChatGptOAuthClient {
+     if (!response.ok) throw upstreamError(response.status, raw)
+     const payload = JSON.parse(raw)
+     const rawModels = codexModelItems(payload)
++    const catalogueFields = ['models', 'data'].filter(field => Array.isArray(payload?.[field]))
+     const models = rawModels.filter(
+       item =>
+         item.supported_in_api !== false &&
+@@ -510,6 +516,7 @@ export class ChatGptOAuthClient {
+         source: 'oauth',
+         api: 'codex_responses',
+         endpoint: `/backend-api/codex${endpoint}`,
++        catalogue_fields: catalogueFields,
+         raw_count: rawModels.length,
+         accepted_count: models.length,
+       },
+--- chatgpt-oauth.test.mjs ---
+diff --git 1/tmp/rph-model-count-baseline/chatgpt-oauth.test.mjs 2/tests/node/chatgpt-oauth.test.mjs
+index 8a40536..7318b4d 100644
+--- 1/tmp/rph-model-count-baseline/chatgpt-oauth.test.mjs
++++ 2/tests/node/chatgpt-oauth.test.mjs
+@@ -316,6 +316,10 @@ test('lists only API model slugs from Codex endpoint', async t => {
+         { slug: 'chatgpt.workspace.model.GPT-4.1.access', visibility: 'list', supported_in_api: true },
+         { slug: 'o365BusinessLink', visibility: 'list', supported_in_api: true },
+       ],
++      data: [
++        { id: 'gpt-5.4', supported_in_api: true },
++        { id: 'gpt-data-only', supported_in_api: true },
++      ],
+     })
+   })
+ 
+@@ -324,7 +328,7 @@ test('lists only API model slugs from Codex endpoint', async t => {
+   assert.equal(modelsHeaders.get('authorization'), 'Bearer ' + accessToken)
+   assert.deepEqual(
+     result.data.map(item => item.id),
+-    ['gpt-5.4', 'o3_pro', 'future-codex-family'],
++    ['gpt-5.4', 'o3_pro', 'future-codex-family', 'gpt-data-only'],
+   )
+   assert.ok(result.data.every(item => item.owned_by === 'codex'))
+   assert.ok(result.data.every(item => item.api === 'codex_responses'))
+@@ -332,8 +336,9 @@ test('lists only API model slugs from Codex endpoint', async t => {
+   assert.equal(result.discovery.source, 'oauth')
+   assert.equal(result.discovery.api, 'codex_responses')
+   assert.match(result.discovery.endpoint, /\/backend-api\/codex\/models\?client_version=/)
+-  assert.equal(result.discovery.raw_count, 5)
+-  assert.equal(result.discovery.accepted_count, 3)
++  assert.deepEqual(result.discovery.catalogue_fields, ['models', 'data'])
++  assert.equal(result.discovery.raw_count, 6)
++  assert.equal(result.discovery.accepted_count, 4)
+ })
+ 
+ test('falls back to discovered Codex model when web model is requested in Codex lane', async t => {

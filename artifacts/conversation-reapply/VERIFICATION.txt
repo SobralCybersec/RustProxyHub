@@ -1,0 +1,46 @@
+Conversation reapply verification
+
+CHANGED BRANCH/FIELDS
+- Codex OAuth model catalogue: /backend-api/codex/models, models/data fields, Codex-only filtering, discovery metadata, forced refresh after 401.
+- Browser/hub model route: chatgpt_mode=web|codex selects one catalogue endpoint; UI toggle refreshes only selected ChatGPT lane.
+- Qwen catalogue: registry source, versioned models:qwen:v2 cache key, registry/no-thinking variants.
+
+ARTIFACTS
+- MODIFIED_FILE: /home/satu/Documents/RustProxyHub/artifacts/conversation-reapply/MODIFIED_FILE
+- DIFF_FILE: /home/satu/Documents/RustProxyHub/artifacts/conversation-reapply/DIFF_FILE
+- VERIFICATION.txt: /home/satu/Documents/RustProxyHub/artifacts/conversation-reapply/VERIFICATION.txt
+- ROLLBACK.sh: /home/satu/Documents/RustProxyHub/artifacts/conversation-reapply/ROLLBACK.sh
+
+BASELINE
+Command:
+cd /tmp/rph-baseline-worktree && node --check src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs && node --check src-tauri/resources/playwright-bridge/index.mjs && node --test tests/node/chatgpt-oauth.test.mjs
+Input: HEAD at 9aed0e5, clean baseline worktree.
+Literal result: 6 tests passed, 0 failed; exit status 0.
+
+MODIFIED
+Command:
+cd /home/satu/Documents/RustProxyHub && node --check src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs && node --check src-tauri/resources/playwright-bridge/index.mjs && node --test tests/node/chatgpt-oauth.test.mjs tests/node/chatgpt-web-response.test.mjs
+Input: current modified bridge and OAuth source.
+Literal result: 15 tests passed, 0 failed; exit status 0.
+
+Command:
+cd /home/satu/Documents/RustProxyHub && cargo test --manifest-path src-tauri/Cargo.toml browser_runtime --lib && cargo test --manifest-path src-tauri/Cargo.toml qwen --lib && cargo test --manifest-path src-tauri/Cargo.toml hub --lib && cargo test --manifest-path src-tauri/Cargo.toml control_room --lib
+Input: current modified Rust provider, hub, Qwen, and control-room paths.
+Literal result: browser_runtime 34 passed; qwen 21 passed; hub 25 passed; control_room 15 passed; exit status 0.
+
+Command:
+cd /home/satu/Documents/RustProxyHub && pnpm type-check && pnpm test --run && pnpm build
+Input: current modified Vue/store/UI source.
+Literal result: vue-tsc passed; 4 test files and 19 tests passed; Vite build passed; exit status 0.
+
+Command:
+cd /home/satu/Documents/RustProxyHub && git -c core.whitespace=cr-at-eol diff --check
+Input: current tracked diff.
+Literal result: no output; exit status 0.
+
+ROLLBACK
+Command:
+/home/satu/Documents/RustProxyHub/artifacts/conversation-reapply/ROLLBACK.sh /tmp/rph-rollback-test/index.mjs /tmp/rph-reapply-baseline/src-tauri/resources/playwright-bridge/index.mjs
+Input: another copy of MODIFIED_FILE plus preserved baseline copy.
+Literal result: restored /tmp/rph-rollback-test/index.mjs from /tmp/rph-reapply-baseline/src-tauri/resources/playwright-bridge/index.mjs; cmp passed; exit status 0.
+Restored behavior/status: rollback test copy matches baseline. Working-tree MODIFIED_FILE remains changed.

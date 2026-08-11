@@ -2,7 +2,7 @@ use crate::proxy_core::{constant_time_eq, OpenAIRequest};
 use anyhow::{anyhow, Result};
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -127,6 +127,12 @@ struct StopRequest {
     response_id: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ModelListQuery {
+    #[serde(default)]
+    chatgpt_mode: Option<String>,
+}
+
 async fn run_server(config: AppConfig) -> Result<()> {
     let state = AppState {
         client: reqwest::Client::builder()
@@ -209,12 +215,16 @@ async fn openapi(State(state): State<AppState>) -> impl IntoResponse {
     Json(openapi_document(&state.config))
 }
 
-async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn models(
+    State(state): State<AppState>,
+    Query(query): Query<ModelListQuery>,
+    headers: HeaderMap,
+) -> Response {
     if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
         return *response;
     }
 
-    match fetch_merged_models(&state).await {
+    match fetch_merged_models(&state, query.chatgpt_mode.as_deref()).await {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => bad_gateway_error(&err),
     }
@@ -223,13 +233,14 @@ async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
 async fn model_by_id(
     State(state): State<AppState>,
     Path(model): Path<String>,
+    Query(query): Query<ModelListQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
         return *response;
     }
 
-    match fetch_merged_models(&state).await {
+    match fetch_merged_models(&state, query.chatgpt_mode.as_deref()).await {
         Ok(payload) => {
             let requested = normalize_prefixed_model(&model);
             let found = payload
@@ -454,11 +465,11 @@ async fn provider_health_checks(state: &AppState) -> Vec<ProviderHealth> {
     .await
 }
 
-async fn fetch_merged_models(state: &AppState) -> Result<Value> {
+async fn fetch_merged_models(state: &AppState, chatgpt_mode: Option<&str>) -> Result<Value> {
     const TTL: Duration = Duration::from_secs(30);
 
     // read lock — concurrent callers share the fast path
-    {
+    if chatgpt_mode.is_none() {
         let cached = state.models_cache.read().await;
         if let Some((ref val, ts)) = *cached {
             if ts.elapsed() < TTL {
@@ -470,15 +481,21 @@ async fn fetch_merged_models(state: &AppState) -> Result<Value> {
     // cache miss — fan out to all providers
     let mut data = Vec::new();
     let mut errors = Vec::new();
+    let mut discovery = serde_json::Map::new();
 
-    for result in
-        join_all(PROVIDER_ORDER.into_iter().map(|provider| async move {
-            (provider, fetch_provider_models(state, provider).await)
-        }))
-        .await
+    for result in join_all(PROVIDER_ORDER.into_iter().map(|provider| async move {
+        (
+            provider,
+            fetch_provider_models(state, provider, chatgpt_mode).await,
+        )
+    }))
+    .await
     {
         match result {
-            (_provider, Ok(mut items)) => data.append(&mut items),
+            (provider, Ok((mut items, source))) => {
+                data.append(&mut items);
+                discovery.insert(provider.as_str().to_owned(), source);
+            }
             (provider, Err(err)) => errors.push(json!({
                 "provider": provider.as_str(),
                 "message": err.to_string(),
@@ -490,25 +507,42 @@ async fn fetch_merged_models(state: &AppState) -> Result<Value> {
         return Err(anyhow!("all upstream model lists failed"));
     }
 
-    let result = json!({ "object": "list", "data": data, "errors": errors });
-    *state.models_cache.write().await = Some((result.clone(), std::time::Instant::now()));
+    let result = json!({
+        "object": "list",
+        "data": data,
+        "errors": errors,
+        "discovery": discovery,
+    });
+    if chatgpt_mode.is_none() {
+        *state.models_cache.write().await = Some((result.clone(), std::time::Instant::now()));
+    }
     Ok(result)
 }
 
-async fn fetch_provider_models(state: &AppState, provider: ProviderName) -> Result<Vec<Value>> {
+async fn fetch_provider_models(
+    state: &AppState,
+    provider: ProviderName,
+    chatgpt_mode: Option<&str>,
+) -> Result<(Vec<Value>, Value)> {
+    let path = match provider {
+        ProviderName::Chatgpt if chatgpt_mode == Some("codex") => "/v1/models?chatgpt_mode=codex",
+        ProviderName::Chatgpt => "/v1/models?chatgpt_mode=auto",
+        _ => "/v1/models",
+    };
     let response = provider_request(
         &state.client,
         state.provider_config(provider),
         Method::GET,
-        "/v1/models",
+        path,
     )
     .send()
     .await?;
     let status = response.status();
     if !status.is_success() {
         return Err(anyhow!(
-            "{} models failed with status {}",
+            "{} model discovery endpoint {} failed with status {}",
             provider.as_str(),
+            path,
             status
         ));
     }
@@ -520,7 +554,15 @@ async fn fetch_provider_models(state: &AppState, provider: ProviderName) -> Resu
         .cloned()
         .unwrap_or_default();
 
-    Ok(tag_provider_models(items, provider))
+    let source = payload.get("discovery").cloned().unwrap_or_else(|| {
+        json!({
+            "provider": provider.as_str(),
+            "source": "upstream",
+            "request_endpoint": path,
+        })
+    });
+
+    Ok((tag_provider_models(items, provider), source))
 }
 
 fn tag_provider_models(items: Vec<Value>, provider: ProviderName) -> Vec<Value> {
@@ -530,6 +572,19 @@ fn tag_provider_models(items: Vec<Value>, provider: ProviderName) -> Vec<Value> 
             Value::Object(map) => map,
             _ => continue,
         };
+        let id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        if id.is_empty() {
+            continue;
+        }
+        let metadata = hub_model_metadata(provider, &id);
+        for (key, value) in metadata.as_object().into_iter().flatten() {
+            object.entry(key.clone()).or_insert_with(|| value.clone());
+        }
         object.insert(
             "provider".to_owned(),
             Value::String(provider.as_str().to_owned()),
@@ -537,6 +592,70 @@ fn tag_provider_models(items: Vec<Value>, provider: ProviderName) -> Vec<Value> 
         output.push(Value::Object(object));
     }
     output
+}
+
+fn hub_model_metadata(provider: ProviderName, id: &str) -> Value {
+    let lower = id.to_ascii_lowercase();
+    let is_chatgpt = matches!(provider, ProviderName::Chatgpt);
+    let is_codex = is_chatgpt && lower.contains("codex");
+    let is_gpt_family = is_chatgpt
+        && (lower.starts_with("gpt") || lower.starts_with('o') || lower.starts_with("chatgpt"));
+    let tool_call = match provider {
+        ProviderName::Chatgpt => is_gpt_family,
+        ProviderName::Deepseek => !(lower.contains("deepseek-r1") || lower.contains("reasoner")),
+        _ => true,
+    };
+    let api = if is_codex {
+        "codex_responses"
+    } else {
+        "chat_completions"
+    };
+    let billing = if is_codex {
+        "Codex billing usage"
+    } else if is_chatgpt {
+        "ChatGPT subscription/web-session usage"
+    } else {
+        "Provider session usage"
+    };
+    let description = if is_codex {
+        "Uses Codex OAuth Responses API; usage is billed/limited as Codex usage."
+    } else if is_chatgpt {
+        "Uses Chat Completions API compatibility through the ChatGPT web session."
+    } else {
+        "Uses Chat Completions API compatibility through the provider session."
+    };
+
+    json!({
+        "name": hub_model_display_name(id),
+        "description": description,
+        "api": api,
+        "billing": billing,
+        "tool_call": tool_call,
+        "supports_function_calling": tool_call,
+        "supportsNativeTools": tool_call,
+        "reasoning": lower.contains("reasoning") || lower.contains("thinking") || lower.contains("codex") || lower.starts_with('o'),
+        "temperature": !(lower.contains("codex") || lower.starts_with('o')),
+        "attachment": false,
+        "limit": {
+            "context": 128000,
+            "output": 16384
+        }
+    })
+}
+
+fn hub_model_display_name(id: &str) -> String {
+    id.split(['-', '_', '.'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(_) if part.len() <= 3 => part.to_ascii_uppercase(),
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn proxy_json_post<T: serde::Serialize>(
@@ -1168,6 +1287,50 @@ mod tests {
         let routed = normalize_prefixed_model("kimi:kimi-k3");
         assert_eq!(routed.provider, ProviderName::Kimi);
         assert_eq!(routed.model, "kimi-k3");
+    }
+
+    #[test]
+    fn chatgpt_codex_models_get_kilo_capability_metadata() {
+        let tagged = tag_provider_models(
+            vec![json!({ "id": "gpt-5.3-codex" })],
+            ProviderName::Chatgpt,
+        );
+        let item = &tagged[0];
+
+        assert_eq!(
+            item["description"],
+            "Uses Codex OAuth Responses API; usage is billed/limited as Codex usage."
+        );
+        assert_eq!(item["api"], "codex_responses");
+        assert_eq!(item["billing"], "Codex billing usage");
+        assert_eq!(item["tool_call"], true);
+        assert_eq!(item["supportsNativeTools"], true);
+    }
+
+    #[test]
+    fn chatgpt_web_models_get_completions_metadata() {
+        let tagged = tag_provider_models(vec![json!({ "id": "gpt-5-3" })], ProviderName::Chatgpt);
+        let item = &tagged[0];
+
+        assert_eq!(
+            item["description"],
+            "Uses Chat Completions API compatibility through the ChatGPT web session."
+        );
+        assert_eq!(item["api"], "chat_completions");
+        assert_eq!(item["billing"], "ChatGPT subscription/web-session usage");
+        assert_eq!(item["tool_call"], true);
+        assert_eq!(item["supports_function_calling"], true);
+    }
+
+    #[test]
+    fn deepseek_reasoner_models_disable_native_tool_metadata() {
+        let tagged =
+            tag_provider_models(vec![json!({ "id": "deepseek-r1" })], ProviderName::Deepseek);
+        let item = &tagged[0];
+
+        assert_eq!(item["tool_call"], false);
+        assert_eq!(item["supportsNativeTools"], false);
+        assert_eq!(item["supports_function_calling"], false);
     }
 
     #[test]

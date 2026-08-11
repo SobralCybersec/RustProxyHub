@@ -1,14 +1,13 @@
 use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
 use crate::proxy_core::{
-    build_prompt, constant_time_eq, current_timestamp, extract_tool_calls_from_text,
-    preflight_request_to_budget, sse_done, sse_json, usage_from_text, FunctionToolDefinition,
-    Message, MessageToolCall, OpenAIRequest, PromptPreflight, PromptPreflightOptions,
+    build_prompt, constant_time_eq, current_timestamp, split_prompt, sse_done, sse_json,
+    usage_from_text, FunctionToolDefinition, Message, MessageToolCall, OpenAIRequest,
     StreamingToolParser, ToolCallFunction, Usage,
 };
 use anyhow::Result;
 use async_stream::stream;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -57,7 +56,7 @@ impl BrowserProviderKind {
     }
 
     fn web_search_supported(self) -> bool {
-        matches!(self, Self::Chatgpt)
+        false
     }
 }
 
@@ -87,12 +86,6 @@ struct ManualLoginRequest {
     browser: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct ModelListQuery {
-    #[serde(default)]
-    chatgpt_mode: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct BridgeChatResponse {
     text: String,
@@ -104,10 +97,6 @@ struct BridgeChatResponse {
     conversation_id: Option<String>,
     #[serde(default)]
     warning: Option<String>,
-    #[serde(default)]
-    upstream_usage: Option<Value>,
-    #[serde(default)]
-    upstream_cache: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -232,16 +221,12 @@ async fn admin_close_login(State(state): State<AppState>, headers: HeaderMap) ->
     }
 }
 
-async fn models(
-    State(state): State<AppState>,
-    Query(query): Query<ModelListQuery>,
-    headers: HeaderMap,
-) -> Response {
+async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
         return *response;
     }
 
-    Json(discover_models(&state, query.chatgpt_mode.as_deref()).await).into_response()
+    Json(discover_models(&state).await).into_response()
 }
 
 async fn model_by_id(
@@ -253,7 +238,7 @@ async fn model_by_id(
         return *response;
     }
 
-    let payload = discover_models(&state, None).await;
+    let payload = discover_models(&state).await;
     let found = payload
         .get("data")
         .and_then(Value::as_array)
@@ -270,14 +255,11 @@ async fn model_by_id(
     }
 }
 
-async fn discover_models(state: &AppState, chatgpt_mode: Option<&str>) -> Value {
+async fn discover_models(state: &AppState) -> Value {
     const TTL: Duration = Duration::from_secs(30);
 
-    // One payload per provider; auto is same default lane as an omitted mode.
-    let cacheable = chatgpt_mode.is_none() || chatgpt_mode == Some("auto");
-
     // serve fresh cache without hitting the bridge
-    if cacheable {
+    {
         let cached = state.models_cache.read().await;
         if let Some((ref val, ts)) = *cached {
             if ts.elapsed() < TTL {
@@ -300,7 +282,6 @@ async fn discover_models(state: &AppState, chatgpt_mode: Option<&str>) -> Value 
                 "list_models",
                 json!({
                     "fallback_model": state.config.kind.default_model(),
-                    "chatgpt_mode": chatgpt_mode.unwrap_or("auto"),
                 }),
             )
             .await
@@ -309,11 +290,8 @@ async fn discover_models(state: &AppState, chatgpt_mode: Option<&str>) -> Value 
 
     match discovered {
         Ok(Ok(payload)) => {
-            let result = normalize_model_payload(state, payload, Vec::new(), chatgpt_mode);
-            if cacheable {
-                *state.models_cache.write().await =
-                    Some((result.clone(), std::time::Instant::now()));
-            }
+            let result = normalize_model_payload(state, payload, Vec::new());
+            *state.models_cache.write().await = Some((result.clone(), std::time::Instant::now()));
             result
         }
         Ok(Err(err)) => {
@@ -338,12 +316,7 @@ fn model_discovery_timeout(kind: BrowserProviderKind) -> Duration {
     }
 }
 
-fn normalize_model_payload(
-    state: &AppState,
-    payload: Value,
-    errors: Vec<String>,
-    chatgpt_mode: Option<&str>,
-) -> Value {
+fn normalize_model_payload(state: &AppState, payload: Value, errors: Vec<String>) -> Value {
     let mut seen = std::collections::HashSet::new();
     let mut data = Vec::new();
     if let Some(items) = payload.get("data").and_then(Value::as_array) {
@@ -353,170 +326,50 @@ fn normalize_model_payload(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .trim();
-            if id.is_empty()
-                || !model_id_allowed(state.config.kind, id)
-                || !seen.insert(id.to_owned())
-            {
+            if id.is_empty() || !seen.insert(id.to_owned()) {
                 continue;
             }
-            data.push(model_payload_item(state.config.kind, id, item.clone()));
+            data.push(json!({
+                "id": id,
+                "object": "model",
+                "created": current_timestamp(),
+                "owned_by": state.config.kind.as_str(),
+                "permission": [],
+                "root": id,
+                "parent": Value::Null,
+            }));
         }
     }
 
     if data.is_empty() {
-        return fallback_model_payload_for_mode(state.config.kind, chatgpt_mode, errors);
+        return fallback_model_payload(state, errors);
     }
-
-    let discovery = payload
-        .get("discovery")
-        .cloned()
-        .unwrap_or_else(|| model_discovery_metadata(state.config.kind, chatgpt_mode));
 
     json!({
         "object": "list",
         "data": data,
         "errors": errors,
-        "discovery": discovery,
     })
-}
-
-fn model_payload_item(kind: BrowserProviderKind, id: &str, source: Value) -> Value {
-    let mut object = source.as_object().cloned().unwrap_or_default();
-    let metadata = model_metadata(kind, id);
-    for (key, value) in metadata.as_object().into_iter().flatten() {
-        object.entry(key.clone()).or_insert_with(|| value.clone());
-    }
-    object.insert("id".to_owned(), Value::String(id.to_owned()));
-    object.insert("object".to_owned(), Value::String("model".to_owned()));
-    object.insert("created".to_owned(), json!(current_timestamp()));
-    object.insert(
-        "owned_by".to_owned(),
-        Value::String(kind.as_str().to_owned()),
-    );
-    object
-        .entry("permission".to_owned())
-        .or_insert_with(|| json!([]));
-    object.insert("root".to_owned(), Value::String(id.to_owned()));
-    object.entry("parent".to_owned()).or_insert(Value::Null);
-    Value::Object(object)
-}
-
-fn model_metadata(kind: BrowserProviderKind, id: &str) -> Value {
-    let lower = id.to_ascii_lowercase();
-    let is_codex = matches!(kind, BrowserProviderKind::Chatgpt) && lower.contains("codex");
-    let is_chatgpt = matches!(kind, BrowserProviderKind::Chatgpt);
-    let is_gpt_family = is_chatgpt
-        && (lower.starts_with("gpt") || lower.starts_with('o') || lower.starts_with("chatgpt"));
-    let api = if is_codex {
-        "codex_responses"
-    } else {
-        "chat_completions"
-    };
-    let billing = if is_codex {
-        "Codex billing usage"
-    } else if is_chatgpt {
-        "ChatGPT subscription/web-session usage"
-    } else {
-        "Provider session usage"
-    };
-    let description = if is_codex {
-        "Uses Codex OAuth Responses API; usage is billed/limited as Codex usage."
-    } else if is_chatgpt {
-        "Uses Chat Completions API compatibility through the ChatGPT web session."
-    } else {
-        "Uses Chat Completions API compatibility through the browser-backed provider session."
-    };
-
-    json!({
-        "name": model_display_name(id),
-        "description": description,
-        "api": api,
-        "billing": billing,
-        "tool_call": is_gpt_family || !is_chatgpt,
-        "reasoning": lower.contains("reasoning") || lower.contains("thinking") || lower.contains("codex") || lower.starts_with('o'),
-        "temperature": !(lower.contains("codex") || lower.starts_with('o')),
-        "attachment": false,
-        "limit": {
-            "context": 128000,
-            "output": 16384
-        }
-    })
-}
-
-fn model_display_name(id: &str) -> String {
-    id.split(['-', '_', '.'])
-        .filter(|part| !part.is_empty())
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(_) if part.len() <= 3 => part.to_ascii_uppercase(),
-                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn fallback_model_payload(state: &AppState, errors: Vec<String>) -> Value {
-    fallback_model_payload_for_mode(state.config.kind, None, errors)
+    fallback_model_payload_for(state.config.kind, errors)
 }
 
-#[cfg(test)]
 fn fallback_model_payload_for(kind: BrowserProviderKind, errors: Vec<String>) -> Value {
-    fallback_model_payload_for_mode(kind, None, errors)
-}
-
-fn fallback_model_payload_for_mode(
-    kind: BrowserProviderKind,
-    chatgpt_mode: Option<&str>,
-    errors: Vec<String>,
-) -> Value {
     let fallback = kind.default_model();
     json!({
         "object": "list",
-        "data": [model_payload_item(kind, fallback, json!({}))],
+        "data": [{
+            "id": fallback,
+            "object": "model",
+            "created": current_timestamp(),
+            "owned_by": kind.as_str(),
+            "permission": [],
+            "root": fallback,
+            "parent": Value::Null,
+        }],
         "errors": errors,
-        "discovery": model_discovery_metadata(kind, chatgpt_mode),
-    })
-}
-
-fn model_id_allowed(kind: BrowserProviderKind, id: &str) -> bool {
-    !(kind == BrowserProviderKind::Chatgpt
-        && id
-            .to_ascii_lowercase()
-            .starts_with("chatgpt.workspace.model."))
-}
-
-fn model_discovery_metadata(kind: BrowserProviderKind, chatgpt_mode: Option<&str>) -> Value {
-    if kind == BrowserProviderKind::Chatgpt && chatgpt_mode == Some("codex") {
-        return json!({
-            "provider": "codex",
-            "source": "oauth",
-            "api": "codex_responses",
-            "endpoint": "/backend-api/codex/models",
-            "request_endpoint": "/v1/models?chatgpt_mode=codex",
-        });
-    }
-
-    if kind == BrowserProviderKind::Chatgpt {
-        return json!({
-            "provider": "chatgpt",
-            "source": "playwright",
-            "api": "chat_completions",
-            "endpoints": [
-                "/backend-api/models",
-                "/backend-api/f/models",
-                "/backend-api/model_slug_availability",
-            ],
-            "request_endpoint": "/v1/models?chatgpt_mode=auto",
-        });
-    }
-
-    json!({
-        "provider": kind.as_str(),
-        "source": "fallback",
-        "request_endpoint": "/v1/models",
     })
 }
 
@@ -634,43 +487,26 @@ async fn request_browser_chat(
         body.model.clone()
     };
 
-    let preflight = browser_request_preflight(body)?;
+    let (system_prompt, conversation) = split_prompt(body);
     state
         .bridge
         .request(
             "chat",
             json!({
                 "model": model,
-                "prompt": preflight.conversation,
-                "system_prompt": if preflight.system_prompt.is_empty() { serde_json::Value::Null } else { serde_json::json!(preflight.system_prompt) },
+                "prompt": conversation,
+                "system_prompt": if system_prompt.is_empty() { serde_json::Value::Null } else { serde_json::json!(system_prompt) },
                 "web_search": body.web_search.unwrap_or(false),
-                "chatgpt_mode": body.chatgpt_mode.as_deref().unwrap_or("auto"),
             }),
         )
         .await
-}
-
-fn browser_request_preflight(body: &OpenAIRequest) -> Result<PromptPreflight> {
-    preflight_request_to_budget(
-        body,
-        &PromptPreflightOptions {
-            max_prompt_tokens: None,
-            extra_system_instructions: browser_tool_system_instructions(body),
-            dedup_system_blocks: false,
-            structured_compaction_max_chars: Some(18_000),
-        },
-        crate::proxy_core::estimate_tokens,
-    )
 }
 
 fn json_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatResponse) -> Response {
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
     let parsed = parse_browser_output(&body, &chat.text);
-    let rendered_prompt = browser_request_preflight(&body)
-        .map(|preflight| preflight.flat_prompt)
-        .unwrap_or_else(|_| build_prompt(&body));
-    let usage = usage_from_text(&rendered_prompt, &parsed.text, true);
+    let usage = usage_from_text(&build_prompt(&body), &parsed.text, true);
     let provider_warnings = build_provider_warnings(&state.config.kind, &body, &chat);
     let finish_reason = if parsed.tool_calls.is_empty() {
         "stop"
@@ -705,7 +541,10 @@ fn json_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRespo
             "finish_reason": finish_reason,
         }],
         "usage": usage,
-        "provider_metadata": browser_provider_metadata(&state.config.kind, &chat),
+        "provider_metadata": {
+            "provider": state.config.kind.as_str(),
+            "conversation_id": chat.conversation_id,
+        },
         "provider_warnings": provider_warnings,
     }))
     .into_response()
@@ -714,9 +553,7 @@ fn json_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRespo
 fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatResponse) -> Response {
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let model = chat.model.clone().unwrap_or_else(|| body.model.clone());
-    let prompt = browser_request_preflight(&body)
-        .map(|preflight| preflight.flat_prompt)
-        .unwrap_or_else(|_| build_prompt(&body));
+    let prompt = build_prompt(&body);
     let provider_warnings = build_provider_warnings(&state.config.kind, &body, &chat);
     let parsed = parse_browser_output(&body, &chat.text);
     let chunks = split_text_chunks(&parsed.text, 320);
@@ -791,7 +628,10 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
                 "finish_reason": finish_reason,
             }],
             "usage": usage_from_text(&prompt, &parsed.text, true),
-            "provider_metadata": browser_provider_metadata(&state.config.kind, &chat),
+            "provider_metadata": {
+                "provider": state.config.kind.as_str(),
+                "conversation_id": chat.conversation_id,
+            },
         })));
         yield Ok(sse_done());
     };
@@ -809,51 +649,6 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
         .into_response()
 }
 
-fn browser_tool_system_instructions(body: &OpenAIRequest) -> Option<String> {
-    body.tools.as_ref()?;
-
-    let mut prefix = String::from(
-        "BROWSER TOOL MODE\n\
-These tools are real and executable by the client in this session.\n\
-If user asks to test tools, inspect workspace/files, read code, write code, grep, glob, run commands, or understand repository state, do not answer in prose.\n\
-You must respond with one or more <tool_call>...</tool_call> blocks only.\n\
-Never say tools are unavailable, pasted text, unsupported, or not accessible from this session.\n",
-    );
-
-    if body.tool_choice.as_ref().and_then(Value::as_str) == Some("required") {
-        prefix.push_str(
-            "tool_choice is required. You must call one or more tools before any normal text.\n",
-        );
-    }
-
-    if let Some(name) = body
-        .tool_choice
-        .as_ref()
-        .and_then(|value| value.get("function"))
-        .and_then(|value| value.get("name"))
-        .and_then(Value::as_str)
-    {
-        prefix.push_str(&format!(
-            "tool_choice targets function `{name}`. Call that function unless arguments cannot be inferred.\n"
-        ));
-    }
-
-    Some(prefix.trim_end().to_owned())
-}
-
-fn clean_empty_tool_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    if trimmed
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .all(|line| matches!(line.trim(), "```" | "```json"))
-    {
-        String::new()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
 fn parse_browser_output(body: &OpenAIRequest, text: &str) -> ParsedBrowserOutput {
     let Some(_) = body.tools.as_ref() else {
         return ParsedBrowserOutput {
@@ -868,16 +663,8 @@ fn parse_browser_output(body: &OpenAIRequest, text: &str) -> ParsedBrowserOutput
     parsed.text.push_str(&flush.text);
     parsed.tool_calls.extend(flush.tool_calls);
 
-    if parsed.tool_calls.is_empty() {
-        let (cleaned, leaked) = extract_tool_calls_from_text(&parsed.text);
-        if !leaked.is_empty() {
-            parsed.text = clean_empty_tool_fence(&cleaned);
-            parsed.tool_calls = leaked;
-        }
-    }
-
     ParsedBrowserOutput {
-        text: clean_empty_tool_fence(&parsed.text),
+        text: parsed.text.trim().to_owned(),
         tool_calls: parsed
             .tool_calls
             .into_iter()
@@ -931,10 +718,6 @@ fn openai_responses_to_request(state: &AppState, body: &Value) -> Result<OpenAIR
         messages,
         stream: body.get("stream").and_then(Value::as_bool),
         web_search: body.get("web_search").and_then(Value::as_bool),
-        chatgpt_mode: body
-            .get("chatgpt_mode")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
         tools: openai_tools_from_value(body.get("tools")),
         tool_choice: body.get("tool_choice").cloned(),
         stream_options: None,
@@ -972,10 +755,6 @@ fn anthropic_to_openai_request(state: &AppState, body: &Value) -> Result<OpenAIR
         messages,
         stream: body.get("stream").and_then(Value::as_bool),
         web_search: body.get("web_search").and_then(Value::as_bool),
-        chatgpt_mode: body
-            .get("chatgpt_mode")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
         tools: anthropic_tools_from_value(body.get("tools")),
         tool_choice,
         stream_options: None,
@@ -1057,9 +836,13 @@ fn anthropic_message_to_openai_messages(message: &Value) -> Vec<Message> {
                 else {
                     continue;
                 };
+                let result_content = block
+                    .get("content")
+                    .map(value_to_text)
+                    .unwrap_or_else(String::new);
                 tool_results.push(Message {
                     role: "tool".to_owned(),
-                    content: block.get("content").cloned(),
+                    content: Some(Value::String(result_content)),
                     tool_calls: None,
                     tool_call_id: Some(tool_call_id),
                     name: None,
@@ -1152,7 +935,9 @@ fn response_input_item_to_messages(item: &Value) -> Vec<Message> {
             };
             vec![Message {
                 role: "tool".to_owned(),
-                content: item.get("output").cloned(),
+                content: Some(Value::String(
+                    item.get("output").map(value_to_text).unwrap_or_default(),
+                )),
                 tool_calls: None,
                 tool_call_id: Some(tool_call_id),
                 name: None,
@@ -1283,21 +1068,6 @@ fn value_to_text(value: &Value) -> String {
     }
 }
 
-fn browser_provider_metadata(kind: &BrowserProviderKind, chat: &BridgeChatResponse) -> Value {
-    let mut metadata = serde_json::Map::new();
-    metadata.insert("provider".to_owned(), json!(kind.as_str()));
-    if let Some(conversation_id) = &chat.conversation_id {
-        metadata.insert("conversation_id".to_owned(), json!(conversation_id));
-    }
-    if let Some(usage) = &chat.upstream_usage {
-        metadata.insert("upstream_usage".to_owned(), usage.clone());
-    }
-    if let Some(cache) = &chat.upstream_cache {
-        metadata.insert("upstream_cache".to_owned(), cache.clone());
-    }
-    Value::Object(metadata)
-}
-
 fn response_usage(usage: &Usage) -> Value {
     json!({
         "input_tokens": usage.prompt_tokens,
@@ -1343,7 +1113,10 @@ fn json_openai_response(
         "output": output,
         "output_text": parsed.text,
         "usage": response_usage(&usage),
-        "provider_metadata": browser_provider_metadata(&state.config.kind, &chat)
+        "provider_metadata": {
+            "provider": state.config.kind.as_str(),
+            "conversation_id": chat.conversation_id,
+        }
     }))
     .into_response()
 }
@@ -1401,7 +1174,10 @@ fn stream_openai_response(
             "model": model,
             "output_text": text,
             "usage": response_usage(&usage),
-            "provider_metadata": browser_provider_metadata(&state.config.kind, &chat)
+            "provider_metadata": {
+                "provider": state.config.kind.as_str(),
+                "conversation_id": chat.conversation_id,
+            }
         }))));
     };
 
@@ -1452,7 +1228,10 @@ fn json_anthropic_response(
             "input_tokens": usage.prompt_tokens,
             "output_tokens": usage.completion_tokens,
         },
-        "provider_metadata": browser_provider_metadata(&state.config.kind, &chat)
+        "provider_metadata": {
+            "provider": state.config.kind.as_str(),
+            "conversation_id": chat.conversation_id,
+        }
     }))
     .into_response()
 }
@@ -1683,58 +1462,13 @@ fn json_error(status: StatusCode, message: String) -> Response {
 mod tests {
     use super::{
         anthropic_message_to_openai_messages, anthropic_tool_choice_to_openai,
-        anthropic_tools_from_value, browser_provider_metadata, browser_request_preflight,
-        browser_tool_system_instructions, coerce_agent_model, fallback_model_payload_for,
-        model_discovery_timeout, model_payload_item, openai_tools_from_value, parse_browser_output,
-        require_api_key, response_input_to_messages, BridgeChatResponse, BrowserProviderKind,
+        anthropic_tools_from_value, coerce_agent_model, fallback_model_payload_for,
+        model_discovery_timeout, openai_tools_from_value, parse_browser_output, require_api_key,
+        response_input_to_messages, BrowserProviderKind,
     };
-    use crate::proxy_core::{FunctionToolDefinition, FunctionToolSpec, Message, OpenAIRequest};
+    use crate::proxy_core::{FunctionToolDefinition, FunctionToolSpec, OpenAIRequest};
     use axum::http::{header, HeaderMap, HeaderValue};
     use serde_json::{json, Value};
-
-    #[test]
-    fn openai_request_deserializes_chatgpt_mode() {
-        let request: OpenAIRequest = serde_json::from_value(json!({
-            "model": "chatgpt:gpt-5-3",
-            "messages": [],
-            "chatgpt_mode": "web"
-        }))
-        .expect("request");
-
-        assert_eq!(request.chatgpt_mode.as_deref(), Some("web"));
-    }
-
-    #[test]
-    fn chatgpt_advertises_web_search_support() {
-        assert!(BrowserProviderKind::Chatgpt.web_search_supported());
-        assert!(!BrowserProviderKind::Gemini.web_search_supported());
-    }
-
-    #[test]
-    fn chatgpt_model_payload_marks_codex_billing_and_tools() {
-        let item = model_payload_item(BrowserProviderKind::Chatgpt, "gpt-5.3-codex", json!({}));
-
-        assert_eq!(item["api"], "codex_responses");
-        assert_eq!(item["billing"], "Codex billing usage");
-        assert_eq!(item["tool_call"], true);
-        assert_eq!(
-            item["description"],
-            "Uses Codex OAuth Responses API; usage is billed/limited as Codex usage."
-        );
-    }
-
-    #[test]
-    fn chatgpt_model_payload_marks_web_chat_completions() {
-        let item = model_payload_item(BrowserProviderKind::Chatgpt, "gpt-5-3", json!({}));
-
-        assert_eq!(item["api"], "chat_completions");
-        assert_eq!(item["billing"], "ChatGPT subscription/web-session usage");
-        assert_eq!(item["tool_call"], true);
-        assert_eq!(
-            item["description"],
-            "Uses Chat Completions API compatibility through the ChatGPT web session."
-        );
-    }
 
     #[test]
     fn browser_model_fallback_uses_provider_default() {
@@ -1808,111 +1542,6 @@ mod tests {
     }
 
     #[test]
-    fn browser_tool_system_instructions_tell_tools_they_are_real() {
-        let request = OpenAIRequest {
-            model: "chatgpt-web-session".to_owned(),
-            messages: vec![],
-            stream: Some(false),
-            web_search: Some(false),
-            chatgpt_mode: Some("web".to_owned()),
-            tools: Some(vec![FunctionToolDefinition {
-                tool_type: "function".to_owned(),
-                function: Some(FunctionToolSpec {
-                    name: "bash".to_owned(),
-                    description: Some("Run command".to_owned()),
-                    parameters: None,
-                    strict: None,
-                }),
-                name: None,
-                description: None,
-            }]),
-            tool_choice: Some(json!("required")),
-            stream_options: None,
-        };
-        let instructions = browser_tool_system_instructions(&request).expect("tool instructions");
-
-        assert!(instructions.contains("These tools are real and executable"));
-        assert!(instructions.contains("tool_choice is required"));
-    }
-
-    #[test]
-    fn browser_request_preflight_keeps_tool_mode_in_system_lane() {
-        let request = OpenAIRequest {
-            model: "chatgpt-web-session".to_owned(),
-            messages: vec![Message {
-                role: "user".to_owned(),
-                content: Some(Value::String("Test your tools.".to_owned())),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-                reasoning_content: None,
-            }],
-            stream: Some(false),
-            web_search: Some(false),
-            chatgpt_mode: Some("web".to_owned()),
-            tools: Some(vec![FunctionToolDefinition {
-                tool_type: "function".to_owned(),
-                function: Some(FunctionToolSpec {
-                    name: "bash".to_owned(),
-                    description: Some("Run command".to_owned()),
-                    parameters: None,
-                    strict: None,
-                }),
-                name: None,
-                description: None,
-            }]),
-            tool_choice: Some(json!("required")),
-            stream_options: None,
-        };
-        let preflight = browser_request_preflight(&request).expect("preflight");
-
-        assert!(preflight.system_prompt.contains("BROWSER TOOL MODE"));
-        assert!(preflight
-            .system_prompt
-            .contains("These tools are real and executable"));
-        assert!(preflight
-            .system_prompt
-            .contains("You must respond with one or more <tool_call>"));
-        assert!(preflight.system_prompt.contains("tool_choice is required"));
-        assert!(preflight.system_prompt.contains("# TOOLS AVAILABLE"));
-        assert!(!preflight.conversation.contains("BROWSER TOOL MODE"));
-        assert!(preflight.conversation.contains("User: Test your tools."));
-    }
-
-    #[test]
-    fn browser_parser_lifts_fenced_json_tool_call_like_deepseek() {
-        let parsed = parse_browser_output(
-            &OpenAIRequest {
-                model: "chatgpt-web-session".to_owned(),
-                messages: Vec::new(),
-                stream: Some(false),
-                web_search: Some(false),
-                chatgpt_mode: None,
-                tools: Some(vec![FunctionToolDefinition {
-                    tool_type: "function".to_owned(),
-                    function: Some(FunctionToolSpec {
-                        name: "bash".to_owned(),
-                        description: None,
-                        parameters: None,
-                        strict: None,
-                    }),
-                    name: None,
-                    description: None,
-                }]),
-                tool_choice: None,
-                stream_options: None,
-            },
-            r#"```json
-{"name":"bash","arguments":{"cmd":"pwd"}}
-```"#,
-        );
-
-        assert_eq!(parsed.text, "");
-        assert_eq!(parsed.tool_calls.len(), 1);
-        assert_eq!(parsed.tool_calls[0].function.name, "bash");
-    }
-
-    #[test]
     fn browser_parser_extracts_tool_calls_from_markup() {
         let parsed = parse_browser_output(
             &OpenAIRequest {
@@ -1920,7 +1549,6 @@ mod tests {
                 messages: Vec::new(),
                 stream: Some(false),
                 web_search: Some(false),
-                chatgpt_mode: None,
                 tools: Some(vec![FunctionToolDefinition {
                     tool_type: "function".to_owned(),
                     function: Some(FunctionToolSpec {
@@ -2005,23 +1633,6 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_tool_results_preserve_structured_content() {
-        let user = anthropic_message_to_openai_messages(&json!({
-            "role": "user",
-            "content": [
-                { "type": "tool_result", "tool_use_id": "toolu_1", "content": { "rows": [1, 2, 3], "status": "ok" } }
-            ]
-        }));
-
-        assert_eq!(user.len(), 1);
-        assert_eq!(user[0].role, "tool");
-        assert_eq!(
-            user[0].content,
-            Some(json!({ "rows": [1, 2, 3], "status": "ok" }))
-        );
-    }
-
-    #[test]
     fn anthropic_any_tool_choice_maps_to_openai_required() {
         assert_eq!(
             anthropic_tool_choice_to_openai(Some(&json!({ "type": "any" }))),
@@ -2049,22 +1660,6 @@ mod tests {
         );
         assert_eq!(messages[2].role, "tool");
         assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_1"));
-    }
-
-    #[test]
-    fn responses_input_preserves_structured_function_call_outputs() {
-        let messages = response_input_to_messages(Some(&json!([
-            { "role": "user", "content": "read it" },
-            { "type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{\"path\":\"Cargo.toml\"}" },
-            { "type": "function_call_output", "call_id": "call_1", "output": { "summary": "ok", "items": [1, 2, 3] } }
-        ])));
-
-        assert_eq!(messages.len(), 3);
-        assert_eq!(messages[2].role, "tool");
-        assert_eq!(
-            messages[2].content,
-            Some(json!({ "summary": "ok", "items": [1, 2, 3] }))
-        );
     }
 
     #[test]
@@ -2145,7 +1740,6 @@ mod tests {
                 messages: Vec::new(),
                 stream: None,
                 web_search: None,
-                chatgpt_mode: None,
                 tools: None,
                 tool_choice: None,
                 stream_options: None,
@@ -2221,39 +1815,6 @@ mod tests {
             ]
         }));
         assert!(!msgs.is_empty());
-    }
-
-    #[test]
-    fn browser_provider_metadata_passes_only_present_upstream_fields() {
-        let empty = BridgeChatResponse {
-            text: String::new(),
-            reasoning_content: None,
-            model: None,
-            conversation_id: None,
-            warning: None,
-            upstream_usage: None,
-            upstream_cache: None,
-        };
-        assert_eq!(
-            browser_provider_metadata(&BrowserProviderKind::Chatgpt, &empty),
-            json!({ "provider": "chatgpt" })
-        );
-
-        let observed = BridgeChatResponse {
-            upstream_usage: Some(
-                json!({ "input_tokens": 7, "input_tokens_details": { "cached_tokens": 2 } }),
-            ),
-            upstream_cache: Some(json!({ "cache-control": "private, no-store" })),
-            ..empty
-        };
-        assert_eq!(
-            browser_provider_metadata(&BrowserProviderKind::Chatgpt, &observed),
-            json!({
-                "provider": "chatgpt",
-                "upstream_usage": { "input_tokens": 7, "input_tokens_details": { "cached_tokens": 2 } },
-                "upstream_cache": { "cache-control": "private, no-store" },
-            })
-        );
     }
 
     #[test]

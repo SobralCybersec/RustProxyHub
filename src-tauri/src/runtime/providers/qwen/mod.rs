@@ -16,8 +16,9 @@ use crate::browser_bridge::{
     PlaywrightBridge,
 };
 use crate::proxy_core::{
-    build_prompt, constant_time_eq, current_timestamp, sse_done, sse_json, usage_from_text,
-    MessageToolCall, OpenAIRequest, StreamingToolParser, ToolCallFunction,
+    constant_time_eq, current_timestamp, preflight_request_to_budget, sse_done, sse_json,
+    usage_from_text, MessageToolCall, OpenAIRequest, PromptPreflightOptions, StreamingToolParser,
+    ToolCallFunction,
 };
 use anyhow::{anyhow, Result};
 use async_stream::stream;
@@ -488,7 +489,10 @@ async fn chat_completions_stop(
 }
 
 async fn fetch_models(state: &AppState) -> Result<Value> {
-    if let Some(cached) = state.cache.get_json("models:qwen").await {
+    // Version cache key so newly registered models are not hidden by an older
+    // process-local catalogue after the registry changes.
+    const CACHE_KEY: &str = "models:qwen:v2";
+    if let Some(cached) = state.cache.get_json(CACHE_KEY).await {
         return Ok(cached);
     }
 
@@ -500,7 +504,7 @@ async fn fetch_models(state: &AppState) -> Result<Value> {
     state
         .cache
         .set_json(
-            "models:qwen",
+            CACHE_KEY,
             payload.clone(),
             Some(state.config.cache.response_ttl),
         )
@@ -546,15 +550,41 @@ async fn fallback_models_payload(state: &AppState, warning: String) -> Value {
     json!({
         "object": "list",
         "data": data,
-        "source": "fallback",
+        "source": "registry",
+        "discovery": {
+            "provider": "qwen",
+            "source": "registry",
+            "api": "chat_completions",
+            "endpoint": "/v1/models",
+            "live": false,
+            "catalogue_fields": ["data"],
+        },
         "warning": warning,
     })
 }
 
 async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
     let (normalized, pending_uploads) = normalize_request(&body);
-    let truncated = truncate_request(&normalized, &state.model_registry).await;
-    let final_prompt = build_prompt(&truncated);
+    let prompt_budget = state
+        .model_registry
+        .context_window(&normalized.model)
+        .await
+        .saturating_sub(1000);
+    let preflight = preflight_request_to_budget(
+        &normalized,
+        &PromptPreflightOptions {
+            max_prompt_tokens: Some(prompt_budget),
+            extra_system_instructions: None,
+            dedup_system_blocks: false,
+            structured_compaction_max_chars: None,
+        },
+        |text| {
+            state
+                .model_registry
+                .estimate_tokens(text, &normalized.model)
+        },
+    )?;
+    let final_prompt = preflight.flat_prompt;
     let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
     let is_stream = body.stream.unwrap_or(false);
     let include_usage = body
@@ -1618,77 +1648,6 @@ fn collect_upload(
             kind: kind.to_owned(),
             url: url.to_owned(),
         });
-    }
-}
-
-async fn truncate_request(request: &OpenAIRequest, registry: &ModelRegistry) -> OpenAIRequest {
-    let limit = registry
-        .context_window(&request.model)
-        .await
-        .saturating_sub(1000);
-    let prompt = build_prompt(request);
-    if registry.estimate_tokens(&prompt, &request.model) <= limit {
-        return request.clone();
-    }
-
-    let system_messages = request
-        .messages
-        .iter()
-        .filter(|message| message.role == "system")
-        .cloned()
-        .collect::<Vec<_>>();
-    let other_messages = request
-        .messages
-        .iter()
-        .filter(|message| message.role != "system")
-        .cloned()
-        .collect::<Vec<_>>();
-
-    // Estimate system+tools cost once (build_prompt appends tool instructions to system_prompt).
-    let system_only = OpenAIRequest {
-        model: request.model.clone(),
-        messages: system_messages.clone(),
-        stream: request.stream,
-        web_search: request.web_search,
-        tools: request.tools.clone(),
-        tool_choice: request.tool_choice.clone(),
-        stream_options: request.stream_options.clone(),
-    };
-    let system_tokens = registry.estimate_tokens(&build_prompt(&system_only), &request.model);
-    let remaining = limit.saturating_sub(system_tokens);
-
-    // Walk newest→oldest; estimate each message once; accumulate running total.
-    // ponytail: per-message build_prompt is O(msg_len); total is O(n) over all content.
-    let mut running = 0usize;
-    let mut kept_reversed = Vec::new();
-    for message in other_messages.iter().rev() {
-        let msg_only = OpenAIRequest {
-            model: request.model.clone(),
-            messages: vec![message.clone()],
-            stream: request.stream,
-            web_search: request.web_search,
-            tools: None, // tools already counted in system_tokens above
-            tool_choice: None,
-            stream_options: request.stream_options.clone(),
-        };
-        let msg_tokens = registry.estimate_tokens(&build_prompt(&msg_only), &request.model);
-        if running + msg_tokens <= remaining {
-            running += msg_tokens;
-            kept_reversed.push(message.clone());
-        }
-    }
-
-    kept_reversed.reverse();
-    let mut messages = system_messages;
-    messages.extend(kept_reversed);
-    OpenAIRequest {
-        model: request.model.clone(),
-        messages,
-        stream: request.stream,
-        web_search: request.web_search,
-        tools: request.tools.clone(),
-        tool_choice: request.tool_choice.clone(),
-        stream_options: request.stream_options.clone(),
     }
 }
 

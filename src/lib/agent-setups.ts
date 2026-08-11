@@ -75,14 +75,33 @@ export function buildClaudeSetup(provider: ProviderOverview): AgentSetup {
   }
 }
 
+function kiloModelEntry(provider: ProviderOverview, model: string) {
+  const codex = provider.name === 'chatgpt' && model.toLowerCase().includes('codex')
+  return {
+    name: `${provider.name} ${model}`,
+    description: codex
+      ? 'Uses RustProxyHub Codex mode; Codex proxy features and Codex billing/usage.'
+      : 'Uses RustProxyHub Chat Completions-compatible mode through the provider session.',
+    tool_call: true,
+    reasoning: model.includes('thinking') || model.includes('reasoning') || codex || /^o\d/i.test(model),
+    temperature: !(codex || /^o\d/i.test(model)),
+    limit: {
+      context: 128000,
+      output: 16384,
+    },
+  }
+}
+
 export function buildKiloSetup(provider: ProviderOverview): AgentSetup {
+  const models = Object.fromEntries(providerModels(provider).map(model => [model, kiloModelEntry(provider, model)]))
   const model = primaryModel(provider)
   return {
     supported: true,
-    target: 'kilo.json',
+    target: 'kilo.jsonc',
     summary: `Kilo openai-compatible snippet for ${provider.name} -> ${provider.base_url}`,
     content: JSON.stringify(
       {
+        $schema: 'https://app.kilo.ai/config.json',
         model: `openai-compatible/${model}`,
         provider: {
           'openai-compatible': {
@@ -90,12 +109,7 @@ export function buildKiloSetup(provider: ProviderOverview): AgentSetup {
               apiKey: '<set-your-RUST_PROXY_HUB_API_KEY>',
               baseURL: `${provider.base_url}/v1`,
             },
-            models: {
-              [model]: {
-                name: `${provider.name} ${model}`,
-                tool_call: true,
-              },
-            },
+            models,
           },
         },
       },

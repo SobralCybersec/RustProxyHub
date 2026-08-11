@@ -62,9 +62,20 @@ describe('agent setup helpers', () => {
     const setup = buildKiloSetup(makeProvider({ name: 'chatgpt', base_url: 'http://127.0.0.1:3003', models: [] }))
 
     expect(setup.supported).toBe(true)
-    expect(setup.target).toBe('kilo.json')
+    expect(setup.target).toBe('kilo.jsonc')
     expect(setup.content).toContain('"baseURL": "http://127.0.0.1:3003/v1"')
     expect(setup.content).toContain('"tool_call": true')
     expect(setup.content).toContain('chatgpt-web-session')
+  })
+
+  it('lists every Kilo provider model with tool metadata', () => {
+    const setup = buildKiloSetup(makeProvider())
+    const parsed = JSON.parse(setup.content)
+    const models = parsed.provider['openai-compatible'].models
+
+    expect(models['deepseek-v4-pro'].tool_call).toBe(true)
+    expect(models['deepseek-v4-pro-thinking'].tool_call).toBe(true)
+    expect(models['deepseek-v4-pro-thinking'].reasoning).toBe(true)
+    expect(models['deepseek-v4-pro'].limit.context).toBe(128000)
   })
 })

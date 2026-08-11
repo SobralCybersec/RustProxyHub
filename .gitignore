@@ -9,6 +9,7 @@ lerna-debug.log*
 node_modules.bak
 node_modules_clean
 runtime-test
+research/
 
 front-end-example
 node_modules

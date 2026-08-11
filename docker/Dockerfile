@@ -25,12 +25,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libayatana-appindicator3-dev libxdo-dev libssl-dev patchelf \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Rust: stable + clippy + rustfmt + cargo-audit ──
+# ── Rust 1.96.1 + clippy + rustfmt + cargo-audit ──
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --default-toolchain stable \
+      | sh -s -- -y --profile minimal --default-toolchain 1.96.1 \
         -c clippy -c rustfmt \
     && cargo install cargo-audit --locked
 
@@ -60,4 +60,4 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ponytail: single-stage builder, no cargo-chef. The cache mounts above
 # already skip dep re-downloads; if compile time becomes the bottleneck,
 # split into chef planner/cacher stages. Not worth it for a CI box today.
-CMD ["sh", "-c", "pnpm lint && pnpm type-check && pnpm test --run && node ./scripts/prepare-tauri-playwright-resources.mjs && pnpm build && cargo fmt --manifest-path src-tauri/Cargo.toml --all --check && cargo test --manifest-path src-tauri/Cargo.toml && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo audit -f src-tauri/Cargo.lock"]
+CMD ["sh", "-c", "pnpm lint && pnpm type-check && pnpm test --run && pnpm test:node && node ./scripts/prepare-tauri-playwright-resources.mjs && pnpm build && cargo fmt --manifest-path src-tauri/Cargo.toml --all --check && cargo test --manifest-path src-tauri/Cargo.toml && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo audit -f src-tauri/Cargo.lock"]

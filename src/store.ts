@@ -34,6 +34,18 @@ const defaultBrowserPrefs: BrowserPrefs = {
 }
 
 type BusyMap = Record<string, boolean>
+type WorkbenchChatGptMode = 'web' | 'codex'
+
+const chatGptCompletionsModels = new Set([
+  'gpt-5-3',
+  'gpt-5.5',
+  'gpt-5.5-thinking',
+  'gpt-5',
+  'gpt-4.1',
+  'o3',
+  'o4-mini',
+  'chatgpt-web-session',
+])
 
 function describeError(error: unknown) {
   return error instanceof Error ? error.message : String(error)
@@ -41,6 +53,18 @@ function describeError(error: unknown) {
 
 function formatHubModel(provider: ProviderName, model: string) {
   return model.startsWith(`${provider}:`) ? model : `${provider}:${model}`
+}
+
+function rawChatGptModel(model: string) {
+  return model.replace(/^chatgpt:/i, '')
+}
+
+function matchesChatGptMode(model: string, mode: WorkbenchChatGptMode, api?: string) {
+  if (!model.startsWith('chatgpt:')) return true
+  if (api) return mode === 'web' ? api === 'chat_completions' : api === 'codex_responses'
+  const raw = rawChatGptModel(model)
+  const completions = chatGptCompletionsModels.has(raw) || !raw.toLowerCase().includes('codex')
+  return mode === 'web' ? completions : !completions
 }
 
 async function copyText(value: string) {
@@ -79,6 +103,9 @@ export const useStore = defineStore('main', {
     workbenchModel: '',
     workbenchPrompt: defaultWorkbenchPrompt(loadLocale()),
     workbenchWebSearch: false,
+    workbenchChatGptMode: 'web' as WorkbenchChatGptMode,
+    workbenchChatGptModels: [] as string[],
+    workbenchChatGptModelModes: {} as Record<string, string>,
     workbenchResponse: '',
   }),
 
@@ -115,7 +142,18 @@ export const useStore = defineStore('main', {
 
     hubModelOptions(): string[] {
       const providers = this.overview?.providers ?? []
-      const models = providers.flatMap(provider => provider.models.map(model => formatHubModel(provider.name, model)))
+      const models = providers.flatMap(provider =>
+        (provider.name === 'chatgpt' && this.workbenchChatGptModels.length
+          ? this.workbenchChatGptModels.map(model => ({
+              model,
+              api: this.workbenchChatGptModelModes[model],
+            }))
+          : provider.models.map(model => ({ model, api: provider.model_modes?.[model] }))
+        )
+          .map(item => ({ model: formatHubModel(provider.name, item.model), api: item.api }))
+          .filter(item => matchesChatGptMode(item.model, this.workbenchChatGptMode, item.api))
+          .map(item => item.model)
+      )
       return Array.from(new Set(models))
     },
 
@@ -141,6 +179,10 @@ export const useStore = defineStore('main', {
 
     runtimeIssues(state): string[] {
       return state.overview?.runtime.issues ?? []
+    },
+
+    isWorkbenchChatGptModel(state): boolean {
+      return state.workbenchModel.startsWith('chatgpt:')
     },
   },
 
@@ -183,6 +225,12 @@ export const useStore = defineStore('main', {
       }
     },
 
+    setWorkbenchChatGptMode(mode: WorkbenchChatGptMode) {
+      this.workbenchChatGptMode = mode
+      void this.refreshWorkbenchChatGptModels(mode)
+      this.syncWorkbenchModel()
+    },
+
     async runTask<T>(key: string, task: () => Promise<T>): Promise<T> {
       this.setBusy(key, true)
       this.error = ''
@@ -214,6 +262,26 @@ export const useStore = defineStore('main', {
       this.providerDetails[provider] = await invoke<ProviderDetails>('provider_details', { provider })
     },
 
+    async refreshWorkbenchChatGptModels(mode?: WorkbenchChatGptMode) {
+      const selectedMode = mode ?? this.workbenchChatGptMode
+      try {
+        const provider = await invoke<ProviderOverview>('provider_models', {
+          provider: 'chatgpt',
+          chatgpt_mode: selectedMode,
+        })
+        if (this.workbenchChatGptMode !== selectedMode) return
+        this.workbenchChatGptModels = provider.models
+        this.workbenchChatGptModelModes = provider.model_modes ?? {}
+        this.syncWorkbenchModel()
+      } catch {
+        if (this.workbenchChatGptMode === selectedMode) {
+          this.workbenchChatGptModels = []
+          this.workbenchChatGptModelModes = {}
+          this.syncWorkbenchModel()
+        }
+      }
+    },
+
     async refreshProviderLogs(provider: ProviderName | 'hub') {
       const response = await invoke<ProviderLogs>('provider_logs', { provider })
       this.providerLogs[provider] = response.entries
@@ -223,6 +291,7 @@ export const useStore = defineStore('main', {
       if (this.isInitialized) return
       this.isInitialized = true
       await this.refreshOverview()
+      await this.refreshWorkbenchChatGptModels()
       this.syncWorkbenchModel()
 
       // Real Tauri: subscribe to push events from Rust for zero-latency dashboard updates.
@@ -338,7 +407,12 @@ export const useStore = defineStore('main', {
       }
       await this.runTask('workbench:run', async () => {
         const response = await invoke<unknown>('run_workbench_request', {
-          request: { model, prompt, web_search: this.workbenchWebSearch },
+          request: {
+            model,
+            prompt,
+            web_search: this.workbenchWebSearch,
+            chatgpt_mode: this.isWorkbenchChatGptModel ? this.workbenchChatGptMode : 'auto',
+          },
         })
         this.workbenchResponse = JSON.stringify(response ?? { error: this.t('store.nullWorkbenchResponse') }, null, 2)
         await this.refreshOverview()

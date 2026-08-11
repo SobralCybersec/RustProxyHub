@@ -284,6 +284,10 @@ export const messages: Record<UiLocale, MessageTree> = {
       closeLoginFirst: 'Feche sessão de login ativa antes de executar probe live.',
       model: 'Modelo',
       webSearch: 'Web search',
+      chatGptMode: 'Modo ChatGPT',
+      chatGptWeb: 'Chat web',
+      chatGptCodex: 'Codex',
+      chatGptModeHint: 'Chat web usa modelos descobertos da sessão ChatGPT; Codex usa modelos da conta Codex.',
       prompt: 'Prompt',
       promptPlaceholder: 'Peça resposta smoke e confirme qual provider respondeu.',
       buttons: {
@@ -614,6 +618,10 @@ export const messages: Record<UiLocale, MessageTree> = {
       closeLoginFirst: 'Close the active login session before running live probe.',
       model: 'Model',
       webSearch: 'Web search',
+      chatGptMode: 'ChatGPT mode',
+      chatGptWeb: 'Web chat',
+      chatGptCodex: 'Codex',
+      chatGptModeHint: 'Web chat uses discovered ChatGPT session models; Codex uses Codex account models.',
       prompt: 'Prompt',
       promptPlaceholder: 'Ask for a smoke answer and confirm which provider replied.',
       buttons: {

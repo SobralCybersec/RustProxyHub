@@ -98,7 +98,45 @@ export function shouldRefreshAccessToken(accessToken, lastRefresh, now = Date.no
   return Number.isFinite(refreshedAt) && refreshedAt <= now - REFRESH_INTERVAL_MS
 }
 
-export function buildCodexResponsesRequest({ model, prompt, instructions, modelInfo = null, webSearch = false }) {
+function responseTools(tools) {
+  if (!Array.isArray(tools)) return []
+  return tools
+    .map(tool => {
+      const spec = tool?.type === 'function' ? tool.function : tool
+      const name = typeof spec?.name === 'string' ? spec.name.trim() : ''
+      if (!name) return null
+      return {
+        type: 'function',
+        name,
+        ...(typeof spec.description === 'string' ? { description: spec.description } : {}),
+        parameters: spec.parameters && typeof spec.parameters === 'object'
+          ? spec.parameters
+          : { type: 'object', properties: {} },
+        ...(typeof spec.strict === 'boolean' ? { strict: spec.strict } : {}),
+      }
+    })
+    .filter(Boolean)
+}
+
+function responseToolChoice(toolChoice) {
+  if (typeof toolChoice === 'string') return toolChoice
+  if (!isRecord(toolChoice)) return null
+  if (toolChoice.type === 'function') {
+    const name = toolChoice.function?.name || toolChoice.name
+    return typeof name === 'string' && name.trim() ? { type: 'function', name: name.trim() } : null
+  }
+  return toolChoice
+}
+
+export function buildCodexResponsesRequest({
+  model,
+  prompt,
+  instructions,
+  modelInfo = null,
+  webSearch = false,
+  tools = [],
+  toolChoice = null,
+}) {
   const userInput = {
     role: 'user',
     content: [{ type: 'input_text', text: prompt }],
@@ -124,6 +162,11 @@ export function buildCodexResponsesRequest({ model, prompt, instructions, modelI
   }
 
   if (webSearch) body.force_use_tool = 'web'
+
+  const normalizedTools = responseTools(tools)
+  if (normalizedTools.length > 0) body.tools = normalizedTools
+  const normalizedToolChoice = responseToolChoice(toolChoice)
+  if (normalizedToolChoice) body.tool_choice = normalizedToolChoice
 
   if (modelInfo?.use_responses_lite === true) {
     if (body.instructions) {
@@ -207,15 +250,6 @@ function textFromResponse(response) {
   return collectTextFields(response).join('')
 }
 
-export function upstreamCacheMetadata(headers) {
-  const cache = {}
-  for (const name of ['cache-control', 'age', 'cf-cache-status']) {
-    const value = headers?.get?.(name)
-    if (value) cache[name] = value
-  }
-  return Object.keys(cache).length ? cache : null
-}
-
 function errorFromEvent(event) {
   const error = event?.error || event?.response?.error
   if (typeof error === 'string') return error
@@ -230,6 +264,31 @@ export async function collectCodexResponse(stream) {
   let reasoning = ''
   let refusal = ''
   let latestResponse = null
+  const functionCalls = new Map()
+
+  const upsertFunctionCall = (item, appendArguments = false) => {
+    if (!isRecord(item)) return
+    const itemId = item.item_id || item.id || item.call_id || `call_${functionCalls.size + 1}`
+    let entry = functionCalls.get(itemId)
+    if (!entry && item.call_id) {
+      entry = [...functionCalls.values()].find(call => call.call_id === item.call_id)
+    }
+    if (!entry) {
+      entry = { call_id: item.call_id || itemId, name: '', arguments: '' }
+      functionCalls.set(itemId, entry)
+    }
+    if (typeof item.call_id === 'string' && item.call_id) entry.call_id = item.call_id
+    if (typeof item.name === 'string' && item.name) entry.name = item.name
+    if (typeof item.arguments === 'string') {
+      entry.arguments = appendArguments ? `${entry.arguments}${item.arguments}` : item.arguments
+    }
+  }
+
+  const captureResponseFunctions = response => {
+    for (const item of response?.output || []) {
+      if (item?.type === 'function_call') upsertFunctionCall(item)
+    }
+  }
 
   for await (const event of iterateSse(stream)) {
     if (!event.data || event.data === '[DONE]') continue
@@ -246,21 +305,45 @@ export async function collectCodexResponse(stream) {
       reasoning += parsed.delta
     }
     if (type === 'response.refusal.delta' && typeof parsed.delta === 'string') refusal += parsed.delta
+    if (type === 'response.output_item.added' && parsed.item?.type === 'function_call') {
+      upsertFunctionCall(parsed.item)
+    }
+    if (type === 'response.function_call_arguments.delta' && typeof parsed.delta === 'string') {
+      upsertFunctionCall({ item_id: parsed.item_id, arguments: parsed.delta }, true)
+    }
+    if (type === 'response.function_call_arguments.done') {
+      upsertFunctionCall({
+        item_id: parsed.item_id,
+        call_id: parsed.call_id,
+        name: parsed.name,
+        arguments: parsed.arguments,
+      })
+    }
+    if (type === 'response.output_item.done' && parsed.item?.type === 'function_call') {
+      upsertFunctionCall(parsed.item)
+    }
     if (isRecord(parsed.response)) latestResponse = parsed.response
     if (type === 'error' || type === 'response.failed' || type === 'response.incomplete') {
       throw new Error(errorFromEvent(parsed) || `Codex response ended with ${type}`)
     }
   }
 
+  captureResponseFunctions(latestResponse)
   if (!text) text = textFromResponse(latestResponse)
   if (!text && refusal) text = refusal
-  if (!text) throw new Error('Codex response completed without assistant text')
+  const toolCalls = [...functionCalls.values()]
+    .filter(call => call.name)
+    .map((call, index) => ({
+      id: call.call_id || `call_${index + 1}`,
+      type: 'function',
+      function: { name: call.name, arguments: call.arguments || '{}' },
+    }))
+  if (!text && !toolCalls.length) throw new Error('Codex response completed without assistant text or tool call')
   return {
     text,
     reasoningContent: reasoning || null,
     responseId: typeof latestResponse?.id === 'string' ? latestResponse.id : null,
-    upstreamUsage: isRecord(latestResponse?.usage) ? latestResponse.usage : null,
-    upstreamCache: isRecord(latestResponse?.cache) ? latestResponse.cache : null,
+    toolCalls,
   }
 }
 
@@ -292,9 +375,6 @@ export class ChatGptOAuthClient {
     this.loginServer = null
     this.loginTimer = null
     this.modelCache = null
-    this.modelsPromise = null
-    this.sessionPromise = null
-    this.refreshPromise = null
   }
 
   authCandidates() {
@@ -359,28 +439,10 @@ export class ChatGptOAuthClient {
   }
 
   async loadSession(forceRefresh = false) {
-    const activePromise = forceRefresh ? this.refreshPromise : this.sessionPromise
-    if (activePromise) return activePromise
-
-    const promise = this.loadSessionOnce(forceRefresh)
-    if (forceRefresh) this.refreshPromise = promise
-    else this.sessionPromise = promise
-    try {
-      return await promise
-    } finally {
-      if (forceRefresh && this.refreshPromise === promise) this.refreshPromise = null
-      if (!forceRefresh && this.sessionPromise === promise) this.sessionPromise = null
-    }
-  }
-
-  async loadSessionOnce(forceRefresh = false) {
     const loaded = await this.readAuthFile()
     let auth = loaded.value
     let tokens = isRecord(auth.tokens) ? auth.tokens : {}
-    if (
-      tokens.refresh_token &&
-      (forceRefresh || shouldRefreshAccessToken(tokens.access_token, auth.last_refresh))
-    ) {
+    if (tokens.refresh_token && (forceRefresh || shouldRefreshAccessToken(tokens.access_token, auth.last_refresh))) {
       const refreshed = await this.requestTokens(
         {
           grant_type: 'refresh_token',
@@ -428,48 +490,39 @@ export class ChatGptOAuthClient {
     const session = await this.loadSession()
     const response = await send(session)
     if (response.status !== 401 || !session.canRefresh) return response
+
     return send(await this.loadSession(true))
   }
 
   async models() {
     if (this.modelCache && this.modelCache.expiresAt > Date.now()) return this.modelCache.models
-    if (this.modelsPromise) return this.modelsPromise
-
-    const promise = (async () => {
-      const endpoint = `/models?client_version=${CODEX_CLIENT_VERSION}`
-      const response = await this.authenticatedFetch(endpoint)
-      const raw = await response.text()
-      if (!response.ok) throw upstreamError(response.status, raw)
-      const payload = JSON.parse(raw)
-      const rawModels = codexModelItems(payload)
-      const catalogueFields = ['models', 'data'].filter(field => Array.isArray(payload?.[field]))
-      const models = rawModels.filter(
-        item =>
-          item.supported_in_api !== false &&
-          isCodexApiModelSlug(item.slug)
-      )
-      if (models.length === 0) throw new Error('Codex returned an empty models list')
-      this.modelCache = {
-        models,
-        discovery: {
-          provider: 'codex',
-          source: 'oauth',
-          api: 'codex_responses',
-          endpoint: `/backend-api/codex${endpoint}`,
-          catalogue_fields: catalogueFields,
-          raw_count: rawModels.length,
-          accepted_count: models.length,
-        },
-        expiresAt: Date.now() + MODEL_CACHE_MS,
-      }
-      return models
-    })()
-    this.modelsPromise = promise
-    try {
-      return await promise
-    } finally {
-      if (this.modelsPromise === promise) this.modelsPromise = null
+    const endpoint = `/models?client_version=${CODEX_CLIENT_VERSION}`
+    const response = await this.authenticatedFetch(endpoint)
+    const raw = await response.text()
+    if (!response.ok) throw upstreamError(response.status, raw)
+    const payload = JSON.parse(raw)
+    const rawModels = codexModelItems(payload)
+    const catalogueFields = ['models', 'data'].filter(field => Array.isArray(payload?.[field]))
+    const models = rawModels.filter(
+      item =>
+        item.supported_in_api !== false &&
+        isCodexApiModelSlug(item.slug)
+    )
+    if (models.length === 0) throw new Error('Codex returned an empty models list')
+    this.modelCache = {
+      models,
+      discovery: {
+        provider: 'codex',
+        source: 'oauth',
+        api: 'codex_responses',
+        endpoint: `/backend-api/codex${endpoint}`,
+        catalogue_fields: catalogueFields,
+        raw_count: rawModels.length,
+        accepted_count: models.length,
+      },
+      expiresAt: Date.now() + MODEL_CACHE_MS,
     }
+    return models
   }
 
   async listModels() {
@@ -491,7 +544,7 @@ export class ChatGptOAuthClient {
     }
   }
 
-  async chat({ model, prompt, systemPrompt, webSearch }) {
+  async chat({ model, prompt, systemPrompt, webSearch, tools, toolChoice }) {
     const models = await this.models()
     const requested = typeof model === 'string' ? model.trim() : ''
     const exact = requested ? models.find(item => item.slug === requested) : null
@@ -506,6 +559,8 @@ export class ChatGptOAuthClient {
       instructions: systemPrompt,
       modelInfo: selected,
       webSearch,
+      tools,
+      toolChoice,
     })
     const headers = { 'content-type': 'application/json', accept: 'text/event-stream' }
     if (prepared.useResponsesLite) headers['x-openai-internal-codex-responses-lite'] = 'true'
@@ -519,10 +574,9 @@ export class ChatGptOAuthClient {
     return {
       text: result.text,
       reasoning_content: result.reasoningContent,
+      tool_calls: result.toolCalls,
       model: selected.slug,
       conversation_id: result.responseId,
-      upstream_usage: result.upstreamUsage,
-      upstream_cache: result.upstreamCache || upstreamCacheMetadata(response.headers),
       warning,
     }
   }

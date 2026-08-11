@@ -98,6 +98,8 @@ struct WorkbenchRequest {
     model: String,
     prompt: String,
     web_search: bool,
+    #[serde(default)]
+    chatgpt_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +143,7 @@ struct ProviderOverview {
     login_state: String,
     model_count: usize,
     models: Vec<String>,
+    model_modes: HashMap<String, String>,
     web_search_supported: bool,
     last_error: Option<String>,
 }
@@ -759,7 +762,7 @@ impl ControlState {
         let providers_future = join_all(
             provider_names()
                 .into_iter()
-                .map(|provider| self.provider_overview(provider)),
+                .map(|provider| self.provider_overview(provider, None)),
         );
         let hub_future = self.hub_overview();
         let (providers, hub) = tokio::join!(providers_future, hub_future);
@@ -903,7 +906,11 @@ impl ControlState {
         }
     }
 
-    async fn provider_overview(&self, name: &'static str) -> ProviderOverview {
+    async fn provider_overview(
+        &self,
+        name: &'static str,
+        chatgpt_mode: Option<&str>,
+    ) -> ProviderOverview {
         let status = self.service_status(name).await;
         let base_url = provider_base_url(name);
         let open_provider_sessions = self.open_provider_login_sessions.lock().await.clone();
@@ -919,6 +926,7 @@ impl ControlState {
                 login_state: "offline".to_owned(),
                 model_count: 0,
                 models: Vec::new(),
+                model_modes: HashMap::new(),
                 web_search_supported: provider_web_search_supported(name),
                 last_error: status.last_error,
             };
@@ -932,24 +940,43 @@ impl ControlState {
                 None,
             )
         } else {
+            let models_path = if name == "chatgpt" {
+                if chatgpt_mode == Some("codex") {
+                    "/v1/models?chatgpt_mode=codex"
+                } else if chatgpt_mode == Some("web") {
+                    "/v1/models?chatgpt_mode=web"
+                } else {
+                    "/v1/models?chatgpt_mode=auto"
+                }
+            } else {
+                "/v1/models"
+            };
             let (health, models) = tokio::join!(
                 self.call_json_get(&base_url, "/health", self.hub_api_key.as_deref()),
-                self.call_json_get(&base_url, "/v1/models", self.hub_api_key.as_deref()),
+                self.call_json_get(&base_url, models_path, self.hub_api_key.as_deref()),
             );
             (health.ok(), models.ok())
         };
 
-        let model_ids = models
+        let model_items = models
             .as_ref()
             .and_then(|(_, payload)| payload.get("data"))
             .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
-                    .collect::<Vec<_>>()
-            })
+            .cloned()
             .unwrap_or_default();
+        let model_ids = model_items
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect::<Vec<_>>();
+        let model_modes = model_items
+            .iter()
+            .filter_map(|item| {
+                Some((
+                    item.get("id")?.as_str()?.to_owned(),
+                    item.get("api")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
         let model_count = model_ids.len();
 
         let health_status = health
@@ -995,6 +1022,7 @@ impl ControlState {
             login_state,
             model_count,
             models: model_ids,
+            model_modes,
             web_search_supported: provider_web_search_supported(name),
             last_error: status.last_error,
         }
@@ -1045,7 +1073,7 @@ async fn provider_details(
     provider: String,
 ) -> Result<ProviderDetails, String> {
     let provider = normalize_provider(&provider).map_err(|err| err.to_string())?;
-    let overview = state.provider_overview(provider).await;
+    let overview = state.provider_overview(provider, None).await;
     let detail = state
         .call_json_get(&provider_base_url(provider), "/health", None)
         .await
@@ -1067,6 +1095,18 @@ async fn provider_details(
         logs,
         qwen_accounts,
     })
+}
+
+#[tauri::command]
+async fn provider_models(
+    state: State<'_, ControlState>,
+    provider: String,
+    chatgpt_mode: Option<String>,
+) -> Result<ProviderOverview, String> {
+    let provider = normalize_provider(&provider).map_err(|err| err.to_string())?;
+    Ok(state
+        .provider_overview(provider, chatgpt_mode.as_deref())
+        .await)
 }
 
 #[tauri::command]
@@ -1120,6 +1160,7 @@ async fn run_workbench_request(
         "messages": [{ "role": "user", "content": prompt }],
         "stream": false,
         "web_search": request.web_search,
+        "chatgpt_mode": request.chatgpt_mode.as_deref().unwrap_or("auto"),
     });
 
     let (status, mut value) = state
@@ -1465,7 +1506,7 @@ fn hub_base_url() -> String {
 }
 
 fn provider_web_search_supported(provider: &str) -> bool {
-    matches!(provider, "qwen" | "deepseek")
+    matches!(provider, "qwen" | "deepseek" | "chatgpt")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1499,6 +1540,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             dashboard_overview,
             provider_details,
+            provider_models,
             provider_logs,
             hub_config,
             start_services,

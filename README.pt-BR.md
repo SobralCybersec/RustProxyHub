@@ -175,7 +175,7 @@ pnpm release:windows
 
 ```bash
 pnpm verify
-# = eslint · type-check vue-tsc · vitest · build do frontend
+# = eslint · type-check vue-tsc · vitest · testes Node bridge · build do frontend
 #   · cargo audit · pnpm audit
 #   · cargo test · cargo clippy --all-targets -D warnings
 ```
@@ -495,3 +495,13 @@ O RustProxyHub automatiza **suas próprias** sessões logadas. Ele **não é afi
 **Prior art de AI-gateway (Rust, 2026)**: [api7/aisix](https://github.com/api7/aisix) · [tópico llm-proxy](https://github.com/topics/llm-proxy?l=rust) <img src="https://go-skill-icons.vercel.app/api/icons?i=rust&size=32" width="40" />
 
 </h2>
+
+---
+
+## Índice de pesquisa e documentação
+
+Notas locais: [repositórios de proxy / gateway](docs/reference/proxy-repos-2026.md) · [resumo do refactor](docs/reference/refactor-summary.md) · [economia de tokens e backends de navegador](docs/reference/token-saving-and-browser-backends.md).
+
+Clones de pesquisa em [`research/repos`](research/repos): [AI-Worker-Proxy](https://github.com/zxcloli666/AI-Worker-Proxy) · [CatGPT-Gateway](https://github.com/GautamVhavle/CatGPT-Gateway) · [code-context-engine](https://github.com/elara-labs/code-context-engine) · [copium](https://github.com/iKislay/copium) · [deepsproxy](https://github.com/pedrofariasx/deepsproxy) · [inferock-bench](https://github.com/inferock/inferock-bench) · [kimiproxy](https://github.com/pedrofariasx/kimiproxy) · [kiro2cc-proxy](https://github.com/TsinHzl/kiro2cc-proxy) · [lean-ctx](https://github.com/yvgude/lean-ctx) · [lowfat](https://github.com/zdk/lowfat) · [mimo-code-proxy](https://github.com/pedrofariasx/mimo-code-proxy) · [ollieproxy](https://github.com/pedrofariasx/ollieproxy) · [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) · [Playwright](https://github.com/microsoft/playwright) · [qwenproxy](https://github.com/pedrofariasx/qwenproxy) · [sqz](https://github.com/ojuschugh1/sqz) · [token-savior](https://github.com/Mibayy/token-savior) · [tokensave](https://github.com/Prathamg042004/tokensave) · [tokless](https://github.com/HoangP8/tokless) · [zap](https://github.com/bitan-del/zap).
+
+Referências de design: [api7/aisix](https://github.com/api7/aisix) · [x5iu/llm-proxy](https://github.com/x5iu/llm-proxy) · [KochC/opencode-llm-proxy](https://github.com/KochC/opencode-llm-proxy) · [ParzivalHack/Aegis.rs](https://github.com/ParzivalHack/Aegis.rs) · [tópico Rust LLM-proxy](https://github.com/topics/llm-proxy?l=rust&o=asc&s=updated) · [typestate de Cliffle](https://cliffle.com/blog/rust-typestate/) · [typestate do Comprehensive Rust](https://google.github.io/comprehensive-rust/idiomatic/leveraging-the-type-system/typestate-pattern/typestate-example.html) · [newtype / typestate da Microsoft](https://microsoft.github.io/RustTraining/rust-patterns-book/ch03-the-newtype-and-type-state-patterns.html) · [typestate do Software Patterns Lexicon](https://softwarepatternslexicon.com/rust/idiomatic-rust-patterns/the-typestate-pattern/) · [newtype do Software Patterns Lexicon](https://softwarepatternslexicon.com/rust/idiomatic-rust-patterns/the-newtype-pattern/) · [typestate-builder](https://docs.rs/typestate-builder).

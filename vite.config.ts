@@ -4,7 +4,7 @@ import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { defineConfig } from 'vite'
 import vueDevTools from 'vite-plugin-vue-devtools'
-import { version as pkgVersion } from './package.json'
+import { version as pkgVersion } from './package.json' with { type: 'json' }
 
 const HOST = process.env.TAURI_DEV_HOST
 const PLATFORM = process.env.TAURI_ENV_PLATFORM
@@ -50,10 +50,10 @@ export default defineConfig({
     host: HOST || false,
     hmr: HOST
       ? {
-        protocol: 'ws',
-        host: HOST,
-        port: 1421,
-      }
+          protocol: 'ws',
+          host: HOST,
+          port: 1421,
+        }
       : undefined,
     watch: {
       ignored: ['**/src-tauri/**'],

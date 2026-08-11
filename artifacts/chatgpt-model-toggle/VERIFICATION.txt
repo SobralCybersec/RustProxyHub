@@ -1,0 +1,43 @@
+MODEL_COUNT_DISCOVERY_FIX
+
+Root cause:
+`codexModelItems` selected `payload.models` whenever it was an array, so any models present in sibling `payload.data` were discarded. Duplicate slugs are now merged once across both arrays.
+
+Changed branch/fields:
+- `codexModelItems`: combines `models` and `data`, normalizes `slug`/`id`, de-duplicates by slug.
+- Codex discovery metadata: reports `catalogue_fields`, `raw_count`, and `accepted_count`.
+- Existing intentional exclusions remain: ChatGPT workspace/access/link catalogue entries are not Codex API model slugs.
+
+Source paths:
+- src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs
+- tests/node/chatgpt-oauth.test.mjs
+
+Artifacts:
+- /home/satu/Documents/RustProxyHub/artifacts/chatgpt-model-toggle/MODIFIED_FILE
+- /home/satu/Documents/RustProxyHub/artifacts/chatgpt-model-toggle/DIFF_FILE
+- /home/satu/Documents/RustProxyHub/artifacts/chatgpt-model-toggle/VERIFICATION.txt
+- /home/satu/Documents/RustProxyHub/artifacts/chatgpt-model-toggle/ROLLBACK.sh
+
+BASELINE exact command/result:
+`cd /tmp/rph-model-count-baseline/repo && node --test tests/node/chatgpt-oauth.test.mjs`
+Input: baseline OAuth source and baseline test fixture.
+Literal result: `ℹ tests 1; ℹ pass 1; ℹ fail 0; ℹ duration_ms 92.836998`.
+Exit: 0.
+
+MODIFIED exact command/result:
+`node --test tests/node/chatgpt-oauth.test.mjs tests/node/chatgpt-web-response.test.mjs`
+Input: OAuth fixture contains duplicate `models`/`data` slug plus `gpt-data-only`.
+Literal result: `ℹ tests 2; ℹ pass 2; ℹ fail 0; ℹ duration_ms 92.812913`.
+Exit: 0.
+
+Syntax exact command/result:
+`node --check src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs`
+Literal result: no output.
+Exit: 0.
+
+ROLLBACK exact command/result:
+`artifacts/chatgpt-model-toggle/ROLLBACK.sh /tmp/rph-model-count-rollback-target.mjs /tmp/rph-model-count-baseline/chatgpt-oauth.mjs`
+Input: modified OAuth copy plus baseline OAuth copy.
+Literal result: `restored /tmp/rph-model-count-rollback-target.mjs from /tmp/rph-model-count-baseline/chatgpt-oauth.mjs` followed by `rollback compare: restored baseline`.
+Exit: 0.
+Restored status: rollback target SHA-256 equals baseline `746bcb50f512d87b374ed462a97d0fc77bf5cf028e05a79888ba2668bdf2d57b`; working source remains modified SHA-256 `beb8d7105d859bba115bf2e1294b495bc7a22c0d6eb3926b03776e39dca278f6`.

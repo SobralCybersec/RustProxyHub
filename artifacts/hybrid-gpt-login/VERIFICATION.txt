@@ -1,0 +1,51 @@
+Hybrid ChatGPT/Codex model discovery and dual-login verification
+
+CHANGED BRANCH/FIELDS
+- Hybrid model branch: listChatGPTHybridModels(auto) fetches web and Codex catalogues, keeps web/codex discovery metadata, and filters cyber/Codex IDs out of web results so OAuth owns them.
+- Playwright login branch: openChatGPTLogin defaults oauth=true and web=true, opening OAuth login page plus ChatGPT web page in one persistent context.
+- Endpoint branch: hub/control-room default ChatGPT model fetch uses chatgpt_mode=auto; explicit toggle requests web or codex only.
+
+ARTIFACTS
+- MODIFIED_FILE: /home/satu/Documents/RustProxyHub/artifacts/hybrid-gpt-login/MODIFIED_FILE
+- DIFF_FILE: /home/satu/Documents/RustProxyHub/artifacts/hybrid-gpt-login/DIFF_FILE
+- VERIFICATION.txt: /home/satu/Documents/RustProxyHub/artifacts/hybrid-gpt-login/VERIFICATION.txt
+- ROLLBACK.sh: /home/satu/Documents/RustProxyHub/artifacts/hybrid-gpt-login/ROLLBACK.sh
+
+BASELINE
+Command:
+cd /tmp/rph-hybrid-baseline && node --check src-tauri/resources/playwright-bridge/index.mjs && node --check src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs
+Input: pre-change snapshot reconstructed from HEAD plus conversation-reapply DIFF_FILE.
+Literal result: baseline node syntax: passed; exit status 0.
+
+MODIFIED
+Command:
+cd /home/satu/Documents/RustProxyHub && node --check src-tauri/resources/playwright-bridge/index.mjs && node --check src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs && node --test tests/node/chatgpt-oauth.test.mjs tests/node/chatgpt-web-response.test.mjs
+Input: current hybrid model and dual-login source.
+Literal result: 15 tests passed, 0 failed; exit status 0.
+
+Command:
+cd /home/satu/Documents/RustProxyHub && cargo check --manifest-path src-tauri/Cargo.toml
+Input: current Rust hub/control-room/browser runtime source.
+Literal result: Finished dev profile; exit status 0.
+
+Command:
+cd /home/satu/Documents/RustProxyHub && cargo test --manifest-path src-tauri/Cargo.toml browser_runtime --lib && cargo test --manifest-path src-tauri/Cargo.toml hub --lib && cargo test --manifest-path src-tauri/Cargo.toml control_room --lib && cargo test --manifest-path src-tauri/Cargo.toml qwen --lib
+Input: current Rust model routing and provider source.
+Literal result: browser_runtime 34 passed; hub 25 passed; control_room 15 passed; qwen 21 passed; exit status 0.
+
+Command:
+cd /home/satu/Documents/RustProxyHub && pnpm type-check && pnpm test --run && pnpm build
+Input: current Vue/store/UI source.
+Literal result: vue-tsc passed; 4 test files and 19 tests passed; Vite build passed; exit status 0.
+
+Command:
+cd /home/satu/Documents/RustProxyHub && git -c core.whitespace=cr-at-eol diff --check
+Input: current tracked diff with repository CRLF handling.
+Literal result: no output; exit status 0.
+
+ROLLBACK
+Command:
+/home/satu/Documents/RustProxyHub/artifacts/hybrid-gpt-login/ROLLBACK.sh /tmp/rph-hybrid-rollback/index.mjs /tmp/rph-hybrid-baseline-snapshot/src-tauri/resources/playwright-bridge/index.mjs
+Input: another copy of MODIFIED_FILE plus preserved pre-change snapshot.
+Literal result: restored /tmp/rph-hybrid-rollback/index.mjs from /tmp/rph-hybrid-baseline-snapshot/src-tauri/resources/playwright-bridge/index.mjs; cmp passed; exit status 0.
+Restored behavior/status: rollback test copy matches baseline. Working-tree MODIFIED_FILE remains changed.

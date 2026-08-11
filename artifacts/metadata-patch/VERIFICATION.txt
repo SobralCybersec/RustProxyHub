@@ -1,0 +1,29 @@
+Changed branch/field: ChatGPT GPT provider BridgeChatResponse.upstream_usage and upstream_cache; ChatGPT auto model-discovery cache eligibility.
+
+Paths:
+MODIFIED_FILE: /home/satu/Documents/RustProxyHub/artifacts/metadata-patch/MODIFIED_FILE
+DIFF_FILE: /home/satu/Documents/RustProxyHub/artifacts/metadata-patch/DIFF_FILE
+VERIFICATION.txt: /home/satu/Documents/RustProxyHub/artifacts/metadata-patch/VERIFICATION.txt
+ROLLBACK.sh: /home/satu/Documents/RustProxyHub/artifacts/metadata-patch/ROLLBACK.sh
+
+Original SHA-256: c7bf47e47b655c4281605c71827ca38f664d1174ab146ba3fd737129e05f5ba3
+Modified SHA-256: a06e064e2297c54e2a266713210576fc5c9a572ee78d4163dcaa662b30c0597f
+
+BASELINE
+Command: node --test tests/node/chatgpt-oauth.test.mjs tests/node/chatgpt-web-response.test.mjs
+Input: pre-patch bridge tests
+Literal output/result: 16 tests passed; 0 failed.
+Exit status: 0
+
+MODIFIED
+Command: cargo test --manifest-path src-tauri/Cargo.toml && node --test tests/node/chatgpt-oauth.test.mjs tests/node/chatgpt-web-response.test.mjs
+Input: patched GPT metadata and browser bridge
+Literal output/result: cargo test: 182 passed (3 suites, 0.01s); Node browser smoke: 17 tests passed; 0 failed.
+Exit status: 0
+
+ROLLBACK
+Command: artifacts/metadata-patch/ROLLBACK.sh artifacts/metadata-patch/rollback_probe && cmp -s artifacts/metadata-patch/ORIGINAL_FILE artifacts/metadata-patch/rollback_probe
+Input: copied MODIFIED_FILE
+Literal output/result: restored artifacts/metadata-patch/rollback_probe; cmp status 0.
+Exit status: 0
+Restored behavior/status: rollback probe exactly matched original browser_runtime.rs; MODIFIED_FILE remains patched.

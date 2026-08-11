@@ -125,7 +125,7 @@ pub fn normalize_model_id(model_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_model_id;
+    use super::{normalize_model_id, ModelRegistry};
 
     #[test]
     fn strips_provider_prefix_and_no_thinking_suffix() {
@@ -172,5 +172,16 @@ mod tests {
     fn colon_with_no_actual_model_returns_empty() {
         // "prefix:" splits into ("prefix", ""), second part is ""
         assert_eq!(normalize_model_id("prefix:"), "");
+    }
+
+    #[tokio::test]
+    async fn fallback_catalog_contains_registered_models_and_no_thinking_variants() {
+        let registry = ModelRegistry::new().await;
+        let catalog = registry.fallback_catalog().await;
+
+        assert!(catalog.iter().any(|(id, _)| id == "qwen3.7-plus"));
+        assert!(catalog
+            .iter()
+            .any(|(id, _)| id == "qwen3.7-plus-no-thinking"));
     }
 }

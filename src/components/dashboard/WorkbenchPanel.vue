@@ -9,6 +9,7 @@ const t = (key: string, params?: Record<string, string | number>) => store.t(key
 
 const busy = computed(() => store.isBusy('workbench:run'))
 const hasModels = computed(() => store.hubModelOptions.length > 0)
+const isChatGptModel = computed(() => store.isWorkbenchChatGptModel)
 const hubRunning = computed(() => store.overview?.hub.running ?? false)
 
 const runtimeHint = computed(() => store.runtimeIssues[0] ?? t('workbench.runtimePending'))
@@ -33,6 +34,32 @@ function runWorkbench() {
         </option>
       </select>
       <span v-if="!hasModels" class="faint models-hint">{{ t('workbench.modelHint') }}</span>
+    </div>
+
+    <!-- ChatGPT route mode -->
+    <div v-if="isChatGptModel" class="stack mode-group">
+      <span class="field-label">{{ t('workbench.chatGptMode') }}</span>
+      <div class="row mode-row">
+        <label class="row mode-option">
+          <input
+            :checked="store.workbenchChatGptMode === 'web'"
+            type="radio"
+            value="web"
+            @change="store.setWorkbenchChatGptMode('web')"
+          />
+          <span>{{ t('workbench.chatGptWeb') }}</span>
+        </label>
+        <label class="row mode-option">
+          <input
+            :checked="store.workbenchChatGptMode === 'codex'"
+            type="radio"
+            value="codex"
+            @change="store.setWorkbenchChatGptMode('codex')"
+          />
+          <span>{{ t('workbench.chatGptCodex') }}</span>
+        </label>
+      </div>
+      <span class="faint mode-hint">{{ t('workbench.chatGptModeHint') }}</span>
     </div>
 
     <!-- Prompt -->
@@ -89,6 +116,28 @@ function runWorkbench() {
 
 .ws-check {
   accent-color: var(--primary-focus);
+}
+
+.mode-group {
+  gap: 6px;
+}
+
+.mode-row {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.mode-option {
+  cursor: pointer;
+  gap: 6px;
+}
+
+.mode-option input {
+  accent-color: var(--primary-focus);
+}
+
+.mode-hint {
+  font-size: 12px;
 }
 
 .hint-text {

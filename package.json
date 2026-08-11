@@ -6,19 +6,21 @@
   "scripts": {
     "dev": "cross-env DEBUG=0 vite",
     "test": "vitest",
+    "test:node": "node --test tests/node/*.test.mjs",
     "lint": "eslint src tests --ext .ts,.vue",
     "format": "prettier --write src tests vite.config.ts vitest.config.ts eslint.config.cjs",
     "format:check": "prettier --check src tests vite.config.ts vitest.config.ts eslint.config.cjs",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc --build --force",
-    "audit:rust": "rtk cargo audit -f src-tauri/Cargo.lock",
-    "audit:web": "rtk pnpm audit --prod",
-    "verify": "pnpm lint && pnpm type-check && pnpm test --run && pnpm build && pnpm audit:rust && pnpm audit:web && rtk cargo test --manifest-path src-tauri/Cargo.toml && rtk cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "audit:rust": "cargo audit -f src-tauri/Cargo.lock",
+    "audit:web": "pnpm audit --prod",
+    "verify": "pnpm lint && pnpm type-check && pnpm test --run && pnpm test:node && pnpm build && pnpm audit:rust && pnpm audit:web && cargo test --manifest-path src-tauri/Cargo.toml && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "release:windows": "powershell -ExecutionPolicy Bypass -File scripts/release-windows.ps1",
     "tauri": "tauri",
     "bump": "node bump-version.cjs",
-    "check": "cargo check --manifest-path src-tauri/Cargo.toml"
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "benchmark:tokens": "node scripts/benchmark-token-savings.mjs"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^4.2.0",

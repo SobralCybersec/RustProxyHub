@@ -1,0 +1,5 @@
+TOOLSTREAM_INDEX_ROLLBACK
+source hash: 74a2df9158387dc5e7020f7d629c320e530b7b34d36aa679f3e5614daed02135
+target hash: 74a2df9158387dc5e7020f7d629c320e530b7b34d36aa679f3e5614daed02135
+Restored file: src-tauri/resources/playwright-bridge/index.mjs
+Script scope: index.mjs only; no other repository files restored.

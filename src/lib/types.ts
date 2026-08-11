@@ -26,6 +26,7 @@ export interface ProviderOverview {
   login_state: string
   model_count: number
   models: string[]
+  model_modes?: Record<string, string>
   web_search_supported: boolean
   last_error: string | null
   // Live telemetry (provided by the mock backend)
