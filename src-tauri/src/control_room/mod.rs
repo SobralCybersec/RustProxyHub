@@ -1,6 +1,7 @@
 mod qwen_accounts;
 mod runtime;
 
+use crate::browser_bridge::provider_bridge_log_path;
 use crate::proxy_core::{current_timestamp, is_safe_account_id};
 use crate::runtime::{
     build_embedded_config, serve_browser_provider, serve_deepseek, serve_hub, serve_kimi,
@@ -701,12 +702,28 @@ impl ControlState {
     }
 
     async fn service_logs(&self, name: &str) -> Vec<String> {
-        self.logs
+        let mut entries: Vec<String> = self
+            .logs
             .lock()
             .await
             .get(name)
             .map(|items| items.iter().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if matches!(name, "chatgpt" | "gemini" | "mistral" | "zai" | "meta") {
+            if let Ok(contents) = fs::read_to_string(provider_bridge_log_path(name)) {
+                entries.extend(
+                    contents
+                        .lines()
+                        .rev()
+                        .take(LOG_LIMIT)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .map(|line| format!("[bridge] {line}")),
+                );
+            }
+        }
+        entries
     }
 
     fn hub_config(&self) -> HubConfigResponse {

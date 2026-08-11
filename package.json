@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "cross-env DEBUG=0 vite",
     "test": "vitest",
-    "test:node": "node --test tests/node/*.test.mjs",
+    "test:node": "node --test --test-concurrency=1 tests/node/*.test.mjs",
     "lint": "eslint src tests --ext .ts,.vue",
     "format": "prettier --write src tests vite.config.ts vitest.config.ts eslint.config.cjs",
     "format:check": "prettier --check src tests vite.config.ts vitest.config.ts eslint.config.cjs",
@@ -20,7 +20,12 @@
     "tauri": "tauri",
     "bump": "node bump-version.cjs",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
-    "benchmark:tokens": "node scripts/benchmark-token-savings.mjs"
+    "benchmark:tokens": "node scripts/benchmark-token-savings.mjs",
+    "benchmark:provider-tools": "node scripts/benchmark-provider-tool-smoke.mjs",
+    "benchmark:provider-interactions": "node scripts/benchmark-provider-interactions.mjs",
+    "benchmark:rust-tools": "cargo bench --manifest-path src-tauri/Cargo.toml --bench tool_call_parser",
+    "smoke:client-interactions": "node scripts/client-interaction-smoke.mjs",
+    "smoke:provider-tools": "node scripts/provider-tool-smoke.mjs"
   },
   "dependencies": {
     "@hugeicons/core-free-icons": "^4.2.0",

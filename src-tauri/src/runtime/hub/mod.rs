@@ -150,6 +150,7 @@ async fn run_server(config: AppConfig) -> Result<()> {
         .route("/", get(root))
         .route("/health", get(health))
         .route("/providers", get(providers))
+        .route("/providers/{provider}/logs", get(provider_logs))
         .route("/openapi.json", get(openapi))
         .route("/v1/models", get(models))
         .route("/v1/models/{model}", get(model_by_id))
@@ -186,6 +187,7 @@ async fn root(State(state): State<AppState>) -> impl IntoResponse {
             "routes": {
                 "health": "/health",
                 "providers": "/providers",
+                "provider_logs": "/providers/{provider}/logs",
                 "models": "/v1/models",
                 "chat": "/v1/chat/completions",
                 "responses": "/v1/responses",
@@ -209,6 +211,55 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn providers(State(state): State<AppState>) -> impl IntoResponse {
     Json(provider_health_checks(&state).await)
+}
+
+async fn provider_logs(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+    let provider = match provider.as_str() {
+        "chatgpt" => ProviderName::Chatgpt,
+        "gemini" => ProviderName::Gemini,
+        "mistral" => ProviderName::Mistral,
+        "zai" => ProviderName::Zai,
+        "meta" => ProviderName::Meta,
+        "qwen" | "deepseek" | "kimi" => {
+            return Json(json!({
+                "provider": provider,
+                "entries": [],
+                "source": "provider does not use the Playwright bridge log",
+            }))
+            .into_response();
+        }
+        _ => return json_error(StatusCode::NOT_FOUND, "Provider not found".to_owned()),
+    };
+    match provider_request(
+        &state.client,
+        state.provider_config(provider),
+        Method::GET,
+        "/admin/logs",
+    )
+    .send()
+    .await
+    {
+        Ok(response) if response.status().is_success() => match response.json::<Value>().await {
+            Ok(payload) => Json(payload).into_response(),
+            Err(err) => bad_gateway_error(&err),
+        },
+        Ok(response) => json_error(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "{} logs endpoint returned {}",
+                provider.as_str(),
+                response.status()
+            ),
+        ),
+        Err(err) => bad_gateway_error(&err),
+    }
 }
 
 async fn openapi(State(state): State<AppState>) -> impl IntoResponse {
@@ -1033,6 +1084,23 @@ fn openapi_document(config: &AppConfig) -> Value {
                     }
                 }
             },
+            "/providers/{provider}/logs": {
+                "get": {
+                    "summary": "Read recent provider bridge log entries",
+                    "security": [{ "BearerAuth": [] }],
+                    "parameters": [{
+                        "name": "provider",
+                        "in": "path",
+                        "required": true,
+                        "schema": { "type": "string" }
+                    }],
+                    "responses": {
+                        "200": { "description": "Provider log entries" },
+                        "401": { "description": "Unauthorized" },
+                        "404": { "description": "Unknown provider" }
+                    }
+                }
+            },
             "/openapi.json": {
                 "get": {
                     "summary": "OpenAPI specification for the unified hub",
@@ -1194,10 +1262,36 @@ fn openapi_document(config: &AppConfig) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        infer_provider, normalize_json_model, normalize_prefixed_model, tag_provider_models,
-        ProviderName,
+        infer_provider, normalize_json_model, normalize_prefixed_model, openapi_document,
+        tag_provider_models, AppConfig, ProviderConfig, ProviderName,
     };
     use serde_json::{json, Value};
+
+    fn test_config() -> AppConfig {
+        let provider = || ProviderConfig::new("http://127.0.0.1:1", None);
+        AppConfig {
+            host: "127.0.0.1".to_owned(),
+            port: 3100,
+            api_key: None,
+            deepseek: provider(),
+            kimi: provider(),
+            qwen: provider(),
+            chatgpt: provider(),
+            gemini: provider(),
+            mistral: provider(),
+            zai: provider(),
+            meta: provider(),
+        }
+    }
+
+    #[test]
+    fn openapi_advertises_provider_logs_route() {
+        let document = openapi_document(&test_config());
+        assert_eq!(
+            document["paths"]["/providers/{provider}/logs"]["get"]["summary"],
+            "Read recent provider bridge log entries"
+        );
+    }
 
     #[test]
     fn routes_prefixed_mistral_models_to_mistral() {

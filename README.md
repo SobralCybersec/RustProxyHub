@@ -261,6 +261,56 @@ The hub speaks both wire formats; agents point at `http://127.0.0.1:3100`.
 | `GET /health` · `GET /providers` | Runtime + per-provider health |
 | `POST /admin/manual_login` | (per provider) open the browser login session |
 
+### Provider tool-call smoke
+
+Start the desktop runtime (`pnpm tauri dev`), then start Hub and the providers to exercise in Login Studio. With that runtime running, this sends one streamed OpenAI function-call request to every model returned by `GET /v1/models`, then prints provider/model/SSE result metadata and provider bridge logs as JSON. Set `RUST_PROXY_HUB_API_KEY` when hub auth is enabled.
+
+```bash
+pnpm smoke:provider-tools
+# or: pnpm smoke:provider-tools -- --hub http://127.0.0.1:3100 --api-key "$RUST_PROXY_HUB_API_KEY"
+```
+
+`tests/node/provider-tool-smoke.test.mjs` creates an isolated HTTP hub on an ephemeral port, injects temporary `RUST_PROXY_HUB_URL` / `RUST_PROXY_HUB_API_KEY` values into this CLI, and removes the server after the run. It covers all eight provider routes (`chatgpt`, `deepseek`, `gemini`, `kimi`, `meta`, `mistral`, `qwen`, `zai`) and asserts request auth, forced function schema, streamed `tool_calls`, terminal `[DONE]`, and one provider log per route. The live smoke is intentionally separate: it verifies real logged-in sessions and reports their bridge logs without persisting secrets or test artifacts.
+
+For external coding CLIs, point their documented OpenAI-compatible base URL at `http://127.0.0.1:3100/v1`; point Anthropic-compatible clients at `http://127.0.0.1:3100` so `/v1/messages` remains reachable. Run the smoke command after configuring a client to verify both wire response and provider-side log output.
+
+### Coding-client prompt interaction smoke
+
+```bash
+pnpm smoke:client-interactions
+# one client only
+pnpm smoke:client-interactions -- --client claude
+```
+
+This creates a tool-result follow-up for every discovered provider model. It verifies a system prompt, user prompt, assistant tool call, tool result, terminal stream event, and `RUST_PROXY_HUB_INTERACTION_CONFIRMED` response. Kilo, Pi, and OpenCode share the OpenAI Chat Completions check; Claude uses the Anthropic Messages check. The JSON report includes a ready-to-fill configuration shape for every client.
+
+Use a model returned by `GET /v1/models`, including its provider prefix (for example `qwen:qwen3`):
+
+These fields follow current [Kilo](https://kilo.ai/docs/ai-providers/openai-compatible), [Claude Code gateway](https://docs.anthropic.com/en/docs/claude-code/llm-gateway), [Pi](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/models.md), and [OpenCode](https://opencode.ai/docs/providers) documentation.
+
+| Client | Hub wiring |
+|---|---|
+| Kilo Code | Add an **OpenAI Compatible** provider in its provider UI. Set Base URL to `http://127.0.0.1:3100/v1`, API key from `RUST_PROXY_HUB_API_KEY`, then select a discovered model. |
+| Claude Code | `export ANTHROPIC_BASE_URL=http://127.0.0.1:3100` and `export ANTHROPIC_AUTH_TOKEN="$RUST_PROXY_HUB_API_KEY"`; select a hub model supported by the client. |
+| Pi | Add `rust_proxy_hub` to `~/.pi/agent/models.json` with `baseUrl: "http://127.0.0.1:3100/v1"`, `api: "openai-completions"`, `apiKey: "RUST_PROXY_HUB_API_KEY"`, `authHeader: true`, and the selected model. |
+| OpenCode | Add an `@ai-sdk/openai-compatible` provider in `opencode.json` with `options.baseURL: "http://127.0.0.1:3100/v1"`, `options.apiKey: "{env:RUST_PROXY_HUB_API_KEY}"`, and the selected model. |
+
+The temporary test server used by `tests/node/provider-tool-smoke.test.mjs` executes this CLI with isolated URL/key values, asserts both OpenAI and Anthropic request shapes, and closes after the test.
+
+### Tool-path benchmarks
+
+```bash
+pnpm benchmark:provider-tools          # Node SSE parse + tool-call assembly
+pnpm benchmark:rust-tools              # release Rust StreamingToolParser
+pnpm benchmark:provider-interactions   # saved-session hub + up to 8 models/provider + history
+pnpm benchmark:provider-interactions -- --max-models-per-provider 0  # all fetched models
+BENCH_ITERATIONS=50000 pnpm benchmark:provider-tools
+```
+
+Both commands warm up first and emit JSON with elapsed milliseconds, iterations, operations/second, and detected tool calls. They measure parser overhead only—not provider latency, browser automation, or model throughput—so results stay comparable across local changes without implying an end-to-end performance claim.
+
+`benchmark:provider-interactions` uses the running Hub and its saved provider sessions, fetches `GET /v1/models`, then runs one deterministic tool call and two prompt → tool-result interactions (OpenAI and Anthropic). It schedules up to eight models per provider by default; pass `--max-models-per-provider 0` to run every fetched model. It appends full response/log observations to `benchmark-history/provider-model-history.jsonl` and regenerates `benchmark-history/provider-model-history.md` with every run plus latest output previews. Each run ends with total elapsed time; fetched, scheduled, and worked model/provider counts; and fetched-log and log-entry counts. Use `--iterations N` only when keeping Hub, model set, prompt contract, and client configuration fixed; observed latency includes provider/browser time and is not a throughput comparison. The append-only JSONL source and generated Markdown index follow [JSON Lines](https://jsonlines.org/) and the fixed-harness comparison guidance in [OpenAI's evaluation playbook](https://openai.com/index/trustworthy-third-party-evaluations-foundations/).
+
 ### Request lifecycle (state machine)
 
 The dashboard never guesses status — it follows the runtime's health. A chat request walks a fixed path; a missing session short-circuits to a login prompt rather than a silent hang.
@@ -403,7 +453,7 @@ mindmap
 | 10 | **Don't focus on "commodities"** | HTTP/SSE/DB come from mature stacks (axum, tokio, rusqlite); own code only on the differentiator (multi-provider routing) | Authored logic concentrated in the routing hub |
 | 11 | **Generate correct information** | ID newtypes block mix-ups at compile time; zero `unwrap()` outside tests | 4 newtypes (Model/Session/Account/ParentMessage) · 0 non-test unwraps |
 | 12 | **Maintain Business Intelligence** | Scrapeable Prometheus endpoint (Grafana-ready) + live dashboard | `/metrics` in Prometheus format |
-| 13 | **Focus on value actions** | Tests cover critical paths (tool-call parsing, routing), not trivial getters | 146 green tests on value paths |
+| 13 | **Focus on value actions** | Tests cover tool-call parsing, routing, CLI invocation, prompt/tool-result interactions, benchmark history, log retrieval, and model scheduling—not trivial getters | 185 Rust + 29 Node tests; isolated CLI benchmark verifies 8 provider routes, 2 wire protocols, auth, SSE tool calls, interactions, JSONL/Markdown history, and per-provider model caps |
 | 14 | **Keep critical processes running** | RAII guard (`ActiveStreamGuard`) frees the stream-registry slot even on abrupt disconnect | 0 slot leaks on disconnect |
 | 15 | **Keep the environment secure** | Cookies/sessions never leave the machine; passwords in local SQLite, never serialized over IPC/API | 0 secrets on the wire · 0 keys on disk |
 | 16 | **Keep infrastructure 24×7×365** | Local-first app with no cloud dependency — there is no RustProxyHub server to go down | 0 cloud dependencies on the critical path |

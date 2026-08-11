@@ -1,4 +1,6 @@
-use crate::browser_bridge::{BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge};
+use crate::browser_bridge::{
+    BridgeStream, BrowserBridge, InitParams, ManualLoginParams, PlaywrightBridge,
+};
 use crate::proxy_core::{
     build_prompt, constant_time_eq, current_timestamp, extract_tool_calls_from_text,
     preflight_request_to_budget, sse_done, sse_json, usage_from_text, FunctionToolDefinition,
@@ -137,6 +139,7 @@ pub async fn serve_browser_provider(config: BrowserProviderServerConfig) -> Resu
         .route("/health", get(health))
         .route("/admin/manual_login", post(admin_manual_login))
         .route("/admin/close_login", post(admin_close_login))
+        .route("/admin/logs", get(admin_logs))
         .route("/v1", get(v1_root))
         .route("/v1/models", get(models))
         .route("/v1/models/{model}", get(model_by_id))
@@ -230,6 +233,29 @@ async fn admin_close_login(State(state): State<AppState>, headers: HeaderMap) ->
         .into_response(),
         Err(err) => provider_error(&state, err),
     }
+}
+
+async fn admin_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    let entries = tokio::fs::read_to_string(state.bridge.log_path())
+        .await
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(160)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Json(json!({
+        "provider": state.config.kind.as_str(),
+        "entries": entries,
+    }))
+    .into_response()
 }
 
 async fn models(
@@ -533,6 +559,13 @@ async fn chat_completions(
         return provider_error(&state, err);
     }
 
+    if live_chatgpt_web_stream_requested(state.config.kind, &body) {
+        return match request_browser_chat_stream(&state, &body).await {
+            Ok(stream) => stream_browser_chat_live(state, body, stream),
+            Err(err) => provider_error(&state, err),
+        };
+    }
+
     match request_browser_chat(&state, &body).await {
         Ok(chat) if body.stream.unwrap_or(false) => stream_browser_chat(state, body, chat),
         Ok(chat) => json_browser_chat(state, body, chat),
@@ -628,11 +661,7 @@ async fn request_browser_chat(
     state: &AppState,
     body: &OpenAIRequest,
 ) -> Result<BridgeChatResponse> {
-    let model = if body.model.trim().is_empty() {
-        state.config.kind.default_model().to_owned()
-    } else {
-        body.model.clone()
-    };
+    let model = browser_request_model(state.config.kind, &body.model);
 
     let preflight = browser_request_preflight(body)?;
     state
@@ -645,9 +674,54 @@ async fn request_browser_chat(
                 "system_prompt": if preflight.system_prompt.is_empty() { serde_json::Value::Null } else { serde_json::json!(preflight.system_prompt) },
                 "web_search": body.web_search.unwrap_or(false),
                 "chatgpt_mode": body.chatgpt_mode.as_deref().unwrap_or("auto"),
+                "stream": body.stream.unwrap_or(false),
             }),
         )
         .await
+}
+
+async fn request_browser_chat_stream(
+    state: &AppState,
+    body: &OpenAIRequest,
+) -> Result<BridgeStream> {
+    let model = browser_request_model(state.config.kind, &body.model);
+    let preflight = browser_request_preflight(body)?;
+    state
+        .bridge
+        .request_stream(
+            "chat",
+            json!({
+                "model": model,
+                "prompt": preflight.conversation,
+                "system_prompt": if preflight.system_prompt.is_empty() { serde_json::Value::Null } else { serde_json::json!(preflight.system_prompt) },
+                "web_search": body.web_search.unwrap_or(false),
+                "chatgpt_mode": body.chatgpt_mode.as_deref().unwrap_or("auto"),
+                "stream": true,
+            }),
+        )
+        .await
+}
+
+fn live_chatgpt_web_stream_requested(kind: BrowserProviderKind, body: &OpenAIRequest) -> bool {
+    if kind != BrowserProviderKind::Chatgpt || !body.stream.unwrap_or(false) {
+        return false;
+    }
+    match body.chatgpt_mode.as_deref() {
+        Some("web") => true,
+        Some("codex") => false,
+        _ => {
+            let model = body.model.to_ascii_lowercase();
+            model == "chatgpt-web-session" || model.contains("web-session")
+        }
+    }
+}
+
+fn browser_request_model(kind: BrowserProviderKind, requested: &str) -> String {
+    if requested.trim().is_empty() {
+        kind.default_model().to_owned()
+    } else {
+        requested.to_owned()
+    }
 }
 
 fn browser_request_preflight(body: &OpenAIRequest) -> Result<PromptPreflight> {
@@ -792,6 +866,168 @@ fn stream_browser_chat(state: AppState, body: OpenAIRequest, chat: BridgeChatRes
             }],
             "usage": usage_from_text(&prompt, &parsed.text, true),
             "provider_metadata": browser_provider_metadata(&state.config.kind, &chat),
+        })));
+        yield Ok(sse_done());
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONNECTION, "keep-alive"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
+}
+
+fn stream_browser_chat_live(
+    state: AppState,
+    body: OpenAIRequest,
+    mut bridge_stream: BridgeStream,
+) -> Response {
+    let completion_id = format!("chatcmpl-{}", Uuid::new_v4());
+    let model = browser_request_model(state.config.kind, &body.model);
+    let prompt = browser_request_preflight(&body)
+        .map(|preflight| preflight.flat_prompt)
+        .unwrap_or_else(|_| build_prompt(&body));
+
+    let stream = stream! {
+        yield Ok::<Bytes, std::convert::Infallible>(sse_json(json!({
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": current_timestamp(),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": { "role": "assistant", "content": "" },
+                "logprobs": Value::Null,
+                "finish_reason": Value::Null,
+            }],
+        })));
+
+        let mut parser = StreamingToolParser::new();
+        let mut emitted_text = String::new();
+        while let Some(event) = bridge_stream.next_event().await {
+            match event {
+                Ok(event) if event.event == "delta" => {
+                    if let Some(delta) = event.payload.get("delta").and_then(Value::as_str) {
+                        let parsed = parser.feed(delta);
+                        if !parsed.text.is_empty() {
+                            emitted_text.push_str(&parsed.text);
+                            yield Ok(sse_json(json!({
+                                "id": completion_id,
+                                "object": "chat.completion.chunk",
+                                "created": current_timestamp(),
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": { "content": parsed.text },
+                                    "logprobs": Value::Null,
+                                    "finish_reason": Value::Null,
+                                }],
+                            })));
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    yield Ok(sse_json(json!({ "error": { "message": err.to_string(), "type": "provider_stream_error" } })));
+                    yield Ok(sse_done());
+                    return;
+                }
+            }
+        }
+
+        let flushed = parser.flush();
+        if !flushed.text.is_empty() {
+            emitted_text.push_str(&flushed.text);
+            yield Ok(sse_json(json!({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": current_timestamp(),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": { "content": flushed.text },
+                    "logprobs": Value::Null,
+                    "finish_reason": Value::Null,
+                }],
+            })));
+        }
+
+        let chat = match bridge_stream.finish::<BridgeChatResponse>().await {
+            Ok(chat) => chat,
+            Err(err) => {
+                yield Ok(sse_json(json!({ "error": { "message": err.to_string(), "type": "provider_stream_error" } })));
+                yield Ok(sse_done());
+                return;
+            }
+        };
+        let parsed = parse_browser_output(&body, &chat.text);
+        if let Some(remaining) = parsed.text.strip_prefix(&emitted_text) {
+            if !remaining.is_empty() {
+                yield Ok(sse_json(json!({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": current_timestamp(),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": remaining },
+                        "logprobs": Value::Null,
+                        "finish_reason": Value::Null,
+                    }],
+                })));
+            }
+        } else if emitted_text.is_empty() && !parsed.text.is_empty() {
+            for chunk in split_text_chunks(&parsed.text, 320) {
+                yield Ok(sse_json(json!({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": current_timestamp(),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "content": chunk },
+                        "logprobs": Value::Null,
+                        "finish_reason": Value::Null,
+                    }],
+                })));
+            }
+        }
+
+        let finish_reason = if parsed.tool_calls.is_empty() { "stop" } else { "tool_calls" };
+        if !parsed.tool_calls.is_empty() {
+            yield Ok(sse_json(json!({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": current_timestamp(),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": { "tool_calls": parsed.tool_calls },
+                    "logprobs": Value::Null,
+                    "finish_reason": Value::Null,
+                }],
+            })));
+        }
+        yield Ok(sse_json(json!({
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": current_timestamp(),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "logprobs": Value::Null,
+                "finish_reason": finish_reason,
+            }],
+            "usage": usage_from_text(&prompt, &parsed.text, true),
+            "provider_metadata": browser_provider_metadata(&state.config.kind, &chat),
+            "provider_warnings": build_provider_warnings(&state.config.kind, &body, &chat),
         })));
         yield Ok(sse_done());
     };
@@ -1683,10 +1919,11 @@ fn json_error(status: StatusCode, message: String) -> Response {
 mod tests {
     use super::{
         anthropic_message_to_openai_messages, anthropic_tool_choice_to_openai,
-        anthropic_tools_from_value, browser_provider_metadata, browser_request_preflight,
-        browser_tool_system_instructions, coerce_agent_model, fallback_model_payload_for,
-        model_discovery_timeout, model_payload_item, openai_tools_from_value, parse_browser_output,
-        require_api_key, response_input_to_messages, BridgeChatResponse, BrowserProviderKind,
+        anthropic_tools_from_value, browser_provider_metadata, browser_request_model,
+        browser_request_preflight, browser_tool_system_instructions, coerce_agent_model,
+        fallback_model_payload_for, live_chatgpt_web_stream_requested, model_discovery_timeout,
+        model_payload_item, openai_tools_from_value, parse_browser_output, require_api_key,
+        response_input_to_messages, BridgeChatResponse, BrowserProviderKind,
     };
     use crate::proxy_core::{FunctionToolDefinition, FunctionToolSpec, Message, OpenAIRequest};
     use axum::http::{header, HeaderMap, HeaderValue};
@@ -1708,6 +1945,38 @@ mod tests {
     fn chatgpt_advertises_web_search_support() {
         assert!(BrowserProviderKind::Chatgpt.web_search_supported());
         assert!(!BrowserProviderKind::Gemini.web_search_supported());
+    }
+
+    #[test]
+    fn live_streaming_only_uses_the_chatgpt_web_lane() {
+        let web = OpenAIRequest {
+            model: "chatgpt-web-session".to_owned(),
+            messages: Vec::new(),
+            stream: Some(true),
+            web_search: None,
+            chatgpt_mode: None,
+            tools: None,
+            tool_choice: None,
+            stream_options: None,
+        };
+        assert!(live_chatgpt_web_stream_requested(
+            BrowserProviderKind::Chatgpt,
+            &web
+        ));
+        assert!(!live_chatgpt_web_stream_requested(
+            BrowserProviderKind::Gemini,
+            &web
+        ));
+
+        let codex = OpenAIRequest {
+            model: "gpt-5.4-mini".to_owned(),
+            chatgpt_mode: Some("codex".to_owned()),
+            ..web
+        };
+        assert!(!live_chatgpt_web_stream_requested(
+            BrowserProviderKind::Chatgpt,
+            &codex
+        ));
     }
 
     #[test]
@@ -2154,6 +2423,18 @@ mod tests {
         );
         assert_eq!(parsed.text.trim(), "just some plain text response");
         assert!(parsed.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn browser_request_model_uses_provider_default_when_missing() {
+        assert_eq!(
+            browser_request_model(BrowserProviderKind::Chatgpt, ""),
+            BrowserProviderKind::Chatgpt.default_model()
+        );
+        assert_eq!(
+            browser_request_model(BrowserProviderKind::Chatgpt, "chatgpt-web-session"),
+            "chatgpt-web-session"
+        );
     }
 
     #[test]

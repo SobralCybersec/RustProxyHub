@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { ChatGptOAuthClient } from './chatgpt-oauth.mjs'
+import { extractChatGPTAssistantText } from './chatgpt-web-response.mjs'
 import { compactStructuredPrompt, summarizePromptCompaction } from './prompt-compaction.mjs'
 
 // Fix IPv6/IPv4 resolution issue in Node 17+ (localhost resolves to ::1 instead of 127.0.0.1)
@@ -190,6 +191,10 @@ function send(id, result = null, error = null) {
   process.stdout.write(`${JSON.stringify({ id, result, error })}\n`)
 }
 
+function sendEvent(id, event, result = null) {
+  process.stdout.write(`${JSON.stringify({ id, event, result })}\n`)
+}
+
 const state = {
   deepseek: {
     context: null,
@@ -204,6 +209,8 @@ const state = {
     initPromise: null,
     cachedHeaders: null,
     lastHeadersTime: 0,
+    streamEmitter: null,
+    streamLock: Promise.resolve(),
   },
   gemini: {
     context: null,
@@ -623,6 +630,7 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     state.chatgpt.page = null
     state.chatgpt.cachedHeaders = null
     state.chatgpt.lastHeadersTime = 0
+    state.chatgpt.streamEmitter = null
   }
   ensureDir(path.resolve('chatgpt_profile'))
   const { engine, channel, executablePath } = resolveEngine(browser)
@@ -643,6 +651,11 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
   state.chatgpt.page = await state.chatgpt.context.newPage()
+  await state.chatgpt.page.exposeBinding('__rustProxyHubStream', (_source, event) => {
+    if (state.chatgpt.streamEmitter && event && typeof event === 'object') {
+      state.chatgpt.streamEmitter(event)
+    }
+  })
   state.chatgpt.headless = headless
 }
 
@@ -898,28 +911,6 @@ function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch, sys
   return nextPayload
 }
 
-function extractChatGPTAssistantText(payload) {
-  if (!payload || typeof payload !== 'object') return ''
-  const mapping = payload.mapping && typeof payload.mapping === 'object' ? Object.values(payload.mapping) : []
-  const messages = mapping
-    .map((entry) => entry?.message)
-    .filter((message) => message?.author?.role === 'assistant')
-    .sort((left, right) => (left?.create_time || 0) - (right?.create_time || 0))
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const content = messages[index]?.content
-    if (!content) continue
-    const parts = Array.isArray(content.parts) ? content.parts : []
-    const text = parts
-      .filter((part) => typeof part === 'string')
-      .join('\n')
-      .trim()
-    if (text) return text
-  }
-
-  return ''
-}
-
 async function listChatGPTModels() {
   const page = state.chatgpt.page
   if (!page) throw new Error('ChatGPT Playwright not initialized')
@@ -1014,7 +1005,7 @@ async function listChatGPTHybridModels({ chatgpt_mode = 'auto' } = {}) {
   }
 }
 
-async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false }) {
+async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false }, emitStream = null) {
   const page = state.chatgpt.page
   if (!page) throw new Error('ChatGPT Playwright not initialized')
 
@@ -1030,7 +1021,7 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
       web_search,
       system_prompt || null,
     )
-    const requestResult = await page.evaluate(async ({ headers, payload }) => {
+    const requestResult = await page.evaluate(async ({ headers, payload, submittedPrompt, stream }) => {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), 75000)
       const response = await fetch('https://chatgpt.com/backend-api/f/conversation', {
@@ -1043,7 +1034,55 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
       const reader = response.body?.getReader()
       const decoder = new TextDecoder()
       let raw = ''
+      let lineBuffer = ''
+      let streamedText = ''
       let conversationId = ''
+
+      const collectText = (value, output = [], acceptsText = false, depth = 0) => {
+        if (depth > 12 || value == null) return output
+        if (typeof value === 'string') {
+          if (acceptsText && value.trim()) output.push(value)
+          return output
+        }
+        if (Array.isArray(value)) {
+          for (const item of value) collectText(item, output, acceptsText, depth + 1)
+          return output
+        }
+        if (typeof value === 'object') {
+          for (const [key, child] of Object.entries(value)) {
+            collectText(child, output, ['content', 'output_text', 'parts', 'text'].includes(key), depth + 1)
+          }
+        }
+        return output
+      }
+      const assistantText = (payload) => {
+        const mapping = payload?.mapping && typeof payload.mapping === 'object' ? Object.values(payload.mapping) : []
+        const messages = [
+          ...(payload?.message?.author?.role === 'assistant' ? [payload.message] : []),
+          ...mapping.map(entry => entry?.message),
+        ]
+          .filter((message, index, all) => message?.author?.role === 'assistant' && all.indexOf(message) === index)
+          .sort((left, right) => (left?.create_time || 0) - (right?.create_time || 0))
+        const message = messages.at(-1)
+        const promptText = String(submittedPrompt || '').replace(/\s+/g, ' ').trim()
+        return collectText(message?.content)
+          .join('\n')
+          .split(/\r?\n/)
+          .map(line => line.replace(/\s+/g, ' ').trim())
+          .filter(Boolean)
+          .filter(line => !/^worked for\b/i.test(line) && !/^modified \d+ files?\b/i.test(line))
+          .filter(line => !promptText || line !== promptText)
+          .join('\n')
+          .trim()
+      }
+      const emitDelta = async (payload) => {
+        if (!stream || typeof globalThis.__rustProxyHubStream !== 'function') return
+        const current = assistantText(payload)
+        if (!current) return
+        const delta = current.startsWith(streamedText) ? current.slice(streamedText.length) : current
+        streamedText = current
+        if (delta) await globalThis.__rustProxyHubStream({ type: 'delta', delta })
+      }
 
       if (reader) {
         const deadline = Date.now() + 70000
@@ -1060,9 +1099,11 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
           }
           const { done, value, timedOut } = chunk
           if (done || timedOut) break
-          raw += decoder.decode(value, { stream: true })
-          const lines = raw.split('\n')
-          raw = lines.pop() || ''
+          const decoded = decoder.decode(value, { stream: true })
+          raw = `${raw}${decoded}`.slice(-16_384)
+          lineBuffer += decoded
+          const lines = lineBuffer.split('\n')
+          lineBuffer = lines.pop() || ''
           for (const line of lines) {
             const trimmed = line.trim()
             if (!trimmed.startsWith('data:')) continue
@@ -1075,6 +1116,7 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
                 parsed.token?.conversation_id ||
                 parsed.options?.[0]?.conversation_id ||
                 conversationId
+              await emitDelta(parsed)
             } catch {}
           }
         }
@@ -1091,9 +1133,10 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
         status: response.status,
         conversationId,
         body: raw,
+        streamText: streamedText,
         upstream_cache: Object.keys(upstreamCache).length ? upstreamCache : null,
       }
-    }, { headers: requestHeaders, payload })
+    }, { headers: requestHeaders, payload, submittedPrompt: preparedPrompt.text, stream: Boolean(emitStream) })
     return { payload, requestResult, preparedPrompt }
   }
 
@@ -1136,7 +1179,10 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
     return ''
   }, { headers: requestHeaders, conversationId })
 
-  const text = extractChatGPTAssistantText(conversationJson ? JSON.parse(conversationJson) : null)
+  const text = extractChatGPTAssistantText(
+    conversationJson ? JSON.parse(conversationJson) : null,
+    sent.preparedPrompt.text,
+  ) || sent.requestResult.streamText
   if (!text) {
     throw new Error('ChatGPT response was empty. Confirm session is active, then retry.')
   }
@@ -1166,11 +1212,27 @@ function normalizeChatGptMode(mode) {
   return mode === 'codex' ? 'codex' : mode === 'web' ? 'web' : 'auto'
 }
 
-async function chatChatGPT({ model, prompt, system_prompt, web_search = false, chatgpt_mode = 'auto' }) {
+async function chatChatGPT({ model, prompt, system_prompt, web_search = false, chatgpt_mode = 'auto' }, emitStream = null) {
   const selectedModel = ensureSessionText(model, 'chatgpt-web-session')
   const mode = normalizeChatGptMode(chatgpt_mode)
   if (mode === 'web' || (mode === 'auto' && isChatGPTWebSessionModel(selectedModel))) {
-    return chatChatGPTWeb({ model: selectedModel, prompt, system_prompt, web_search })
+    const previousStream = state.chatgpt.streamLock
+    let releaseStream
+    state.chatgpt.streamLock = new Promise(resolve => {
+      releaseStream = resolve
+    })
+    await previousStream
+    try {
+      const previousEmitter = state.chatgpt.streamEmitter
+      state.chatgpt.streamEmitter = emitStream
+      try {
+        return await chatChatGPTWeb({ model: selectedModel, prompt, system_prompt, web_search }, emitStream)
+      } finally {
+        state.chatgpt.streamEmitter = previousEmitter
+      }
+    } finally {
+      releaseStream()
+    }
   }
 
   if (!state.chatgpt.oauth) throw new Error('ChatGPT OAuth not initialized')
@@ -2590,6 +2652,7 @@ async function closeAll() {
         state[key].headless = null
         state[key].cachedHeaders = null
         state[key].lastHeadersTime = 0
+        if (key === 'chatgpt') state.chatgpt.streamEmitter = null
       }
     }
   }
@@ -2608,7 +2671,7 @@ async function shutdownAndExit(code = 0) {
   process.exit(code)
 }
 
-async function handle(method, provider, params) {
+async function handle(method, provider, params, emitStream = null) {
   switch (`${provider}:${method}`) {
     case 'deepseek:init':
       return initDeepSeek(params)
@@ -2627,7 +2690,7 @@ async function handle(method, provider, params) {
     case 'chatgpt:list_models':
       return listChatGPTHybridModels(params)
     case 'chatgpt:chat':
-      return chatChatGPT(params)
+      return chatChatGPT(params, params?.stream ? emitStream : null)
     case 'codex:init':
       return initChatGPT({ ...(params || {}), oauth: true })
     case 'codex:capture_headers':
@@ -2639,7 +2702,7 @@ async function handle(method, provider, params) {
     case 'codex:list_models':
       return listChatGPTHybridModels({ ...(params || {}), chatgpt_mode: 'codex' })
     case 'codex:chat':
-      return chatChatGPT({ ...(params || {}), chatgpt_mode: 'codex' })
+      return chatChatGPT({ ...(params || {}), chatgpt_mode: 'codex' }, params?.stream ? emitStream : null)
     case 'gemini:init':
       return initGemini(params)
     case 'gemini:capture_headers':
@@ -2732,7 +2795,12 @@ process.stdin.on('data', async (chunk) => {
       try {
         const request = JSON.parse(line)
         requestId = request?.id ?? null
-        const result = await handle(request.method, request.provider, request.params || {})
+        const result = await handle(
+          request.method,
+          request.provider,
+          request.params || {},
+          (event) => sendEvent(request.id, event.type || 'status', event),
+        )
         send(request.id, result, null)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)

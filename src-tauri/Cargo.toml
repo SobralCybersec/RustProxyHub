@@ -15,6 +15,11 @@ repository = "https://github.com/Uninen/tauri-vue-template"
 name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "tauri-app"
+path = "src/main.rs"
+bench = false
+
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
 
@@ -55,3 +60,7 @@ lto = true        # Enables link-time-optimizations.
 opt-level = "s"   # Prioritizes small binary size. Use `3` if you prefer speed.
 panic = "abort"   # Higher performance by disabling panic handlers.
 strip = true      # Ensures debug symbols are removed.
+
+[[bench]]
+name = "tool_call_parser"
+harness = false

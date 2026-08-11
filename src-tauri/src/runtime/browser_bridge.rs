@@ -17,7 +17,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, Command},
     runtime::Handle,
-    sync::{oneshot, Mutex},
+    sync::{mpsc, oneshot, Mutex},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -74,9 +74,57 @@ pub struct BridgeBasicHeadersResponse {
 struct RpcResponse {
     id: u64,
     #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
     result: Option<Value>,
     #[serde(default)]
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BridgeStreamEvent {
+    pub event: String,
+    pub payload: Value,
+}
+
+pub struct BridgeStream {
+    events: mpsc::UnboundedReceiver<Result<BridgeStreamEvent>>,
+    completion: oneshot::Receiver<Result<Value>>,
+    pending: Arc<Mutex<HashMap<u64, PendingRpc>>>,
+    request_id: u64,
+    timeout: Duration,
+}
+
+impl BridgeStream {
+    pub async fn next_event(&mut self) -> Option<Result<BridgeStreamEvent>> {
+        self.events.recv().await
+    }
+
+    pub async fn finish<R: DeserializeOwned>(self) -> Result<R> {
+        let BridgeStream {
+            completion,
+            pending,
+            request_id,
+            timeout,
+            ..
+        } = self;
+        match tokio::time::timeout(timeout, completion).await {
+            Ok(Ok(result)) => Ok(serde_json::from_value(result?)?),
+            Ok(Err(err)) => Err(anyhow!("helper stream response channel closed").context(err)),
+            Err(_) => {
+                pending.lock().await.remove(&request_id);
+                Err(anyhow!(
+                    "helper stream timed out after {}ms",
+                    timeout.as_millis()
+                ))
+            }
+        }
+    }
+}
+
+struct PendingRpc {
+    completion: oneshot::Sender<Result<Value>>,
+    stream: Option<mpsc::UnboundedSender<Result<BridgeStreamEvent>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,7 +142,7 @@ pub struct PlaywrightBridge {
     node_path: Arc<PathBuf>,
     log_path: Arc<PathBuf>,
     process: Arc<Mutex<Option<BridgeProcess>>>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>,
+    pending: Arc<Mutex<HashMap<u64, PendingRpc>>>,
     next_id: Arc<AtomicU64>,
     init_params: Arc<Mutex<Option<InitParams>>>,
     initialized: Arc<Mutex<bool>>,
@@ -174,11 +222,63 @@ impl PlaywrightBridge {
         self.request_raw(method, params).await
     }
 
+    pub async fn request_stream<T: Serialize>(
+        &self,
+        method: &str,
+        params: T,
+    ) -> Result<BridgeStream> {
+        let (stream_sender, events) = mpsc::unbounded_channel();
+        let (request_id, completion) = self
+            .send_request(method, params, Some(stream_sender))
+            .await?;
+        Ok(BridgeStream {
+            events,
+            completion,
+            pending: Arc::clone(&self.pending),
+            request_id,
+            timeout: self.request_timeout,
+        })
+    }
+
     async fn request_raw<T: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
         params: T,
     ) -> Result<R> {
+        let (request_id, receiver) = self.send_request(method, params, None).await?;
+        let value = match tokio::time::timeout(self.request_timeout, receiver).await {
+            Ok(Ok(result)) => result.map_err(|err| {
+                anyhow!(
+                    "helper method {method} failed; inspect {}",
+                    self.log_path.display()
+                )
+                .context(err)
+            })?,
+            Ok(Err(err)) => {
+                return Err(anyhow!(
+                    "helper response channel closed for {method}; inspect {}",
+                    self.log_path.display()
+                )
+                .context(err))
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&request_id);
+                return Err(anyhow!(
+                    "helper request timed out after {}ms: {method}; inspect {}",
+                    self.request_timeout.as_millis(),
+                    self.log_path.display()
+                ));
+            }
+        };
+        Ok(serde_json::from_value(value)?)
+    }
+
+    async fn send_request<T: Serialize>(
+        &self,
+        method: &str,
+        params: T,
+        stream: Option<mpsc::UnboundedSender<Result<BridgeStreamEvent>>>,
+    ) -> Result<(u64, oneshot::Receiver<Result<Value>>)> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = RpcRequest {
             id,
@@ -194,7 +294,13 @@ impl PlaywrightBridge {
 
         let stdin = self.ensure_process().await?;
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id, sender);
+        self.pending.lock().await.insert(
+            id,
+            PendingRpc {
+                completion: sender,
+                stream,
+            },
+        );
 
         {
             let mut stdin = stdin.lock().await;
@@ -212,31 +318,7 @@ impl PlaywrightBridge {
             }
         }
 
-        let value = match tokio::time::timeout(self.request_timeout, receiver).await {
-            Ok(Ok(result)) => result.map_err(|err| {
-                anyhow!(
-                    "helper method {method} failed; inspect {}",
-                    self.log_path.display()
-                )
-                .context(err)
-            })?,
-            Ok(Err(err)) => {
-                return Err(anyhow!(
-                    "helper response channel closed for {method}; inspect {}",
-                    self.log_path.display()
-                )
-                .context(err))
-            }
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                return Err(anyhow!(
-                    "helper request timed out after {}ms: {method}; inspect {}",
-                    self.request_timeout.as_millis(),
-                    self.log_path.display()
-                ));
-            }
-        };
-        Ok(serde_json::from_value(value)?)
+        Ok((id, receiver))
     }
 
     async fn is_initialized_with(&self, params: &InitParams) -> bool {
@@ -339,6 +421,23 @@ impl PlaywrightBridge {
                             serde_json::from_str(&line).map_err(|err| anyhow!(err));
                         match parsed {
                             Ok(response) => {
+                                if let Some(event) = response.event {
+                                    let payload = response.result.unwrap_or(Value::Null);
+                                    let stream = pending_reader
+                                        .lock()
+                                        .await
+                                        .get(&response.id)
+                                        .and_then(|pending| pending.stream.as_ref().cloned());
+                                    append_bridge_log(
+                                        log_for_stdout.as_ref(),
+                                        format!("stdout stream id={} event={event}", response.id),
+                                    );
+                                    if let Some(sender) = stream {
+                                        let _ =
+                                            sender.send(Ok(BridgeStreamEvent { event, payload }));
+                                    }
+                                    continue;
+                                }
                                 append_bridge_log(
                                     log_for_stdout.as_ref(),
                                     format!(
@@ -347,9 +446,14 @@ impl PlaywrightBridge {
                                         response.error.is_some()
                                     ),
                                 );
-                                let sender = pending_reader.lock().await.remove(&response.id);
-                                if let Some(sender) = sender {
-                                    let _ = sender.send(match response.error {
+                                let pending = pending_reader.lock().await.remove(&response.id);
+                                if let Some(pending) = pending {
+                                    if let Some(stream) = pending.stream {
+                                        if let Some(error) = response.error.as_ref() {
+                                            let _ = stream.send(Err(anyhow!(error.clone())));
+                                        }
+                                    }
+                                    let _ = pending.completion.send(match response.error {
                                         Some(error) => Err(anyhow!(error)),
                                         None => Ok(response.result.unwrap_or(Value::Null)),
                                     });
@@ -485,8 +589,11 @@ impl PlaywrightBridge {
                     log_for_exit.display()
                 )
             };
-            for (_, sender) in pending.drain() {
-                let _ = sender.send(Err(anyhow!(error_message.clone())));
+            for (_, pending) in pending.drain() {
+                if let Some(stream) = pending.stream {
+                    let _ = stream.send(Err(anyhow!(error_message.clone())));
+                }
+                let _ = pending.completion.send(Err(anyhow!(error_message.clone())));
             }
         });
     }
@@ -643,9 +750,18 @@ fn bridge_log_path(provider: &str) -> Result<PathBuf> {
     //   - log file opened 0600
     //   - secret-bearing stderr lines scrubbed before write
     // Upgrade path: move under app_data_dir when a path is threaded through.
-    let dir = std::env::temp_dir().join("rustproxyhub-playwright");
-    secure_create_dir(&dir)?;
-    Ok(dir.join(format!("{provider}-bridge.log")))
+    let path = provider_bridge_log_path(provider);
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("bridge log path has no parent"))?;
+    secure_create_dir(dir)?;
+    Ok(path)
+}
+
+pub fn provider_bridge_log_path(provider: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("rustproxyhub-playwright")
+        .join(format!("{provider}-bridge.log"))
 }
 
 fn secure_create_dir(dir: &Path) -> Result<()> {
