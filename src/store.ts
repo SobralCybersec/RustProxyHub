@@ -10,6 +10,7 @@ import type {
   ProviderLogs,
   ProviderName,
   ProviderOverview,
+  QwenAccountSummary,
 } from '@/lib/types'
 
 export { providerOrder }
@@ -107,6 +108,7 @@ export const useStore = defineStore('main', {
     workbenchChatGptModels: [] as string[],
     workbenchChatGptModelModes: {} as Record<string, string>,
     workbenchResponse: '',
+    qwenAccounts: [] as QwenAccountSummary[],
   }),
 
   getters: {
@@ -167,6 +169,10 @@ export const useStore = defineStore('main', {
 
     openLoginCount(state): number {
       return state.overview?.open_provider_login_sessions.length ?? 0
+    },
+
+    openQwenAccountLogins(state): string[] {
+      return state.overview?.open_qwen_account_login_sessions ?? []
     },
 
     localeCode(state): string {
@@ -287,11 +293,15 @@ export const useStore = defineStore('main', {
       this.providerLogs[provider] = response.entries
     },
 
+    async refreshQwenAccounts() {
+      this.qwenAccounts = await invoke<QwenAccountSummary[]>('list_qwen_accounts')
+    },
+
     async initApp() {
       if (this.isInitialized) return
       this.isInitialized = true
       await this.refreshOverview()
-      await this.refreshWorkbenchChatGptModels()
+      await Promise.all([this.refreshWorkbenchChatGptModels(), this.refreshQwenAccounts()])
       this.syncWorkbenchModel()
 
       // Real Tauri: subscribe to push events from Rust for zero-latency dashboard updates.
@@ -349,6 +359,40 @@ export const useStore = defineStore('main', {
     async stopProviderLogin(provider: ProviderName) {
       await this.runTask(`login:stop:${provider}`, async () => {
         await invoke<string[]>('stop_provider_login_session', { provider })
+        await this.refreshOverview()
+      })
+    },
+
+    async addQwenAccount(email: string, password: string) {
+      await this.runTask('qwen-account:add', async () => {
+        this.qwenAccounts = await invoke<QwenAccountSummary[]>('add_qwen_account', {
+          request: { email, password },
+        })
+        await this.refreshOverview()
+      })
+    },
+
+    async removeQwenAccount(accountId: string) {
+      await this.runTask(`qwen-account:remove:${accountId}`, async () => {
+        this.qwenAccounts = await invoke<QwenAccountSummary[]>('remove_qwen_account', {
+          accountId,
+        })
+        await this.refreshOverview()
+      })
+    },
+
+    async startQwenAccountLogin(accountId: string) {
+      await this.runTask(`qwen-account:login:${accountId}`, async () => {
+        await invoke<string[]>('start_qwen_account_login_session', {
+          request: { account_id: accountId, browser: this.browserPrefs.qwen },
+        })
+        await this.refreshOverview()
+      })
+    },
+
+    async stopQwenAccountLogin(accountId: string) {
+      await this.runTask(`qwen-account:close:${accountId}`, async () => {
+        await invoke<string[]>('stop_qwen_account_login_session', { accountId })
         await this.refreshOverview()
       })
     },

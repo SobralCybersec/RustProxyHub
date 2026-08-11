@@ -1,6 +1,7 @@
 pub mod browser_bridge;
 pub mod ids;
 pub mod proxy_core;
+pub mod session_store;
 
 #[path = "providers/browser_runtime.rs"]
 pub mod browser_runtime;

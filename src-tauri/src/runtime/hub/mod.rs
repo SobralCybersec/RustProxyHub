@@ -2,7 +2,7 @@ use crate::proxy_core::{constant_time_eq, OpenAIRequest};
 use anyhow::{anyhow, Result};
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -160,6 +160,7 @@ async fn run_server(config: AppConfig) -> Result<()> {
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
         .route("/v1/upload", post(upload))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state);
 
     let host: IpAddr = config
@@ -227,14 +228,9 @@ async fn provider_logs(
         "mistral" => ProviderName::Mistral,
         "zai" => ProviderName::Zai,
         "meta" => ProviderName::Meta,
-        "qwen" | "deepseek" | "kimi" => {
-            return Json(json!({
-                "provider": provider,
-                "entries": [],
-                "source": "provider does not use the Playwright bridge log",
-            }))
-            .into_response();
-        }
+        "deepseek" => ProviderName::Deepseek,
+        "kimi" => ProviderName::Kimi,
+        "qwen" => ProviderName::Qwen,
         _ => return json_error(StatusCode::NOT_FOUND, "Provider not found".to_owned()),
     };
     match provider_request(

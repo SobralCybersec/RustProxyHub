@@ -4,6 +4,7 @@ import type {
   ProviderLogs,
   ProviderName,
   ProviderOverview,
+  QwenAccountSummary,
   ServiceName,
 } from '@/lib/types'
 
@@ -64,6 +65,8 @@ class MockWorld {
 
   providers: Record<ProviderName, ProviderState>
   openProviderLogins = new Set<ProviderName>()
+  openQwenAccountLogins = new Set<string>()
+  qwenAccounts: QwenAccountSummary[] = []
   logs: Record<ServiceName, string[]>
 
   // Rolling time-series used by arcade charts (newest last)
@@ -212,7 +215,9 @@ class MockWorld {
           : null,
       },
       providers,
+      qwen_account_count: this.qwenAccounts.length,
       open_provider_login_sessions: [...this.openProviderLogins],
+      open_qwen_account_login_sessions: [...this.openQwenAccountLogins],
       // extended telemetry series
       throughput_series: [...this.throughputSeries],
       latency_series: [...this.latencySeries],
@@ -281,6 +286,7 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
           web_search: overview.web_search_supported,
         },
         logs: [...world.logs[provider]],
+        qwen_accounts: provider === 'qwen' ? [...world.qwenAccounts] : undefined,
       }
       return details as T
     }
@@ -302,6 +308,44 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
       world.openProviderLogins.delete(provider)
       world.providers[provider].login_state = 'authenticated'
       return [] as unknown as T
+    }
+
+    case 'list_qwen_accounts':
+      return [...world.qwenAccounts] as T
+
+    case 'add_qwen_account': {
+      const request = args?.request as { email: string; password: string }
+      const email = request.email.trim()
+      if (!email) throw new Error('email is required')
+      if (world.qwenAccounts.some(account => account.email === email)) {
+        throw new Error(`account with email ${email} already exists`)
+      }
+      world.qwenAccounts.push({
+        id: `qwen-${world.qwenAccounts.length + 1}`,
+        email,
+        has_password: Boolean(request.password),
+        created_at: new Date().toISOString(),
+      })
+      return [...world.qwenAccounts] as T
+    }
+
+    case 'remove_qwen_account': {
+      const accountId = args?.accountId as string
+      world.qwenAccounts = world.qwenAccounts.filter(account => account.id !== accountId)
+      world.openQwenAccountLogins.delete(accountId)
+      return [...world.qwenAccounts] as T
+    }
+
+    case 'start_qwen_account_login_session': {
+      const request = args?.request as { account_id: string }
+      world.openQwenAccountLogins.add(request.account_id)
+      return [...world.openQwenAccountLogins] as unknown as T
+    }
+
+    case 'stop_qwen_account_login_session': {
+      const accountId = args?.accountId as string
+      world.openQwenAccountLogins.delete(accountId)
+      return [...world.openQwenAccountLogins] as unknown as T
     }
 
     case 'start_service': {

@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { ChatGptOAuthClient } from './chatgpt-oauth.mjs'
 import { extractChatGPTAssistantModel, extractChatGPTAssistantReasoning, extractChatGPTAssistantText } from './chatgpt-web-response.mjs'
-import { applyChatGPTConversationSession, chatGPTSessionFromTemplate, chatGPTSessionKey, latestChatGPTAssistantMessageId } from './chatgpt-web-session.mjs'
+import { applyChatGPTConversationSession, chatGPTSessionFromTemplate, chatGPTSessionKey, latestChatGPTAssistantMessageId, loadChatGPTWebSessions, saveChatGPTWebSessions } from './chatgpt-web-session.mjs'
 import { compactStructuredPrompt, summarizePromptCompaction } from './prompt-compaction.mjs'
 
 // Fix IPv6/IPv4 resolution issue in Node 17+ (localhost resolves to ::1 instead of 127.0.0.1)
@@ -212,6 +212,7 @@ const state = {
     lastHeadersTime: 0,
     streamEmitter: null,
     streamLock: Promise.resolve(),
+    runtimeDir: null,
     webSessions: new Map(),
   },
   gemini: {
@@ -621,6 +622,10 @@ async function openDeepSeekLogin({ runtime_dir, browser }) {
 
 async function initChatGPTOnce({ runtime_dir, headless, browser }) {
   process.chdir(runtime_dir)
+  if (state.chatgpt.runtimeDir !== process.cwd()) {
+    state.chatgpt.runtimeDir = process.cwd()
+    state.chatgpt.webSessions = loadChatGPTWebSessions(state.chatgpt.runtimeDir)
+  }
   if (!state.chatgpt.oauth || state.chatgpt.oauth.runtimeDir !== process.cwd()) {
     await state.chatgpt.oauth?.close()
     state.chatgpt.oauth = new ChatGptOAuthClient(process.cwd())
@@ -633,7 +638,6 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     state.chatgpt.cachedHeaders = null
     state.chatgpt.lastHeadersTime = 0
     state.chatgpt.streamEmitter = null
-    state.chatgpt.webSessions.clear()
   }
   ensureDir(path.resolve('chatgpt_profile'))
   const { engine, channel, executablePath } = resolveEngine(browser)
@@ -665,6 +669,11 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     }
   })
   state.chatgpt.headless = headless
+}
+
+function persistChatGPTWebSessions() {
+  if (!state.chatgpt.runtimeDir) return
+  saveChatGPTWebSessions(state.chatgpt.runtimeDir, state.chatgpt.webSessions)
 }
 
 async function initChatGPT(params) {
@@ -1282,8 +1291,10 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
         parent_message_id: parentMessageId,
         updated_at: Date.now(),
       })
+      persistChatGPTWebSessions()
     } else {
       state.chatgpt.webSessions.delete(sessionKey)
+      persistChatGPTWebSessions()
     }
   }
   const text = extractChatGPTAssistantText(conversationPayload, sent.preparedPrompt.text)

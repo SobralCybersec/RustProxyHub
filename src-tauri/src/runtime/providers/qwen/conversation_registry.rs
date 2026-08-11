@@ -1,38 +1,49 @@
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use crate::runtime::session_store::SessionStore;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QwenConversation {
     pub chat_id: String,
     pub account_id: String,
     pub parent_id: Option<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ConversationRegistry {
-    conversations: Arc<Mutex<HashMap<String, QwenConversation>>>,
+    store: SessionStore,
 }
 
 impl ConversationRegistry {
+    pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Ok(Self {
+            store: SessionStore::open(path.as_ref())?,
+        })
+    }
+
     pub async fn get(&self, session_key: &str) -> Option<QwenConversation> {
-        self.conversations.lock().await.get(session_key).cloned()
+        self.store.get("qwen", session_key).ok().flatten()
     }
 
     pub async fn upsert(&self, session_key: String, conversation: QwenConversation) {
-        self.conversations.lock().await.insert(session_key, conversation);
+        if let Err(err) = self.store.set("qwen", &session_key, &conversation) {
+            eprintln!("[qwen] failed to persist conversation {session_key}: {err}");
+        }
     }
 
     pub async fn update_parent(&self, session_key: &str, chat_id: &str, parent_id: String) {
-        let mut conversations = self.conversations.lock().await;
-        if let Some(conversation) = conversations.get_mut(session_key) {
+        if let Some(mut conversation) = self.get(session_key).await {
             if conversation.chat_id == chat_id {
                 conversation.parent_id = Some(parent_id);
+                self.upsert(session_key.to_owned(), conversation).await;
             }
         }
     }
 
     pub async fn remove(&self, session_key: &str) {
-        self.conversations.lock().await.remove(session_key);
+        if let Err(err) = self.store.remove("qwen", session_key) {
+            eprintln!("[qwen] failed to remove persisted conversation {session_key}: {err}");
+        }
     }
 }
 
@@ -42,7 +53,11 @@ mod tests {
 
     #[tokio::test]
     async fn preserves_parent_for_same_session_and_chat() {
-        let registry = ConversationRegistry::default();
+        let path = std::env::temp_dir().join(format!(
+            "rust-proxy-hub-qwen-conversation-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let registry = ConversationRegistry::open(&path).unwrap();
         registry
             .upsert(
                 "default".to_owned(),
@@ -65,5 +80,7 @@ mod tests {
             registry.get("default").await.unwrap().parent_id.as_deref(),
             Some("response-1")
         );
+        drop(registry);
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -10,6 +10,8 @@ node_modules.bak
 node_modules_clean
 runtime-test
 research/
+target-baseline
+artifacts/*
 
 front-end-example
 node_modules

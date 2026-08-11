@@ -7,11 +7,12 @@ use crate::proxy_core::{
     sse_json, usage_from_text, MessageToolCall, OpenAIRequest, StreamingToolParser,
     ToolCallFunction,
 };
+use crate::runtime::session_store::SessionStore;
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use axum::{
     body::Body,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -22,13 +23,11 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -58,7 +57,7 @@ struct AppState {
     bridge: Arc<PlaywrightBridge>,
     client: reqwest::Client,
     config: AppConfig,
-    session_parents: Arc<Mutex<HashMap<SessionId, Option<ParentMessageId>>>>,
+    session_parents: SessionStore,
 }
 
 #[derive(Default)]
@@ -303,6 +302,7 @@ struct ManualLoginRequest {
 }
 
 async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<()> {
+    crate::proxy_core::enforce_loopback_guard(&config.host, config.api_key.as_deref())?;
     bridge
         .init(InitParams {
             runtime_dir: config.runtime_dir.to_string_lossy().to_string(),
@@ -321,15 +321,17 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
             .timeout(Duration::from_secs(120))
             .build()?,
         config: config.clone(),
-        session_parents: Arc::new(Mutex::new(HashMap::new())),
+        session_parents: SessionStore::open(config.runtime_dir.join("provider-sessions.db"))?,
     };
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/admin/manual_login", post(admin_manual_login))
         .route("/admin/close_login", post(admin_close_login))
+        .route("/admin/logs", get(admin_logs))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state);
 
     let host: IpAddr = config
@@ -410,6 +412,24 @@ async fn admin_close_login(State(state): State<AppState>, headers: HeaderMap) ->
         Ok(()) => Json(json!({ "ok": true, "provider": "deepseek" })).into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
+}
+
+async fn admin_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref(), true) {
+        return *response;
+    }
+    let entries = tokio::fs::read_to_string(state.bridge.log_path())
+        .await
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(160)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Json(json!({ "provider": "deepseek", "entries": entries })).into_response()
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -494,11 +514,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
         } else {
             state
                 .session_parents
-                .lock()
-                .await
-                .get(&ui_session_id)
-                .copied()
-                .flatten()
+                .get::<ParentMessageId>("deepseek", ui_session_id.as_str())?
                 .or(browser_parent)
         };
 
@@ -667,7 +683,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
     }
 
     let model = body.model.clone();
-    let session_parents = Arc::clone(&state.session_parents);
+    let session_parents = state.session_parents.clone();
     let stream = stream! {
         yield Ok::<Bytes, std::convert::Infallible>(sse_json(json!({
             "id": completion_id,
@@ -859,7 +875,7 @@ Never say tools are unavailable, pasted text, unsupported, or not accessible fro
 async fn process_deepseek_line(
     data: &str,
     ui_session_id: &SessionId,
-    session_parents: &Arc<Mutex<HashMap<SessionId, Option<ParentMessageId>>>>,
+    session_parents: &SessionStore,
     parse_state: &mut DeepSeekParseState,
     tool_parser: &mut Option<StreamingToolParser>,
     tool_calls: &mut Vec<MessageToolCall>,
@@ -885,7 +901,7 @@ async fn process_deepseek_line(
 async fn collect_deepseek_events(
     data: &str,
     ui_session_id: &SessionId,
-    session_parents: &Arc<Mutex<HashMap<SessionId, Option<ParentMessageId>>>>,
+    session_parents: &SessionStore,
     parse_state: &mut DeepSeekParseState,
     tool_parser: &mut Option<StreamingToolParser>,
 ) -> Result<Vec<ParsedEvent>> {
@@ -919,10 +935,11 @@ async fn collect_deepseek_events(
                 .and_then(Value::as_i64)
         })
     {
-        session_parents.lock().await.insert(
-            ui_session_id.to_owned(),
-            Some(ParentMessageId::from(message_id)),
-        );
+        session_parents.set(
+            "deepseek",
+            ui_session_id.as_str(),
+            &ParentMessageId::from(message_id),
+        )?;
     }
 
     if let Some(path) = chunk.get("p").and_then(Value::as_str) {

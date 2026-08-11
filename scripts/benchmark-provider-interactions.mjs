@@ -69,7 +69,9 @@ function compactToolResult(result, providerLogs) {
       tool_call_detected: result.tool_call_detected,
     },
     provider: result.provider,
+    request: result.request,
     result: result.result,
+    response: result.response,
     status: result.status || null,
   }
 }
@@ -82,7 +84,9 @@ function compactInteractionResult(protocol, result) {
     observed: { interaction_confirmation: result.result === 'passed' },
     protocol,
     provider: result.provider,
+    request: result.request,
     result: result.result,
+    response: result.response,
     response_text: result.response_text || '',
     status: result.status || null,
   }
@@ -140,6 +144,10 @@ export async function runProviderInteractionBenchmark({ apiKey = '', fetchImpl =
     },
     hub: hubUrl.replace(/\/+$/, ''),
     iterations,
+    provider_logs: runs.map(run => ({
+      iteration: run.iteration,
+      providers: run.tools.provider_logs,
+    })),
     summary: {
       failed: conversationResults.filter(result => result.result !== 'passed').length,
       latency_ms: {

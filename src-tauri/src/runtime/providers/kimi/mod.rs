@@ -5,11 +5,12 @@ use crate::proxy_core::{
     build_prompt, constant_time_eq, current_timestamp, sse_done, sse_json, usage_from_text,
     MessageToolCall, OpenAIRequest, StreamingToolParser, ToolCallFunction,
 };
+use crate::runtime::session_store::SessionStore;
 use anyhow::{anyhow, Result};
 use async_stream::stream;
 use axum::{
     body::Body,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -22,12 +23,10 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
 };
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
 /* static literal patterns: an invalid regex here is a build-time typo, not a runtime condition */
@@ -79,7 +78,7 @@ struct AppState {
     bridge: Arc<PlaywrightBridge>,
     client: reqwest::Client,
     config: AppConfig,
-    session_parents: Arc<Mutex<HashMap<String, Option<String>>>>,
+    session_parents: SessionStore,
 }
 
 #[derive(Default)]
@@ -139,6 +138,7 @@ struct ManualLoginRequest {
 }
 
 async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<()> {
+    crate::proxy_core::enforce_loopback_guard(&config.host, config.api_key.as_deref())?;
     bridge
         .init(InitParams {
             runtime_dir: config.runtime_dir.to_string_lossy().to_string(),
@@ -151,15 +151,17 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
         bridge,
         client: reqwest::Client::builder().build()?,
         config: config.clone(),
-        session_parents: Arc::new(Mutex::new(HashMap::new())),
+        session_parents: SessionStore::open(config.runtime_dir.join("provider-sessions.db"))?,
     };
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/admin/manual_login", post(admin_manual_login))
         .route("/admin/close_login", post(admin_close_login))
+        .route("/admin/logs", get(admin_logs))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state);
 
     let host: IpAddr = config
@@ -229,6 +231,24 @@ async fn admin_close_login(State(state): State<AppState>, headers: HeaderMap) ->
         Ok(()) => Json(json!({ "ok": true, "provider": "kimi" })).into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
+}
+
+async fn admin_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+    let entries = tokio::fs::read_to_string(state.bridge.log_path())
+        .await
+        .unwrap_or_default()
+        .lines()
+        .rev()
+        .take(160)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Json(json!({ "provider": "kimi", "entries": entries })).into_response()
 }
 
 async fn models(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -304,7 +324,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
             let result = consume_kimi_stream(
                 current_response,
                 &current_session,
-                Arc::clone(&state.session_parents),
+                state.session_parents.clone(),
                 body.tools.as_ref().map(|_| StreamingToolParser::new()),
             )
             .await?;
@@ -409,11 +429,12 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                                     .and_then(Value::as_str)
                                     == Some("assistant")
                                 {
-                                    state_for_stream
+                                    if let Err(err) = state_for_stream
                                         .session_parents
-                                        .lock()
-                                        .await
-                                        .insert(current_session.clone(), Some(message_id.to_owned()));
+                                        .set("kimi", &current_session, &message_id.to_owned())
+                                    {
+                                        eprintln!("[kimi] failed to persist session parent: {err}");
+                                    }
                                 }
                             }
 
@@ -620,11 +641,7 @@ async fn request_kimi_stream(
     } else {
         state
             .session_parents
-            .lock()
-            .await
-            .get(&ui_session_id)
-            .cloned()
-            .flatten()
+            .get::<String>("kimi", &ui_session_id)?
             .or_else(|| {
                 capture
                     .parent_message_id
@@ -751,7 +768,7 @@ async fn request_kimi_stream(
 async fn consume_kimi_stream(
     response: reqwest::Response,
     initial_ui_session_id: &str,
-    session_parents: Arc<Mutex<HashMap<String, Option<String>>>>,
+    session_parents: SessionStore,
     mut tool_parser: Option<StreamingToolParser>,
 ) -> Result<ConsumeResult> {
     let mut parser = ConnectParser::default();
@@ -786,10 +803,7 @@ async fn consume_kimi_stream(
                     .and_then(Value::as_str)
                     == Some("assistant")
                 {
-                    session_parents
-                        .lock()
-                        .await
-                        .insert(ui_session_id.clone(), Some(message_id.to_owned()));
+                    session_parents.set("kimi", &ui_session_id, &message_id.to_owned())?;
                 }
             }
 

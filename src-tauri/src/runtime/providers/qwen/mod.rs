@@ -1,8 +1,8 @@
 mod account_manager;
 pub mod accounts;
 mod cache;
-mod conversation_registry;
 pub mod config;
+mod conversation_registry;
 mod metrics;
 mod model_registry;
 mod stream_registry;
@@ -36,7 +36,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -46,14 +46,14 @@ use uuid::Uuid;
 const QWEN_WEB_VERSION: &str = "0.2.66";
 
 use self::{
-    account_manager::AccountManager,
+    account_manager::{AccountLease, AccountManager},
     accounts::{global_account, AccountStore, QwenAccount},
     cache::MemoryCache,
-    conversation_registry::{ConversationRegistry, QwenConversation},
     config::{
         ensure_runtime_layout, legacy_accounts_json_candidates, legacy_db_candidates,
         workspace_root, AppConfig,
     },
+    conversation_registry::{ConversationRegistry, QwenConversation},
     metrics::Metrics,
     model_registry::{normalize_model_id, ModelRegistry, MAX_PAYLOAD_SIZE},
     stream_registry::StreamRegistry,
@@ -73,7 +73,33 @@ struct AppState {
     cache: MemoryCache,
     conversations: ConversationRegistry,
     stream_registry: StreamRegistry,
+    traces: QwenTraceStore,
     watchdog: Watchdog,
+}
+
+#[derive(Clone, Default)]
+struct QwenTraceStore {
+    entries: Arc<tokio::sync::Mutex<VecDeque<Value>>>,
+}
+
+impl QwenTraceStore {
+    async fn record(&self, completion_id: &str, kind: &str, payload: String) {
+        const LIMIT: usize = 64;
+        let mut entries = self.entries.lock().await;
+        entries.push_back(json!({
+            "completion_id": completion_id,
+            "kind": kind,
+            "payload": payload,
+            "timestamp": current_timestamp(),
+        }));
+        while entries.len() > LIMIT {
+            entries.pop_front();
+        }
+    }
+
+    async fn snapshot(&self) -> Vec<Value> {
+        self.entries.lock().await.iter().cloned().collect()
+    }
 }
 
 #[derive(Default)]
@@ -138,6 +164,7 @@ struct ServerRuntime {
     cache: MemoryCache,
     model_registry: ModelRegistry,
     stream_registry: StreamRegistry,
+    conversations: ConversationRegistry,
     watchdog: Watchdog,
 }
 
@@ -162,8 +189,9 @@ async fn run_server(
         model_registry: runtime.model_registry,
         metrics: runtime.metrics,
         cache: runtime.cache,
-        conversations: ConversationRegistry::default(),
+        conversations: runtime.conversations,
         stream_registry: runtime.stream_registry,
+        traces: QwenTraceStore::default(),
         watchdog: runtime.watchdog,
     };
 
@@ -171,6 +199,7 @@ async fn run_server(
         .route("/health", get(health))
         .route("/metrics", get(metrics_route))
         .route("/admin/status", get(admin_status))
+        .route("/admin/logs", get(admin_logs))
         .route("/admin/manual_login", post(admin_manual_login))
         .route("/admin/close_login", post(admin_close_login))
         .route("/v1/models", get(models))
@@ -226,6 +255,7 @@ async fn admin_status(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "provider": "qwen",
             "accounts": accounts,
             "cooldowns": state.account_manager.cooldown_status().await,
+            "active_accounts": state.account_manager.active_status().await,
             "active_streams": state.stream_registry.snapshots().await,
             "cache": state.cache.stats().await,
             "watchdog": state.watchdog.snapshot().await,
@@ -234,6 +264,18 @@ async fn admin_status(State(state): State<AppState>, headers: HeaderMap) -> Resp
         .into_response(),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
+}
+
+async fn admin_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_api_key(&headers, state.config.api_key.as_deref()) {
+        return *response;
+    }
+
+    Json(json!({
+        "provider": "qwen",
+        "entries": state.traces.snapshot().await,
+    }))
+    .into_response()
 }
 
 async fn admin_manual_login(
@@ -706,7 +748,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
     let session_key = qwen_session_key(body.user.as_deref());
     let existing_conversation = state.conversations.get(&session_key).await;
     let all_accounts = effective_accounts(&state.accounts)?;
-    let accounts = if let Some(conversation) = &existing_conversation {
+    let mut accounts = if let Some(conversation) = &existing_conversation {
         match all_accounts
             .iter()
             .find(|account| account.id == conversation.account_id)
@@ -714,11 +756,11 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
             Some(account) => vec![account.clone()],
             None => {
                 state.conversations.remove(&session_key).await;
-                all_accounts
+                all_accounts.clone()
             }
         }
     } else {
-        all_accounts
+        all_accounts.clone()
     };
     let mut current_account = state.account_manager.select_next(&accounts, false).await;
     let mut tried_accounts = HashSet::new();
@@ -733,6 +775,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
             continue;
         }
         tried_accounts.insert(account.id.clone());
+        let account_lease = state.account_manager.lease(account.id.clone()).await;
 
         let bridge_account_id = account_id_for_bridge(&account);
         let header_result = state
@@ -780,13 +823,15 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
         loop {
             let chat_id = match &conversation {
                 Some(conversation) => conversation.chat_id.clone(),
-                None => match create_qwen_chat(&state.client, &state.config, &basic_headers).await {
-                    Ok(chat_id) => chat_id,
-                    Err(err) => {
-                        last_error = Some(err);
-                        break;
+                None => {
+                    match create_qwen_chat(&state.client, &state.config, &basic_headers).await {
+                        Ok(chat_id) => chat_id,
+                        Err(err) => {
+                            last_error = Some(err);
+                            break;
+                        }
                     }
-                },
+                }
             };
             let parent_id = conversation
                 .as_ref()
@@ -806,12 +851,15 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
 
             match request_qwen_chat(
                 &state,
-                &body,
-                &final_prompt,
-                &chat_id,
-                parent_id.as_deref(),
-                &basic_headers,
-                &files,
+                QwenChatRequest {
+                    body: &body,
+                    final_prompt: &final_prompt,
+                    completion_id: &completion_id,
+                    chat_id: &chat_id,
+                    parent_id: parent_id.as_deref(),
+                    headers: &basic_headers,
+                    files: &files,
+                },
             )
             .await
             {
@@ -871,6 +919,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                         response,
                         cancel_token,
                         include_usage,
+                        account_lease,
                     }));
                 }
                 Err(err) => {
@@ -882,6 +931,10 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                             .account_manager
                             .mark_rate_limited(&account.id, err.retry_after_ms, "RateLimited")
                             .await;
+                        if accounts.len() != all_accounts.len() {
+                            state.conversations.remove(&session_key).await;
+                            accounts = all_accounts.clone();
+                        }
                         last_error = Some(anyhow!(err.message));
                         break;
                     }
@@ -935,6 +988,7 @@ async fn build_non_stream_response(
     let mut tool_parser = body.tools.as_ref().map(|_| StreamingToolParser::new());
     let mut tool_calls = Vec::new();
     let mut buffer = String::new();
+    let mut raw_response = String::new();
     let mut offset = 0usize;
     let mut bytes_stream = response.bytes_stream();
 
@@ -946,12 +1000,14 @@ async fn build_non_stream_response(
             chunk = bytes_stream.next() => {
                 let Some(chunk) = chunk else { break; };
                 let chunk = chunk?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                let chunk = String::from_utf8_lossy(&chunk);
+                raw_response.push_str(&chunk);
+                buffer.push_str(&chunk);
                 while let Some(rel) = buffer[offset..].find('\n') {
                     let end = offset + rel;
                     let line = buffer[offset..end].trim().to_owned();
                     offset = end + 1;
-                    if let Some(data) = line.strip_prefix("data: ") {
+                    if let Some(data) = qwen_sse_data(&line) {
                         for event in collect_qwen_events(
                             data,
                             completion_id,
@@ -973,6 +1029,11 @@ async fn build_non_stream_response(
             }
         }
     }
+
+    state
+        .traces
+        .record(completion_id, "upstream_response", raw_response)
+        .await;
 
     if let Some(parser) = &mut tool_parser {
         let flush = parser.flush();
@@ -1041,6 +1102,7 @@ struct StreamResponseArgs {
     response: reqwest::Response,
     cancel_token: tokio_util::sync::CancellationToken,
     include_usage: bool,
+    account_lease: AccountLease,
 }
 
 fn build_stream_response(args: StreamResponseArgs) -> Response {
@@ -1054,6 +1116,7 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
         response,
         cancel_token,
         include_usage,
+        account_lease,
     } = args;
     let model = body.model.clone();
     let stream_registry = state.stream_registry.clone();
@@ -1064,6 +1127,7 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
     let cleanup_guard = stream_registry.guard(completion_id.clone());
 
     let stream = stream! {
+        let _account_lease = account_lease;
         let _cleanup_guard = cleanup_guard;
         yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(": heartbeat\n\n"));
         yield Ok(sse_json(json!({
@@ -1078,6 +1142,7 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
         let mut tool_parser = body.tools.as_ref().map(|_| StreamingToolParser::new());
         let mut tool_index = 0usize;
         let mut buffer = String::new();
+        let mut raw_response = String::new();
         let mut offset = 0usize;
         let mut bytes_stream = response.bytes_stream();
 
@@ -1090,12 +1155,14 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
                 chunk = bytes_stream.next() => {
                     match chunk {
                         Some(Ok(chunk)) => {
-                            buffer.push_str(&String::from_utf8_lossy(&chunk));
+                            let chunk = String::from_utf8_lossy(&chunk);
+                            raw_response.push_str(&chunk);
+                            buffer.push_str(&chunk);
                             while let Some(rel) = buffer[offset..].find('\n') {
                                 let end = offset + rel;
                                 let line = buffer[offset..end].trim().to_owned();
                                 offset = end + 1;
-                                if let Some(data) = line.strip_prefix("data: ") {
+                                if let Some(data) = qwen_sse_data(&line) {
                                     match collect_qwen_events(data, &completion_id, &stream_registry, &mut parse_state, &mut tool_parser).await {
                                         Ok(events) => {
                                             for event in events {
@@ -1178,6 +1245,11 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
                 }
             }
         }
+
+        state
+            .traces
+            .record(&completion_id, "upstream_response", raw_response)
+            .await;
 
         if let Some(parser) = &mut tool_parser {
             let flush = parser.flush();
@@ -1318,15 +1390,29 @@ async fn create_qwen_chat(
         })
 }
 
+struct QwenChatRequest<'a> {
+    body: &'a OpenAIRequest,
+    final_prompt: &'a str,
+    completion_id: &'a str,
+    chat_id: &'a str,
+    parent_id: Option<&'a str>,
+    headers: &'a HashMap<String, String>,
+    files: &'a [Value],
+}
+
 async fn request_qwen_chat(
     state: &AppState,
-    body: &OpenAIRequest,
-    final_prompt: &str,
-    chat_id: &str,
-    parent_id: Option<&str>,
-    headers: &HashMap<String, String>,
-    files: &[Value],
+    request: QwenChatRequest<'_>,
 ) -> std::result::Result<reqwest::Response, QwenRequestError> {
+    let QwenChatRequest {
+        body,
+        final_prompt,
+        completion_id,
+        chat_id,
+        parent_id,
+        headers,
+        files,
+    } = request;
     let model = normalize_model_id(&body.model);
     let parent_id = parent_id.map(Value::from).unwrap_or(Value::Null);
     let payload = json!({
@@ -1378,6 +1464,11 @@ async fn request_qwen_chat(
         });
     }
 
+    state
+        .traces
+        .record(completion_id, "upstream_request", payload_json.clone())
+        .await;
+
     let response = state
         .client
         .post(format!(
@@ -1421,9 +1512,18 @@ async fn request_qwen_chat(
             retry_after_ms: None,
         })?;
 
-    if !response.status().is_success() {
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !response.status().is_success() || !content_type.contains("text/event-stream") {
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
+        state
+            .traces
+            .record(completion_id, "upstream_response", text.clone())
+            .await;
 
         if let Ok(json) = serde_json::from_str::<Value>(&text) {
             if json.get("success").and_then(Value::as_bool) == Some(false) {
@@ -1440,7 +1540,11 @@ async fn request_qwen_chat(
                     .and_then(Value::as_str)
                     .or_else(|| json.get("message").and_then(Value::as_str))
                     .unwrap_or("Qwen returned an error");
-                let retry_after_ms = if details.contains("chat is in progress") {
+                let retry_after_ms = if code.as_deref() == Some("RateLimited") {
+                    json.pointer("/data/num")
+                        .and_then(Value::as_u64)
+                        .and_then(|hours| hours.checked_mul(60 * 60 * 1_000))
+                } else if details.contains("chat is in progress") {
                     Some(2_500)
                 } else {
                     None
@@ -1459,7 +1563,7 @@ async fn request_qwen_chat(
         }
 
         return Err(QwenRequestError {
-            message: format!("Failed to fetch from Qwen: {status} {text}"),
+            message: format!("Qwen returned non-stream response: {status} {text}"),
             upstream_code: None,
             upstream_status: Some(status.max(502)),
             retry_after_ms: None,
@@ -1658,6 +1762,11 @@ async fn collect_qwen_events(
     }
 
     Ok(vec![QwenEvent::Text(incremental)])
+}
+
+fn qwen_sse_data(line: &str) -> Option<&str> {
+    let data = line.trim().strip_prefix("data:")?.trim_start();
+    (!data.is_empty()).then_some(data)
 }
 
 fn extract_qwen_delta_text(value: Option<&Value>) -> Option<String> {
@@ -1919,6 +2028,7 @@ pub async fn serve_embedded(
     let cache = MemoryCache::new(config.cache.default_ttl, 10_000, metrics.clone());
     let model_registry = ModelRegistry::new().await;
     let stream_registry = StreamRegistry::new();
+    let conversations = ConversationRegistry::open(&config.db_path)?;
     let watchdog = Watchdog::start(
         config.watchdog.clone(),
         metrics.clone(),
@@ -1938,6 +2048,7 @@ pub async fn serve_embedded(
             cache,
             model_registry,
             stream_registry,
+            conversations,
             watchdog,
         },
     )
@@ -1948,7 +2059,7 @@ pub async fn serve_embedded(
 mod tests {
     use super::{
         collect_qwen_events, extract_qwen_api_error, extract_qwen_chat_id, live_qwen_model_data,
-        qwen_session_key, QwenEvent, QwenParseState, StreamRegistry,
+        qwen_session_key, qwen_sse_data, QwenEvent, QwenParseState, StreamRegistry,
     };
     use serde_json::json;
 
@@ -1957,6 +2068,19 @@ mod tests {
         assert_eq!(qwen_session_key(None), "default");
         assert_eq!(qwen_session_key(Some("  ")), "default");
         assert_eq!(qwen_session_key(Some("  client-1 ")), "client-1");
+    }
+
+    #[test]
+    fn accepts_qwen_sse_data_with_or_without_a_space() {
+        assert_eq!(
+            qwen_sse_data("data:{\"answer\":\"ok\"}"),
+            Some("{\"answer\":\"ok\"}")
+        );
+        assert_eq!(
+            qwen_sse_data("data: {\"answer\":\"ok\"}"),
+            Some("{\"answer\":\"ok\"}")
+        );
+        assert_eq!(qwen_sse_data("event: message"), None);
     }
 
     #[test]

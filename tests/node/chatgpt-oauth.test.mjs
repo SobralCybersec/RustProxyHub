@@ -425,6 +425,6 @@ test('reports an HTML security-verification page during Codex model discovery', 
 
   await assert.rejects(
     () => client.listModels(),
-    /invalid content type text\/html; charset=UTF-8.*security-verification.*req_html/i,
+    /invalid content type text\/html; charset=UTF-8.*security-verification.*req_html/i
   )
 })

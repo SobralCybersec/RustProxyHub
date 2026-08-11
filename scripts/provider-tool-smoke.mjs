@@ -45,6 +45,29 @@ export function buildAuthHeaders(apiKey, headers = {}) {
   }
 }
 
+function captureHeaders(headers) {
+  return Object.fromEntries(new Headers(headers).entries())
+}
+
+export function captureRequest(url, init = {}) {
+  const headers = captureHeaders(init.headers)
+  if (headers.authorization) headers.authorization = '[redacted]'
+  return {
+    body: typeof init.body === 'string' ? init.body : null,
+    headers,
+    method: init.method || 'GET',
+    url: String(url),
+  }
+}
+
+export function captureResponse(response, body) {
+  return {
+    body,
+    headers: captureHeaders(response.headers),
+    status: response.status,
+  }
+}
+
 export function selectProviderModels(payload) {
   if (!Array.isArray(payload?.data)) throw new Error('GET /v1/models returned no data array')
 
@@ -253,13 +276,15 @@ export async function runProviderToolSmoke({ apiKey = '', fetchImpl = fetch, hub
 
   for (const { provider, id } of models) {
     const request = buildToolRequest(provider, id)
+    const init = {
+      method: 'POST',
+      headers: buildAuthHeaders(apiKey, { 'content-type': 'application/json' }),
+      body: JSON.stringify(request),
+    }
+    const requestCapture = captureRequest(new URL('/v1/chat/completions', `${trimTrailingSlash(hubUrl)}/`).toString(), init)
     const started = performance.now()
     try {
-      const { response, text } = await fetchText(fetchImpl, new URL('/v1/chat/completions', `${trimTrailingSlash(hubUrl)}/`).toString(), {
-        method: 'POST',
-        headers: buildAuthHeaders(apiKey, { 'content-type': 'application/json' }),
-        body: JSON.stringify(request),
-      })
+      const { response, text } = await fetchText(fetchImpl, requestCapture.url, init)
       const sse = summarizeSse(parseSse(text))
       const toolCallDetected = sse.tool_calls.some(toolCall => toolCall.name === TOOL_NAME)
       results.push({
@@ -270,6 +295,8 @@ export async function runProviderToolSmoke({ apiKey = '', fetchImpl = fetch, hub
         latency_ms: Number((performance.now() - started).toFixed(3)),
         content_type: response.headers.get('content-type'),
         result: response.ok && sse.done && toolCallDetected ? 'passed' : 'failed',
+        request: requestCapture,
+        response: captureResponse(response, text),
         tool_call_detected: toolCallDetected,
         sse,
       })
@@ -278,6 +305,8 @@ export async function runProviderToolSmoke({ apiKey = '', fetchImpl = fetch, hub
         provider,
         model: id,
         routed_model: request.model,
+        request: requestCapture,
+        response: null,
         result: 'failed',
         latency_ms: Number((performance.now() - started).toFixed(3)),
         error: error.message,

@@ -115,12 +115,16 @@ impl ModelRegistry {
 }
 
 pub fn normalize_model_id(model_id: &str) -> String {
-    model_id
+    let model = model_id
         .trim()
         .split_once(':')
         .map(|(_, actual)| actual)
-        .unwrap_or(model_id)
-        .replace("-no-thinking", "")
+        .unwrap_or(model_id);
+    model
+        .strip_suffix("-no-thinking")
+        .or_else(|| model.strip_suffix("-thinking"))
+        .unwrap_or(model)
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -132,6 +136,14 @@ mod tests {
         assert_eq!(
             normalize_model_id("qwen:qwen3.6-max-preview-no-thinking"),
             "qwen3.6-max-preview"
+        );
+    }
+
+    #[test]
+    fn strips_provider_prefix_and_thinking_suffix() {
+        assert_eq!(
+            normalize_model_id("qwen:qwen3.7-max-thinking"),
+            "qwen3.7-max"
         );
     }
 

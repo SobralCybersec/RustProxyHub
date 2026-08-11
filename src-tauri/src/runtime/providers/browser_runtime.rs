@@ -10,7 +10,7 @@ use crate::proxy_core::{
 use anyhow::Result;
 use async_stream::stream;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -119,6 +119,7 @@ struct ParsedBrowserOutput {
 }
 
 pub async fn serve_browser_provider(config: BrowserProviderServerConfig) -> Result<()> {
+    crate::proxy_core::enforce_loopback_guard(&config.host, config.api_key.as_deref())?;
     tokio::fs::create_dir_all(&config.runtime_dir).await?;
 
     let bridge = Arc::new(
@@ -147,6 +148,7 @@ pub async fn serve_browser_provider(config: BrowserProviderServerConfig) -> Resu
         .route("/v1/responses", post(responses))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/messages/count_tokens", post(anthropic_count_tokens))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state.clone());
 
     let host: IpAddr = state

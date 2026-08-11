@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url'
 import { performance } from 'node:perf_hooks'
 import {
   buildAuthHeaders,
+  captureRequest,
+  captureResponse,
   limitModelsPerProvider,
   parseSse,
   selectProviderModels,
@@ -218,12 +220,15 @@ async function runInteraction({ apiKey, fetchImpl, hubUrl, models, protocol }) {
       ? buildAnthropicInteractionRequest(provider, id)
       : buildOpenAiInteractionRequest(provider, id)
     const started = performance.now()
+    const url = new URL(path, `${hubUrl}/`).toString()
+    const init = {
+      method: 'POST',
+      headers: buildAuthHeaders(apiKey, { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }),
+      body: JSON.stringify(request),
+    }
+    const requestCapture = captureRequest(url, init)
     try {
-      const { response, text } = await responseText(await fetchImpl(new URL(path, `${hubUrl}/`).toString(), {
-        method: 'POST',
-        headers: buildAuthHeaders(apiKey, { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' }),
-        body: JSON.stringify(request),
-      }))
+      const { response, text } = await responseText(await fetchImpl(url, init))
       const summary = protocol === 'anthropic'
         ? summarizeAnthropicSse(text)
         : summarizeSse(parseSse(text))
@@ -233,11 +238,13 @@ async function runInteraction({ apiKey, fetchImpl, hubUrl, models, protocol }) {
         provider,
         result: response.ok && summary.done && output.includes(INTERACTION_TEXT) ? 'passed' : 'failed',
         response_text: output.slice(0, 1_000),
+        request: requestCapture,
+        response: captureResponse(response, text),
         status: response.status,
         latency_ms: Number((performance.now() - started).toFixed(3)),
       })
     } catch (error) {
-      results.push({ model: id, provider, result: 'failed', error: error.message, latency_ms: Number((performance.now() - started).toFixed(3)) })
+      results.push({ model: id, provider, request: requestCapture, response: null, result: 'failed', error: error.message, latency_ms: Number((performance.now() - started).toFixed(3)) })
     }
   }
   return results

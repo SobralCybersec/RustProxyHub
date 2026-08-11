@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { HugeiconsIcon } from '@hugeicons/vue'
 import { Login03Icon, Logout03Icon, BrowserIcon, LinkSquare01Icon, Copy01Icon } from '@hugeicons/core-free-icons'
-import type { ProviderName } from '@/lib/types'
+import type { ProviderName, QwenAccountSummary } from '@/lib/types'
 import { useStore } from '@/store'
 
 const store = useStore()
@@ -11,6 +11,9 @@ const t = (key: string) => store.t(key)
 const hub = computed(() => store.overview?.hub ?? null)
 const providers = computed(() => store.overview?.providers ?? [])
 const openSessions = computed(() => store.overview?.open_provider_login_sessions ?? [])
+const openQwenAccountSessions = computed(() => store.openQwenAccountLogins)
+const accountEmail = ref('')
+const accountPassword = ref('')
 
 function isOpen(name: ProviderName): boolean {
   return openSessions.value.includes(name)
@@ -38,6 +41,18 @@ function openLogin(name: ProviderName) {
 
 function closeLogin(name: ProviderName) {
   void store.stopProviderLogin(name)
+}
+
+function isQwenAccountLoginOpen(account: QwenAccountSummary): boolean {
+  return openQwenAccountSessions.value.includes(account.id)
+}
+
+async function addQwenAccount() {
+  const email = accountEmail.value.trim()
+  if (!email) return
+  await store.addQwenAccount(email, accountPassword.value)
+  accountEmail.value = ''
+  accountPassword.value = ''
 }
 </script>
 
@@ -75,6 +90,69 @@ function closeLogin(name: ProviderName) {
 
       <p v-else class="faint">{{ t('login.waitingHubData') }}</p>
     </div>
+
+    <section class="card stack" aria-label="Qwen accounts">
+      <div class="row">
+        <span class="strong">Qwen {{ t('common.accounts') }}</span>
+        <div class="spacer" />
+        <span class="chip">{{ store.qwenAccounts.length }}</span>
+      </div>
+
+      <form class="account-form" @submit.prevent="addQwenAccount">
+        <input
+          v-model="accountEmail"
+          class="input"
+          type="email"
+          autocomplete="username"
+          :placeholder="t('common.email')"
+          required
+        />
+        <input
+          v-model="accountPassword"
+          class="input"
+          type="password"
+          autocomplete="new-password"
+          :placeholder="t('common.password')"
+        />
+        <button class="btn btn-primary" type="submit" :disabled="store.isBusy('qwen-account:add')">
+          {{ t('common.save') }}
+        </button>
+      </form>
+
+      <div v-for="account in store.qwenAccounts" :key="account.id" class="account-row">
+        <div class="stack account-identity">
+          <span class="strong">{{ account.email }}</span>
+          <span class="mono faint">{{ account.id }}</span>
+        </div>
+        <span class="chip">{{ account.has_password ? t('common.password') : '—' }}</span>
+        <button
+          v-if="isQwenAccountLoginOpen(account)"
+          class="btn btn-utility"
+          type="button"
+          :disabled="store.isBusy(`qwen-account:close:${account.id}`)"
+          @click="store.stopQwenAccountLogin(account.id)"
+        >
+          {{ t('login.closeSession') }}
+        </button>
+        <button
+          v-else
+          class="btn btn-primary"
+          type="button"
+          :disabled="store.isBusy(`qwen-account:login:${account.id}`)"
+          @click="store.startQwenAccountLogin(account.id)"
+        >
+          {{ t('login.openSession') }}
+        </button>
+        <button
+          class="btn btn-utility"
+          type="button"
+          :disabled="isQwenAccountLoginOpen(account) || store.isBusy(`qwen-account:remove:${account.id}`)"
+          @click="store.removeQwenAccount(account.id)"
+        >
+          {{ t('common.remove') }}
+        </button>
+      </div>
+    </section>
 
     <!-- ── Provider login sessions ── -->
     <div v-for="p in providers" :key="p.name" class="card row">
@@ -148,5 +226,28 @@ function closeLogin(name: ProviderName) {
 /* keep the provider row's select from expanding to 100% (design system default) */
 .browser-row {
   gap: 6px;
+}
+
+.account-form,
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sm);
+}
+
+.account-form .input {
+  min-width: 0;
+}
+
+.account-identity {
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.account-identity .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
