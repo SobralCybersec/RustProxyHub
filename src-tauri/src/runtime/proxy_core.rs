@@ -88,6 +88,8 @@ pub struct OpenAIRequest {
     #[serde(default)]
     pub chatgpt_mode: Option<String>,
     #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
     pub tools: Option<Vec<FunctionToolDefinition>>,
     #[serde(default)]
     pub tool_choice: Option<Value>,
@@ -981,6 +983,7 @@ fn request_with_messages(template: &OpenAIRequest, messages: Vec<Message>) -> Op
         stream: template.stream,
         web_search: template.web_search,
         chatgpt_mode: template.chatgpt_mode.clone(),
+        user: template.user.clone(),
         tools: template.tools.clone(),
         tool_choice: template.tool_choice.clone(),
         stream_options: template.stream_options.clone(),
@@ -2108,6 +2111,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
                 function: Some(FunctionToolSpec {
@@ -2141,6 +2145,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
                 function: Some(FunctionToolSpec {
@@ -2246,6 +2251,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -2271,6 +2277,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -2295,6 +2302,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
                 function: Some(FunctionToolSpec {
@@ -2345,6 +2353,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -2399,6 +2408,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -2608,6 +2618,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -2655,6 +2666,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
                 function: Some(FunctionToolSpec {
@@ -2714,6 +2726,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -2782,6 +2795,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
                 function: Some(FunctionToolSpec {
@@ -2845,6 +2859,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -2869,6 +2884,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -3051,6 +3067,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -3081,6 +3098,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -3105,6 +3123,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -3138,6 +3157,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -3160,6 +3180,7 @@ mod tests {
             stream: None,
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,

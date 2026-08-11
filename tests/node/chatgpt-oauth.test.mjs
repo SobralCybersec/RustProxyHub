@@ -8,6 +8,8 @@ import {
   ChatGptOAuthClient,
   collectCodexResponse,
   deriveAccountId,
+  resetCodexClientVersionCache,
+  resolveCodexClientVersion,
   shouldRefreshAccessToken,
 } from '../../src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs'
 
@@ -24,6 +26,21 @@ test('derives ChatGPT account id and refreshes near token expiry', () => {
 
   assert.equal(deriveAccountId(token), 'acct_test')
   assert.equal(shouldRefreshAccessToken(token, '2026-08-06T11:59:00Z', now), true)
+})
+
+test('resolves and caches the current Codex client version for model discovery', async () => {
+  resetCodexClientVersionCache()
+  let requests = 0
+  const fetchVersion = async (url, init) => {
+    requests += 1
+    assert.equal(url, 'https://registry.npmjs.org/@openai/codex/latest')
+    assert.equal(new Headers(init.headers).get('accept'), 'application/json')
+    return Response.json({ version: '0.200.1' })
+  }
+
+  assert.equal(await resolveCodexClientVersion(fetchVersion), '0.200.1')
+  assert.equal(await resolveCodexClientVersion(fetchVersion), '0.200.1')
+  assert.equal(requests, 1)
 })
 
 test('normalizes Codex responses request and keeps instructions trusted', () => {
@@ -226,6 +243,7 @@ test('discovers Codex models from data and excludes web-only catalog entries', a
         { id: 'chatgpt-web-session', supported_in_api: true },
         { id: 'chatgpt.workspace.model.GPT-4.1.access', supported_in_api: true },
         { id: 'gpt-codex-disabled', supported_in_api: false },
+        { id: 'gpt-codex-hidden', supported_in_api: true, visibility: 'hidden' },
       ],
     })
   })
@@ -381,4 +399,32 @@ test('falls back to discovered Codex model when web model is requested in Codex 
   assert.equal(requestBody.model, 'gpt-codex-ok')
   assert.equal(result.model, 'gpt-codex-ok')
   assert.match(result.warning, /gpt-5-3.*gpt-codex-ok/)
+})
+
+test('reports an HTML security-verification page during Codex model discovery', async t => {
+  const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rustproxyhub-oauth-html-models-'))
+  t.after(() => fs.rm(runtimeDir, { recursive: true, force: true }))
+  const accessToken = jwt({ exp: Math.floor(Date.now() / 1000) + 3600 })
+  await fs.writeFile(
+    path.join(runtimeDir, 'chatgpt_oauth.json'),
+    JSON.stringify({
+      auth_mode: 'chatgpt',
+      tokens: { access_token: accessToken, account_id: 'acct_html' },
+      last_refresh: new Date().toISOString(),
+    })
+  )
+
+  const client = new ChatGptOAuthClient(runtimeDir, async (_url, init = {}) => {
+    const headers = new Headers(init.headers)
+    assert.equal(headers.get('accept'), 'application/json')
+    assert.ok(headers.get('x-client-request-id'))
+    return new Response('<html>Performing security verification</html>', {
+      headers: { 'content-type': 'text/html; charset=UTF-8', 'x-request-id': 'req_html' },
+    })
+  })
+
+  await assert.rejects(
+    () => client.listModels(),
+    /invalid content type text\/html; charset=UTF-8.*security-verification.*req_html/i,
+  )
 })

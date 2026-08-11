@@ -184,8 +184,12 @@ impl PlaywrightBridge {
                 .canonicalize()
                 .context("failed to resolve playwright helper directory")?,
         );
+        // Keep the selected executable path intact. On Unix, Node version-manager
+        // shims commonly expose `node` as a symlink to their launcher; resolving
+        // it changes argv[0] to `mise`/`nvm` and starts the launcher as a command
+        // instead of Node.
         let node = node_path
-            .map(|path| normalize_spawn_path(path.canonicalize().unwrap_or(path)))
+            .map(node_spawn_path)
             .unwrap_or_else(|| PathBuf::from("node"));
         let log_path = Arc::new(bridge_log_path(&provider)?);
         reset_bridge_log(log_path.as_ref())?;
@@ -743,6 +747,10 @@ fn normalize_spawn_path(path: PathBuf) -> PathBuf {
     path
 }
 
+fn node_spawn_path(path: PathBuf) -> PathBuf {
+    normalize_spawn_path(path)
+}
+
 fn bridge_log_path(provider: &str) -> Result<PathBuf> {
     // ponytail: logs live in the OS temp dir for portability. Secured by:
     //   - dir created 0700 (owner-only)
@@ -854,5 +862,47 @@ fn append_bridge_log(path: &Path, line: String) {
             "[browser-bridge] failed to write log {}: {err}",
             path.display()
         );
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::node_spawn_path;
+    #[cfg(not(unix))]
+    use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[cfg(unix)]
+    #[test]
+    fn node_spawn_path_preserves_version_manager_shim() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "rust-proxy-hub-node-shim-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create temp directory");
+        let launcher = dir.join("mise");
+        let node_shim = dir.join("node");
+        fs::write(&launcher, "launcher").expect("write launcher");
+        symlink(&launcher, &node_shim).expect("create node shim");
+
+        assert_eq!(node_spawn_path(node_shim.clone()), node_shim);
+        assert_ne!(node_shim.canonicalize().expect("resolve shim"), node_shim);
+
+        fs::remove_dir_all(&dir).expect("remove temp directory");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn node_spawn_path_preserves_selected_path() {
+        let node = PathBuf::from("node.exe");
+        assert_eq!(node_spawn_path(node.clone()), node);
     }
 }

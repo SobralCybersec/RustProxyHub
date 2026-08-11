@@ -674,6 +674,7 @@ async fn request_browser_chat(
                 "system_prompt": if preflight.system_prompt.is_empty() { serde_json::Value::Null } else { serde_json::json!(preflight.system_prompt) },
                 "web_search": body.web_search.unwrap_or(false),
                 "chatgpt_mode": body.chatgpt_mode.as_deref().unwrap_or("auto"),
+                "session_id": body.user.as_deref(),
                 "stream": body.stream.unwrap_or(false),
             }),
         )
@@ -696,6 +697,7 @@ async fn request_browser_chat_stream(
                 "system_prompt": if preflight.system_prompt.is_empty() { serde_json::Value::Null } else { serde_json::json!(preflight.system_prompt) },
                 "web_search": body.web_search.unwrap_or(false),
                 "chatgpt_mode": body.chatgpt_mode.as_deref().unwrap_or("auto"),
+                "session_id": body.user.as_deref(),
                 "stream": true,
             }),
         )
@@ -910,6 +912,7 @@ fn stream_browser_chat_live(
 
         let mut parser = StreamingToolParser::new();
         let mut emitted_text = String::new();
+        let mut emitted_reasoning = String::new();
         while let Some(event) = bridge_stream.next_event().await {
             match event {
                 Ok(event) if event.event == "delta" => {
@@ -930,6 +933,23 @@ fn stream_browser_chat_live(
                                 }],
                             })));
                         }
+                    }
+                }
+                Ok(event) if event.event == "reasoning" => {
+                    if let Some(delta) = event.payload.get("delta").and_then(Value::as_str) {
+                        emitted_reasoning.push_str(delta);
+                        yield Ok(sse_json(json!({
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": current_timestamp(),
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "reasoning_content": delta },
+                                "logprobs": Value::Null,
+                                "finish_reason": Value::Null,
+                            }],
+                        })));
                     }
                 }
                 Ok(_) => {}
@@ -967,6 +987,23 @@ fn stream_browser_chat_live(
             }
         };
         let parsed = parse_browser_output(&body, &chat.text);
+        if let Some(reasoning) = chat.reasoning_content.as_deref() {
+            let remaining = reasoning.strip_prefix(&emitted_reasoning).unwrap_or(reasoning);
+            if !remaining.is_empty() {
+                yield Ok(sse_json(json!({
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": current_timestamp(),
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "reasoning_content": remaining },
+                        "logprobs": Value::Null,
+                        "finish_reason": Value::Null,
+                    }],
+                })));
+            }
+        }
         if let Some(remaining) = parsed.text.strip_prefix(&emitted_text) {
             if !remaining.is_empty() {
                 yield Ok(sse_json(json!({
@@ -1171,6 +1208,7 @@ fn openai_responses_to_request(state: &AppState, body: &Value) -> Result<OpenAIR
             .get("chatgpt_mode")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        user: body.get("user").and_then(Value::as_str).map(str::to_owned),
         tools: openai_tools_from_value(body.get("tools")),
         tool_choice: body.get("tool_choice").cloned(),
         stream_options: None,
@@ -1212,6 +1250,7 @@ fn anthropic_to_openai_request(state: &AppState, body: &Value) -> Result<OpenAIR
             .get("chatgpt_mode")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        user: body.get("user").and_then(Value::as_str).map(str::to_owned),
         tools: anthropic_tools_from_value(body.get("tools")),
         tool_choice,
         stream_options: None,
@@ -1955,6 +1994,7 @@ mod tests {
             stream: Some(true),
             web_search: None,
             chatgpt_mode: None,
+            user: None,
             tools: None,
             tool_choice: None,
             stream_options: None,
@@ -2084,6 +2124,7 @@ mod tests {
             stream: Some(false),
             web_search: Some(false),
             chatgpt_mode: Some("web".to_owned()),
+            user: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
                 function: Some(FunctionToolSpec {
@@ -2119,6 +2160,7 @@ mod tests {
             stream: Some(false),
             web_search: Some(false),
             chatgpt_mode: Some("web".to_owned()),
+            user: None,
             tools: Some(vec![FunctionToolDefinition {
                 tool_type: "function".to_owned(),
                 function: Some(FunctionToolSpec {
@@ -2157,6 +2199,7 @@ mod tests {
                 stream: Some(false),
                 web_search: Some(false),
                 chatgpt_mode: None,
+                user: None,
                 tools: Some(vec![FunctionToolDefinition {
                     tool_type: "function".to_owned(),
                     function: Some(FunctionToolSpec {
@@ -2190,6 +2233,7 @@ mod tests {
                 stream: Some(false),
                 web_search: Some(false),
                 chatgpt_mode: None,
+                user: None,
                 tools: Some(vec![FunctionToolDefinition {
                     tool_type: "function".to_owned(),
                     function: Some(FunctionToolSpec {
@@ -2415,6 +2459,7 @@ mod tests {
                 stream: None,
                 web_search: None,
                 chatgpt_mode: None,
+                user: None,
                 tools: None,
                 tool_choice: None,
                 stream_options: None,

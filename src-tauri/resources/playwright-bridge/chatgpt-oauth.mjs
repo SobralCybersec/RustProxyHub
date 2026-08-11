@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import { createServer } from 'node:http'
 import os from 'node:os'
@@ -6,6 +6,8 @@ import path from 'node:path'
 
 const CODEX_BASE_URL = 'https://chatgpt.com/backend-api/codex'
 const CODEX_CLIENT_VERSION = '0.144.1'
+const CODEX_REGISTRY_URL = 'https://registry.npmjs.org/@openai/codex/latest'
+const CODEX_CLIENT_VERSION_CACHE_MS = 60 * 60 * 1000
 const OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 const OAUTH_ISSUER = 'https://auth.openai.com'
 const OAUTH_SCOPE = 'openid profile email offline_access'
@@ -16,8 +18,52 @@ const REFRESH_EXPIRY_MARGIN_MS = 5 * 60 * 1000
 const REFRESH_INTERVAL_MS = 55 * 60 * 1000
 const MODEL_CACHE_MS = 5 * 60 * 1000
 
+let cachedCodexClientVersion = null
+let cachedCodexClientVersionExpiresAt = 0
+let codexClientVersionPromise = null
+
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function semanticVersion(value) {
+  const match = typeof value === 'string' ? value.trim().match(/\b\d+\.\d+\.\d+\b/) : null
+  return match?.[0] || null
+}
+
+export async function resolveCodexClientVersion(fetchImpl = globalThis.fetch) {
+  const now = Date.now()
+  if (cachedCodexClientVersion && cachedCodexClientVersionExpiresAt > now) {
+    return cachedCodexClientVersion
+  }
+  if (codexClientVersionPromise) return codexClientVersionPromise
+
+  codexClientVersionPromise = (async () => {
+    try {
+      const response = await fetchImpl(CODEX_REGISTRY_URL, { headers: { accept: 'application/json' } })
+      if (response.ok) {
+        const version = semanticVersion((await response.json())?.version)
+        if (version) {
+          cachedCodexClientVersion = version
+          cachedCodexClientVersionExpiresAt = Date.now() + CODEX_CLIENT_VERSION_CACHE_MS
+          return version
+        }
+      }
+    } catch {}
+
+    cachedCodexClientVersion = CODEX_CLIENT_VERSION
+    cachedCodexClientVersionExpiresAt = Date.now() + CODEX_CLIENT_VERSION_CACHE_MS
+    return CODEX_CLIENT_VERSION
+  })().finally(() => {
+    codexClientVersionPromise = null
+  })
+  return codexClientVersionPromise
+}
+
+export function resetCodexClientVersionCache() {
+  cachedCodexClientVersion = null
+  cachedCodexClientVersionExpiresAt = 0
+  codexClientVersionPromise = null
 }
 
 function base64Url(value) {
@@ -273,21 +319,38 @@ function tokenRequestError(status, body) {
   return new Error(`OpenAI OAuth token request failed with HTTP ${status}${detail ? `: ${detail}` : ''}`)
 }
 
-function upstreamError(status, body) {
+function requestIdFrom(response) {
+  return response?.headers?.get?.('x-request-id') || response?.headers?.get?.('openai-request-id') || ''
+}
+
+function upstreamError(status, body, response = null) {
   let detail = body
   try {
     const parsed = JSON.parse(body)
     detail = parsed.detail || parsed.error?.message || parsed.message || body
   } catch {}
+  const requestId = requestIdFrom(response)
   return new Error(
-    `Codex upstream request failed with HTTP ${status}${detail ? `: ${String(detail).slice(0, 400)}` : ''}`
+    `Codex upstream request failed with HTTP ${status}${detail ? `: ${String(detail).slice(0, 400)}` : ''}${requestId ? ` (x-request-id: ${requestId})` : ''}`
+  )
+}
+
+function unexpectedContentTypeError(operation, response, body) {
+  const contentType = response.headers.get('content-type') || 'missing'
+  const requestId = requestIdFrom(response)
+  const challenge = /<html|security verification|cloudflare|captcha|sign in/i.test(body)
+    ? ' ChatGPT returned a sign-in or security-verification page; complete verification in the visible login browser, then retry.'
+    : ''
+  return new Error(
+    `Codex ${operation} returned invalid content type ${contentType}.${challenge}${requestId ? ` (x-request-id: ${requestId})` : ''}`
   )
 }
 
 export class ChatGptOAuthClient {
-  constructor(runtimeDir, fetchImpl = globalThis.fetch) {
+  constructor(runtimeDir, fetchImpl = globalThis.fetch, versionFetchImpl = globalThis.fetch) {
     this.runtimeDir = runtimeDir
     this.fetch = fetchImpl
+    this.versionFetch = versionFetchImpl
     this.authPath = path.join(runtimeDir, 'chatgpt_oauth.json')
     this.loginServer = null
     this.loginTimer = null
@@ -421,6 +484,8 @@ export class ChatGptOAuthClient {
       const headers = new Headers(init.headers)
       headers.set('authorization', `Bearer ${session.accessToken}`)
       headers.set('chatgpt-account-id', session.accountId)
+      if (!headers.has('accept')) headers.set('accept', 'application/json')
+      if (!headers.has('x-client-request-id')) headers.set('x-client-request-id', randomUUID())
       if (session.isFedRamp) headers.set('x-openai-fedramp', 'true')
       return this.fetch(`${CODEX_BASE_URL}${endpoint}`, { ...init, headers })
     }
@@ -436,16 +501,21 @@ export class ChatGptOAuthClient {
     if (this.modelsPromise) return this.modelsPromise
 
     const promise = (async () => {
-      const endpoint = `/models?client_version=${CODEX_CLIENT_VERSION}`
+      const clientVersion = await resolveCodexClientVersion(this.versionFetch)
+      const endpoint = `/models?client_version=${encodeURIComponent(clientVersion)}`
       const response = await this.authenticatedFetch(endpoint)
       const raw = await response.text()
-      if (!response.ok) throw upstreamError(response.status, raw)
+      if (!response.ok) throw upstreamError(response.status, raw, response)
+      if (!response.headers.get('content-type')?.toLowerCase().includes('application/json')) {
+        throw unexpectedContentTypeError('model discovery', response, raw)
+      }
       const payload = JSON.parse(raw)
       const rawModels = codexModelItems(payload)
       const catalogueFields = ['models', 'data'].filter(field => Array.isArray(payload?.[field]))
       const models = rawModels.filter(
         item =>
           item.supported_in_api !== false &&
+          (item.visibility === undefined || item.visibility === 'list') &&
           isCodexApiModelSlug(item.slug)
       )
       if (models.length === 0) throw new Error('Codex returned an empty models list')
@@ -514,7 +584,10 @@ export class ChatGptOAuthClient {
       headers,
       body: JSON.stringify(prepared.body),
     })
-    if (!response.ok) throw upstreamError(response.status, await response.text())
+    if (!response.ok) throw upstreamError(response.status, await response.text(), response)
+    if (!response.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
+      throw unexpectedContentTypeError('response stream', response, await response.text())
+    }
     const result = await collectCodexResponse(response.body)
     return {
       text: result.text,
@@ -542,6 +615,7 @@ export class ChatGptOAuthClient {
     authorizationUrl.searchParams.set('code_challenge_method', 'S256')
     authorizationUrl.searchParams.set('id_token_add_organizations', 'true')
     authorizationUrl.searchParams.set('codex_cli_simplified_flow', 'true')
+    authorizationUrl.searchParams.set('originator', 'codex_cli_rs')
 
     const server = createServer(async (request, response) => {
       const url = new URL(request.url || '/', REDIRECT_URI)

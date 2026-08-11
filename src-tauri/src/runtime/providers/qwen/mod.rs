@@ -1,6 +1,7 @@
 mod account_manager;
 pub mod accounts;
 mod cache;
+mod conversation_registry;
 pub mod config;
 mod metrics;
 mod model_registry;
@@ -42,10 +43,13 @@ use std::{
 };
 use uuid::Uuid;
 
+const QWEN_WEB_VERSION: &str = "0.2.66";
+
 use self::{
     account_manager::AccountManager,
     accounts::{global_account, AccountStore, QwenAccount},
     cache::MemoryCache,
+    conversation_registry::{ConversationRegistry, QwenConversation},
     config::{
         ensure_runtime_layout, legacy_accounts_json_candidates, legacy_db_candidates,
         workspace_root, AppConfig,
@@ -67,6 +71,7 @@ struct AppState {
     model_registry: ModelRegistry,
     metrics: Metrics,
     cache: MemoryCache,
+    conversations: ConversationRegistry,
     stream_registry: StreamRegistry,
     watchdog: Watchdog,
 }
@@ -157,6 +162,7 @@ async fn run_server(
         model_registry: runtime.model_registry,
         metrics: runtime.metrics,
         cache: runtime.cache,
+        conversations: ConversationRegistry::default(),
         stream_registry: runtime.stream_registry,
         watchdog: runtime.watchdog,
     };
@@ -491,16 +497,27 @@ async fn chat_completions_stop(
 async fn fetch_models(state: &AppState) -> Result<Value> {
     // Version cache key so newly registered models are not hidden by an older
     // process-local catalogue after the registry changes.
-    const CACHE_KEY: &str = "models:qwen:v2";
+    const CACHE_KEY: &str = "models:qwen:v3";
     if let Some(cached) = state.cache.get_json(CACHE_KEY).await {
         return Ok(cached);
     }
 
-    let payload = fallback_models_payload(
-        state,
-        "Qwen live model catalog deferred until a browser request starts.".to_owned(),
-    )
-    .await;
+    let payload = match pick_capture_headers_for_aux_request(state).await {
+        Ok((_, headers)) => match fetch_live_models_payload(state, &headers).await {
+            Ok(payload) => payload,
+            Err(err) => {
+                fallback_models_payload(
+                    state,
+                    format!("Qwen live model catalog unavailable: {err}"),
+                )
+                .await
+            }
+        },
+        Err(err) => {
+            fallback_models_payload(state, format!("Qwen live model catalog unavailable: {err}"))
+                .await
+        }
+    };
     state
         .cache
         .set_json(
@@ -510,6 +527,99 @@ async fn fetch_models(state: &AppState) -> Result<Value> {
         )
         .await;
     Ok(payload)
+}
+
+async fn fetch_live_models_payload(
+    state: &AppState,
+    headers: &HashMap<String, String>,
+) -> Result<Value> {
+    let response = state
+        .client
+        .get(format!("{}/api/models", state.config.qwen_base_url))
+        .header("accept", "application/json, text/plain, */*")
+        .header("accept-language", "pt-BR,pt;q=0.9")
+        .header("cookie", headers.get("cookie").cloned().unwrap_or_default())
+        .header("referer", format!("{}/", state.config.qwen_base_url))
+        .header(
+            "user-agent",
+            headers.get("user-agent").cloned().unwrap_or_default(),
+        )
+        .header("x-request-id", Uuid::new_v4().to_string())
+        .header("bx-v", headers.get("bx-v").cloned().unwrap_or_default())
+        .header("bx-ua", headers.get("bx-ua").cloned().unwrap_or_default())
+        .header(
+            "bx-umidtoken",
+            headers.get("bx-umidtoken").cloned().unwrap_or_default(),
+        )
+        .header("timezone", "UTC")
+        .header("version", QWEN_WEB_VERSION)
+        .header("source", "web")
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "Qwen live model request failed: {} {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ));
+    }
+    live_qwen_model_data(&response.json::<Value>().await?)
+}
+
+fn live_qwen_model_data(payload: &Value) -> Result<Value> {
+    if let Some(error) = extract_qwen_api_error(payload) {
+        return Err(anyhow!("Qwen live model request failed: {error}"));
+    }
+    let source_models = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("Qwen live model response contained no data array"))?;
+    let mut ids = HashSet::new();
+    let mut models = Vec::new();
+    for source in source_models {
+        let Some(id) = source
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let mut base = source.clone();
+        if !base.is_object() {
+            base = json!({});
+        }
+        base["id"] = Value::String(id.to_owned());
+        base["object"] = Value::String("model".to_owned());
+        base["owned_by"] = Value::String("qwen".to_owned());
+        base["created"] = Value::Number(current_timestamp().into());
+        for variant in [
+            id.to_owned(),
+            format!("{id}-thinking"),
+            format!("{id}-no-thinking"),
+        ] {
+            if ids.insert(variant.clone()) {
+                let mut model = base.clone();
+                model["id"] = Value::String(variant);
+                models.push(model);
+            }
+        }
+    }
+    if models.is_empty() {
+        return Err(anyhow!("Qwen live model response contained no model ids"));
+    }
+    Ok(json!({
+        "object": "list",
+        "data": models,
+        "source": "upstream",
+        "discovery": {
+            "provider": "qwen",
+            "source": "upstream",
+            "api": "chat.qwen.ai/api/models",
+            "endpoint": "/v1/models",
+            "live": true,
+            "catalogue_fields": ["data"],
+        },
+    }))
 }
 
 async fn ensure_headless_ready(state: &AppState) -> Result<()> {
@@ -593,7 +703,23 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
 
-    let accounts = effective_accounts(&state.accounts)?;
+    let session_key = qwen_session_key(body.user.as_deref());
+    let existing_conversation = state.conversations.get(&session_key).await;
+    let all_accounts = effective_accounts(&state.accounts)?;
+    let accounts = if let Some(conversation) = &existing_conversation {
+        match all_accounts
+            .iter()
+            .find(|account| account.id == conversation.account_id)
+        {
+            Some(account) => vec![account.clone()],
+            None => {
+                state.conversations.remove(&session_key).await;
+                all_accounts
+            }
+        }
+    } else {
+        all_accounts
+    };
     let mut current_account = state.account_manager.select_next(&accounts, false).await;
     let mut tried_accounts = HashSet::new();
     let mut last_error: Option<anyhow::Error> = None;
@@ -609,7 +735,13 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
         tried_accounts.insert(account.id.clone());
 
         let bridge_account_id = account_id_for_bridge(&account);
-        let header_result = state.bridge.basic_headers(bridge_account_id).await;
+        let header_result = state
+            .bridge
+            .capture_headers(CaptureHeadersParams {
+                force_new: false,
+                account_id: bridge_account_id,
+            })
+            .await;
         let basic_headers = match header_result {
             Ok(headers) => headers.headers,
             Err(err) => {
@@ -638,24 +770,46 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
             }
         };
 
+        let mut conversation = existing_conversation
+            .as_ref()
+            .filter(|conversation| conversation.account_id == account.id)
+            .cloned();
         let mut retries = 3usize;
         let mut retry_delay_ms = 500u64;
 
         loop {
-            let chat_id = match create_qwen_chat(&state.client, &state.config, &basic_headers).await
-            {
-                Ok(chat_id) => chat_id,
-                Err(err) => {
-                    last_error = Some(err);
-                    break;
-                }
+            let chat_id = match &conversation {
+                Some(conversation) => conversation.chat_id.clone(),
+                None => match create_qwen_chat(&state.client, &state.config, &basic_headers).await {
+                    Ok(chat_id) => chat_id,
+                    Err(err) => {
+                        last_error = Some(err);
+                        break;
+                    }
+                },
             };
+            let parent_id = conversation
+                .as_ref()
+                .and_then(|conversation| conversation.parent_id.clone());
+            state
+                .conversations
+                .upsert(
+                    session_key.clone(),
+                    QwenConversation {
+                        chat_id: chat_id.clone(),
+                        account_id: account.id.clone(),
+                        parent_id: parent_id.clone(),
+                    },
+                )
+                .await;
+            conversation = state.conversations.get(&session_key).await;
 
             match request_qwen_chat(
                 &state,
                 &body,
                 &final_prompt,
                 &chat_id,
+                parent_id.as_deref(),
                 &basic_headers,
                 &files,
             )
@@ -684,7 +838,10 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                             &state,
                             &body,
                             &final_prompt,
-                            &chat_id,
+                            QwenConversationRef {
+                                chat_id: &chat_id,
+                                session_key: &session_key,
+                            },
                             &completion_id,
                             response,
                             cancel_token,
@@ -709,6 +866,7 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
                         body: body.clone(),
                         final_prompt,
                         chat_id,
+                        session_key,
                         completion_id,
                         response,
                         cancel_token,
@@ -759,11 +917,16 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
     Err(last_error.unwrap_or_else(|| anyhow!("All accounts failed")))
 }
 
+struct QwenConversationRef<'a> {
+    chat_id: &'a str,
+    session_key: &'a str,
+}
+
 async fn build_non_stream_response(
     state: &AppState,
     body: &OpenAIRequest,
     final_prompt: &str,
-    _chat_id: &str,
+    conversation: QwenConversationRef<'_>,
     completion_id: &str,
     response: reqwest::Response,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -825,6 +988,13 @@ async fn build_non_stream_response(
         }
     }
 
+    if let Some(parent_id) = parse_state.target_response_id.clone() {
+        state
+            .conversations
+            .update_parent(conversation.session_key, conversation.chat_id, parent_id)
+            .await;
+    }
+
     let usage = usage_from_text(
         final_prompt,
         &format!("{}{}", parse_state.reasoning, parse_state.last_full_content),
@@ -866,6 +1036,7 @@ struct StreamResponseArgs {
     body: OpenAIRequest,
     final_prompt: String,
     chat_id: String,
+    session_key: String,
     completion_id: String,
     response: reqwest::Response,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -877,7 +1048,8 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
         state,
         body,
         final_prompt,
-        chat_id: _chat_id,
+        chat_id,
+        session_key,
         completion_id,
         response,
         cancel_token,
@@ -885,6 +1057,7 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
     } = args;
     let model = body.model.clone();
     let stream_registry = state.stream_registry.clone();
+    let conversations = state.conversations.clone();
     let metrics = state.metrics.clone();
     /* frees the registry slot even if the client disconnects before the generator
     reaches its explicit remove below */
@@ -1073,6 +1246,11 @@ fn build_stream_response(args: StreamResponseArgs) -> Response {
         }
         yield Ok(sse_done());
 
+        if let Some(parent_id) = parse_state.target_response_id.clone() {
+            conversations
+                .update_parent(&session_key, &chat_id, parent_id)
+                .await;
+        }
         stream_registry.remove_by_completion_id(&completion_id).await;
         metrics.gauge("streams.active", stream_registry.active_count().await as f64).await;
     };
@@ -1099,6 +1277,14 @@ async fn create_qwen_chat(
         )
         .header("x-request-id", Uuid::new_v4().to_string())
         .header("bx-v", headers.get("bx-v").cloned().unwrap_or_default())
+        .header("bx-ua", headers.get("bx-ua").cloned().unwrap_or_default())
+        .header(
+            "bx-umidtoken",
+            headers.get("bx-umidtoken").cloned().unwrap_or_default(),
+        )
+        .header("timezone", "UTC")
+        .header("version", QWEN_WEB_VERSION)
+        .header("source", "web")
         .json(&json!({
             "title": "Nova Conversa",
             "models": ["qwen3.7-plus"],
@@ -1137,10 +1323,12 @@ async fn request_qwen_chat(
     body: &OpenAIRequest,
     final_prompt: &str,
     chat_id: &str,
+    parent_id: Option<&str>,
     headers: &HashMap<String, String>,
     files: &[Value],
 ) -> std::result::Result<reqwest::Response, QwenRequestError> {
     let model = normalize_model_id(&body.model);
+    let parent_id = parent_id.map(Value::from).unwrap_or(Value::Null);
     let payload = json!({
         "stream": true,
         "version": "2.1",
@@ -1148,10 +1336,10 @@ async fn request_qwen_chat(
         "chat_id": chat_id,
         "chat_mode": "normal",
         "model": model,
-        "parent_id": Value::Null,
+        "parent_id": parent_id,
         "messages": [{
             "fid": Uuid::new_v4().to_string(),
-            "parentId": Value::Null,
+            "parentId": parent_id,
             "childrenIds": [],
             "role": "user",
             "content": final_prompt,
@@ -1171,7 +1359,7 @@ async fn request_qwen_chat(
             },
             "extra": { "meta": { "subChatType": "t2t" } },
             "sub_chat_type": "t2t",
-            "parent_id": Value::Null
+            "parent_id": parent_id
         }],
         "timestamp": current_timestamp() + 1
     });
@@ -1216,6 +1404,13 @@ async fn request_qwen_chat(
         .header("x-accel-buffering", "no")
         .header("x-request-id", Uuid::new_v4().to_string())
         .header("bx-v", headers.get("bx-v").cloned().unwrap_or_default())
+        .header("bx-ua", headers.get("bx-ua").cloned().unwrap_or_default())
+        .header(
+            "bx-umidtoken",
+            headers.get("bx-umidtoken").cloned().unwrap_or_default(),
+        )
+        .header("version", QWEN_WEB_VERSION)
+        .header("source", "web")
         .body(payload_json)
         .send()
         .await
@@ -1358,6 +1553,9 @@ async fn collect_qwen_events(
         Ok(value) => value,
         Err(_) => return Ok(Vec::new()),
     };
+    if let Some(error) = extract_qwen_api_error(&chunk) {
+        return Err(anyhow!("Qwen upstream stream error: {error}"));
+    }
 
     if let Some(response_id) = chunk
         .get("response.created")
@@ -1533,6 +1731,13 @@ fn effective_accounts(store: &AccountStore) -> Result<Vec<QwenAccount>> {
 
 fn account_id_for_bridge(account: &QwenAccount) -> Option<String> {
     (account.id != "global").then(|| account.id.clone())
+}
+
+fn qwen_session_key(user: Option<&str>) -> String {
+    user.filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("default")
+        .to_owned()
 }
 
 async fn pick_capture_headers_for_aux_request(
@@ -1742,10 +1947,17 @@ pub async fn serve_embedded(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_qwen_events, extract_qwen_api_error, extract_qwen_chat_id, QwenEvent,
-        QwenParseState, StreamRegistry,
+        collect_qwen_events, extract_qwen_api_error, extract_qwen_chat_id, live_qwen_model_data,
+        qwen_session_key, QwenEvent, QwenParseState, StreamRegistry,
     };
     use serde_json::json;
+
+    #[test]
+    fn session_key_defaults_and_trims_client_identity() {
+        assert_eq!(qwen_session_key(None), "default");
+        assert_eq!(qwen_session_key(Some("  ")), "default");
+        assert_eq!(qwen_session_key(Some("  client-1 ")), "client-1");
+    }
 
     #[test]
     fn extracts_nested_chat_id_variants() {
@@ -1779,6 +1991,47 @@ mod tests {
             })),
             Some("Unauthorized: login required".to_owned())
         );
+    }
+
+    #[test]
+    fn expands_live_qwen_catalog_with_thinking_variants() {
+        let payload = live_qwen_model_data(&json!({
+            "data": [{ "id": "qwen-live", "info": { "created_at": 1 } }]
+        }))
+        .unwrap();
+        let ids = payload["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|model| model["id"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            ["qwen-live", "qwen-live-thinking", "qwen-live-no-thinking"]
+        );
+        assert_eq!(payload["discovery"]["live"], true);
+    }
+
+    #[tokio::test]
+    async fn surfaces_qwen_stream_error_payloads() {
+        let registry = StreamRegistry::new();
+        let mut state = QwenParseState::default();
+        let mut parser = None;
+        let result = collect_qwen_events(
+            &json!({
+                "success": false,
+                "data": { "code": "Bad_Request", "details": "model unavailable" }
+            })
+            .to_string(),
+            "chatcmpl-test",
+            &registry,
+            &mut state,
+            &mut parser,
+        )
+        .await;
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+        assert!(error.to_string().contains("Bad_Request: model unavailable"));
     }
 
     #[tokio::test]

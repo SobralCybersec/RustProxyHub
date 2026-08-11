@@ -2,9 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   cleanChatGPTUiAssistantText,
+  extractChatGPTAssistantModel,
+  extractChatGPTAssistantReasoning,
   extractChatGPTAssistantText,
   extractChatGPTAssistantTextFromSse,
 } from '../../src-tauri/resources/playwright-bridge/chatgpt-web-response.mjs'
+import {
+  applyChatGPTConversationSession,
+  chatGPTSessionFromTemplate,
+  chatGPTSessionKey,
+  latestChatGPTAssistantMessageId,
+} from '../../src-tauri/resources/playwright-bridge/chatgpt-web-session.mjs'
 
 test('extracts latest ChatGPT assistant response from structured parts', () => {
   const response = extractChatGPTAssistantText({
@@ -51,6 +59,22 @@ test('ignores non-assistant messages and unknown scalar metadata', () => {
   })
 
   assert.equal(response, 'assistant content')
+  assert.equal(extractChatGPTAssistantModel({
+    mapping: {
+      assistant: {
+        message: {
+          author: { role: 'assistant' },
+          content: { parts: ['assistant content'], model_slug: 'gpt-test' },
+        },
+      },
+    },
+  }), 'gpt-test')
+  assert.equal(extractChatGPTAssistantReasoning({
+    message: {
+      author: { role: 'assistant' },
+      content: { reasoning_content: 'provider-visible reasoning summary' },
+    },
+  }), 'provider-visible reasoning summary')
 })
 
 test('removes ChatGPT work-status text and echoed submitted prompt', () => {
@@ -95,4 +119,24 @@ test('removes echoed prompt from structured SSE assistant content', () => {
   ].join('\n')
 
   assert.equal(extractChatGPTAssistantTextFromSse(raw, prompt), 'Actual answer')
+})
+
+test('reuses default or caller-scoped ChatGPT conversation and latest assistant parent', () => {
+  assert.equal(chatGPTSessionKey(' client-a '), 'client-a')
+  assert.equal(chatGPTSessionKey(), '__rust_proxy_hub_default_chatgpt_thread__')
+  assert.equal(chatGPTSessionKey('x'.repeat(257)), '__rust_proxy_hub_default_chatgpt_thread__')
+  assert.deepEqual(chatGPTSessionFromTemplate({
+    payload: JSON.stringify({ conversation_id: 'existing-conversation', parent_message_id: 'existing-parent' }),
+  }), { conversation_id: 'existing-conversation', parent_message_id: 'existing-parent' })
+  assert.equal(latestChatGPTAssistantMessageId({
+    mapping: {
+      old: { message: { id: 'assistant-old', author: { role: 'assistant' }, create_time: 1 } },
+      latest: { message: { id: 'assistant-latest', author: { role: 'assistant' }, create_time: 2 } },
+    },
+  }), 'assistant-latest')
+  assert.deepEqual(
+    applyChatGPTConversationSession({}, { conversation_id: 'conversation-1', parent_message_id: 'assistant-latest' }),
+    { conversation_id: 'conversation-1', parent_message_id: 'assistant-latest' },
+  )
+  assert.deepEqual(applyChatGPTConversationSession({}, null), { parent_message_id: 'client-created-root' })
 })

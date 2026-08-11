@@ -4,7 +4,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { ChatGptOAuthClient } from './chatgpt-oauth.mjs'
-import { extractChatGPTAssistantText } from './chatgpt-web-response.mjs'
+import { extractChatGPTAssistantModel, extractChatGPTAssistantReasoning, extractChatGPTAssistantText } from './chatgpt-web-response.mjs'
+import { applyChatGPTConversationSession, chatGPTSessionFromTemplate, chatGPTSessionKey, latestChatGPTAssistantMessageId } from './chatgpt-web-session.mjs'
 import { compactStructuredPrompt, summarizePromptCompaction } from './prompt-compaction.mjs'
 
 // Fix IPv6/IPv4 resolution issue in Node 17+ (localhost resolves to ::1 instead of 127.0.0.1)
@@ -211,6 +212,7 @@ const state = {
     lastHeadersTime: 0,
     streamEmitter: null,
     streamLock: Promise.resolve(),
+    webSessions: new Map(),
   },
   gemini: {
     context: null,
@@ -544,7 +546,8 @@ async function initDeepSeek({ runtime_dir, headless, browser }) {
       '--disable-features=DevToolsDebuggingRestrictions',
     ],
   })
-  state.deepseek.page = await state.deepseek.context.newPage()
+  state.deepseek.page = state.deepseek.context.pages().find((page) => !page.isClosed())
+    || await state.deepseek.context.newPage()
   state.deepseek.headless = headless
 }
 
@@ -554,8 +557,7 @@ async function captureDeepSeekHeaders(forceNew = false) {
 
   const currentUrl = page.url()
   const isOnDeepSeek = isOnHost(currentUrl, 'chat.deepseek.com')
-  const isOnSpecificChat = isOnDeepSeek && /\/chat\/\d+/.test(currentUrl)
-  if (!isOnDeepSeek || forceNew || isOnSpecificChat) {
+  if (!isOnDeepSeek || forceNew) {
     try {
       await page.goto('https://chat.deepseek.com/', { waitUntil: 'domcontentloaded' })
     } catch (error) {
@@ -631,6 +633,7 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     state.chatgpt.cachedHeaders = null
     state.chatgpt.lastHeadersTime = 0
     state.chatgpt.streamEmitter = null
+    state.chatgpt.webSessions.clear()
   }
   ensureDir(path.resolve('chatgpt_profile'))
   const { engine, channel, executablePath } = resolveEngine(browser)
@@ -638,8 +641,11 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     headless,
     channel,
     executablePath,
+    // Chrome Stable Linux 150.0.7871.186 (2026-07-23). Keep this aligned with
+    // the selected browser release so it matches the browser's Client Hints.
     userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.186 Safari/537.36',
+    viewport: null,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
       '--disable-blink-features=AutomationControlled',
@@ -650,7 +656,9 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
   await state.chatgpt.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
-  state.chatgpt.page = await state.chatgpt.context.newPage()
+  state.chatgpt.page = state.chatgpt.context.pages().find((candidate) => isOnHost(candidate.url(), 'chatgpt.com'))
+    || state.chatgpt.context.pages()[0]
+    || await state.chatgpt.context.newPage()
   await state.chatgpt.page.exposeBinding('__rustProxyHubStream', (_source, event) => {
     if (state.chatgpt.streamEmitter && event && typeof event === 'object') {
       state.chatgpt.streamEmitter(event)
@@ -678,7 +686,7 @@ async function captureChatGPTTemplate(forceNew = false) {
     return state.chatgpt.cachedHeaders
   }
 
-  if (!isOnHost(page.url(), 'chatgpt.com') || forceNew) {
+  if (!isOnHost(page.url(), 'chatgpt.com')) {
     await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
   }
 
@@ -855,7 +863,7 @@ function compactChatGPTPrompt(prompt, maxChars = 18000) {
   return compactStructuredPrompt(prompt, { maxChars })
 }
 
-function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch, systemPrompt) {
+function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch, systemPrompt, session = null) {
   let payload = null
   try {
     payload = template?.payload ? JSON.parse(template.payload) : null
@@ -902,7 +910,7 @@ function buildChatGPTPayloadFromTemplate(template, prompt, model, webSearch, sys
   })
   nextPayload.messages = builtMessages
 
-  nextPayload.parent_message_id = 'client-created-root'
+  applyChatGPTConversationSession(nextPayload, session)
   if (!nextPayload.action || typeof nextPayload.action !== 'string') {
     nextPayload.action = 'next'
   }
@@ -1005,21 +1013,25 @@ async function listChatGPTHybridModels({ chatgpt_mode = 'auto' } = {}) {
   }
 }
 
-async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false }, emitStream = null) {
+async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false, session_id = null }, emitStream = null) {
   const page = state.chatgpt.page
   if (!page) throw new Error('ChatGPT Playwright not initialized')
 
-  const template = await captureChatGPTTemplate(true)
-  const requestHeaders = { ...template.headers }
-  delete requestHeaders.cookie
+  let template = await captureChatGPTTemplate(false)
+  const sessionKey = chatGPTSessionKey(session_id)
+  let session = state.chatgpt.webSessions.get(sessionKey) || chatGPTSessionFromTemplate(template)
+  if (session) state.chatgpt.webSessions.set(sessionKey, session)
 
   const sendConversation = async (preparedPrompt) => {
+    const requestHeaders = { ...template.headers }
+    delete requestHeaders.cookie
     const payload = buildChatGPTPayloadFromTemplate(
       template,
       preparedPrompt.text,
       ensureSessionText(model, template.model || 'chatgpt-web-session'),
       web_search,
       system_prompt || null,
+      session,
     )
     const requestResult = await page.evaluate(async ({ headers, payload, submittedPrompt, stream }) => {
       const controller = new AbortController()
@@ -1036,6 +1048,8 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
       let raw = ''
       let lineBuffer = ''
       let streamedText = ''
+      let streamedModel = ''
+      let streamedReasoning = ''
       let conversationId = ''
 
       const collectText = (value, output = [], acceptsText = false, depth = 0) => {
@@ -1075,6 +1089,48 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
           .join('\n')
           .trim()
       }
+      const assistantModel = (payload) => {
+        const mapping = payload?.mapping && typeof payload.mapping === 'object' ? Object.values(payload.mapping) : []
+        const messages = [
+          ...(payload?.message?.author?.role === 'assistant' ? [payload.message] : []),
+          ...mapping.map(entry => entry?.message),
+        ]
+          .filter(message => message?.author?.role === 'assistant')
+          .sort((left, right) => (left?.create_time || 0) - (right?.create_time || 0))
+        const message = messages.at(-1)
+        for (const candidate of [
+          message?.metadata?.model_slug,
+          message?.metadata?.model,
+          message?.content?.model_slug,
+          message?.content?.model,
+          message?.model_slug,
+          message?.model,
+          payload?.metadata?.model_slug,
+          payload?.metadata?.model,
+          payload?.model_slug,
+          payload?.model,
+        ]) {
+          if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+        }
+        return ''
+      }
+      const assistantReasoning = (payload, output = [], acceptsText = false, depth = 0) => {
+        if (depth > 12 || payload == null) return output.join('\n').trim()
+        if (typeof payload === 'string') {
+          if (acceptsText && payload.trim()) output.push(payload)
+          return output.join('\n').trim()
+        }
+        if (Array.isArray(payload)) {
+          for (const item of payload) assistantReasoning(item, output, acceptsText, depth + 1)
+          return output.join('\n').trim()
+        }
+        if (typeof payload === 'object') {
+          for (const [key, value] of Object.entries(payload)) {
+            assistantReasoning(value, output, acceptsText || ['reasoning', 'reasoning_content', 'summary', 'thoughts'].includes(key), depth + 1)
+          }
+        }
+        return output.join('\n').trim()
+      }
       const emitDelta = async (payload) => {
         if (!stream || typeof globalThis.__rustProxyHubStream !== 'function') return
         const current = assistantText(payload)
@@ -1082,6 +1138,14 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
         const delta = current.startsWith(streamedText) ? current.slice(streamedText.length) : current
         streamedText = current
         if (delta) await globalThis.__rustProxyHubStream({ type: 'delta', delta })
+      }
+      const emitReasoning = async (payload) => {
+        if (!stream || typeof globalThis.__rustProxyHubStream !== 'function') return
+        const current = assistantReasoning(payload?.message?.content || payload)
+        if (!current) return
+        const delta = current.startsWith(streamedReasoning) ? current.slice(streamedReasoning.length) : current
+        streamedReasoning = current
+        if (delta) await globalThis.__rustProxyHubStream({ type: 'reasoning', delta })
       }
 
       if (reader) {
@@ -1116,6 +1180,8 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
                 parsed.token?.conversation_id ||
                 parsed.options?.[0]?.conversation_id ||
                 conversationId
+              streamedModel = assistantModel(parsed) || streamedModel
+              await emitReasoning(parsed)
               await emitDelta(parsed)
             } catch {}
           }
@@ -1133,6 +1199,8 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
         status: response.status,
         conversationId,
         body: raw,
+        streamModel: streamedModel,
+        streamReasoning: streamedReasoning,
         streamText: streamedText,
         upstream_cache: Object.keys(upstreamCache).length ? upstreamCache : null,
       }
@@ -1141,6 +1209,12 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
   }
 
   let sent = await sendConversation(compactChatGPTPrompt(prompt, 18000))
+  if (!sent.requestResult.ok && [401, 403].includes(sent.requestResult.status)) {
+    template = await captureChatGPTTemplate(true)
+    session = state.chatgpt.webSessions.get(sessionKey) || chatGPTSessionFromTemplate(template)
+    if (session) state.chatgpt.webSessions.set(sessionKey, session)
+    sent = await sendConversation(compactChatGPTPrompt(prompt, 18000))
+  }
   if (!sent.requestResult.ok && sent.requestResult.status === 413) {
     sent = await sendConversation(compactChatGPTPrompt(prompt, 9000))
   }
@@ -1155,7 +1229,10 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
     )
   }
 
-  const conversationJson = await page.evaluate(async ({ headers, conversationId }) => {
+  let responseHeaders = { ...template.headers }
+  delete responseHeaders.cookie
+  const readConversation = async () => page.evaluate(async ({ headers, conversationId }) => {
+    let lastStatus = 0
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), 8000)
@@ -1169,27 +1246,60 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
       if (response.ok) {
         const text = await response.text()
         if (text && text !== 'null') {
-          return text
+          return { body: text, status: response.status }
         }
       }
+
+      lastStatus = response.status
+      if ([401, 403].includes(response.status)) return { body: '', status: response.status }
 
       await new Promise((resolve) => setTimeout(resolve, 1000))
     }
 
-    return ''
-  }, { headers: requestHeaders, conversationId })
+    return { body: '', status: lastStatus }
+  }, { headers: responseHeaders, conversationId })
 
-  const text = extractChatGPTAssistantText(
-    conversationJson ? JSON.parse(conversationJson) : null,
-    sent.preparedPrompt.text,
-  ) || sent.requestResult.streamText
+  let conversation = await readConversation()
+  if ([401, 403].includes(conversation.status)) {
+    template = await captureChatGPTTemplate(true)
+    responseHeaders = { ...template.headers }
+    delete responseHeaders.cookie
+    conversation = await readConversation()
+  }
+  if ([401, 403].includes(conversation.status)) {
+    throw new Error(`ChatGPT web conversation read unauthorized (HTTP ${conversation.status})`)
+  }
+
+  let conversationPayload = null
+  try {
+    conversationPayload = conversation.body ? JSON.parse(conversation.body) : null
+  } catch {}
+  if (sessionKey) {
+    const parentMessageId = latestChatGPTAssistantMessageId(conversationPayload)
+    if (parentMessageId) {
+      state.chatgpt.webSessions.set(sessionKey, {
+        conversation_id: conversationId,
+        parent_message_id: parentMessageId,
+        updated_at: Date.now(),
+      })
+    } else {
+      state.chatgpt.webSessions.delete(sessionKey)
+    }
+  }
+  const text = extractChatGPTAssistantText(conversationPayload, sent.preparedPrompt.text)
+    || sent.requestResult.streamText
+  const reasoningContent = extractChatGPTAssistantReasoning(conversationPayload)
+    || sent.requestResult.streamReasoning
   if (!text) {
     throw new Error('ChatGPT response was empty. Confirm session is active, then retry.')
   }
 
   return {
     text,
-    model: sent.payload.model,
+    model: extractChatGPTAssistantModel(conversationPayload)
+      || sent.requestResult.streamModel
+      || sent.payload.model,
+    reasoning_content: reasoningContent || null,
     conversation_id: conversationId,
     upstream_cache: sent.requestResult.upstream_cache,
     warning: summarizePromptCompaction(sent.preparedPrompt),
@@ -1212,7 +1322,7 @@ function normalizeChatGptMode(mode) {
   return mode === 'codex' ? 'codex' : mode === 'web' ? 'web' : 'auto'
 }
 
-async function chatChatGPT({ model, prompt, system_prompt, web_search = false, chatgpt_mode = 'auto' }, emitStream = null) {
+async function chatChatGPT({ model, prompt, system_prompt, web_search = false, chatgpt_mode = 'auto', session_id = null }, emitStream = null) {
   const selectedModel = ensureSessionText(model, 'chatgpt-web-session')
   const mode = normalizeChatGptMode(chatgpt_mode)
   if (mode === 'web' || (mode === 'auto' && isChatGPTWebSessionModel(selectedModel))) {
@@ -1226,7 +1336,7 @@ async function chatChatGPT({ model, prompt, system_prompt, web_search = false, c
       const previousEmitter = state.chatgpt.streamEmitter
       state.chatgpt.streamEmitter = emitStream
       try {
-        return await chatChatGPTWeb({ model: selectedModel, prompt, system_prompt, web_search }, emitStream)
+        return await chatChatGPTWeb({ model: selectedModel, prompt, system_prompt, web_search, session_id }, emitStream)
       } finally {
         state.chatgpt.streamEmitter = previousEmitter
       }
@@ -1244,11 +1354,16 @@ async function chatChatGPT({ model, prompt, system_prompt, web_search = false, c
   })
 }
 
-async function openChatGPTLogin({ runtime_dir, browser, oauth = true, web = true } = {}) {
+async function openChatGPTLogin({ runtime_dir, browser, oauth = false, web = true } = {}) {
   await initChatGPT({ runtime_dir, headless: false, browser })
   if (oauth) {
-    const oauthPage = state.chatgpt.context ? await state.chatgpt.context.newPage().catch(() => null) : null
-    if (oauthPage) await state.chatgpt.oauth?.startLogin(oauthPage).catch(() => {})
+    const oauthPage = state.chatgpt.context
+      ? await state.chatgpt.context.newPage()
+      : null
+    if (!oauthPage || !state.chatgpt.oauth) {
+      throw new Error('ChatGPT OAuth login page could not be opened')
+    }
+    await state.chatgpt.oauth.startLogin(oauthPage)
   }
   if (web) await state.chatgpt.page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
 }
@@ -1281,7 +1396,8 @@ async function initGemini({ runtime_dir, headless, browser }) {
   await state.gemini.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
-  state.gemini.page = await state.gemini.context.newPage()
+  state.gemini.page = state.gemini.context.pages().find((page) => !page.isClosed())
+    || await state.gemini.context.newPage()
   state.gemini.headless = headless
 }
 
@@ -1463,7 +1579,7 @@ async function chatGemini({ prompt, web_search = false }) {
   const page = state.gemini.page
   if (!page) throw new Error('Gemini Playwright not initialized')
 
-  const template = await captureGeminiTemplate(true)
+  const template = await captureGeminiTemplate(false)
   const form = new URLSearchParams(template.payload)
   const rawFReq = form.get('f.req')
   if (!rawFReq) {
@@ -1545,7 +1661,8 @@ async function initMistral({ runtime_dir, headless, browser }) {
   await state.mistral.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
-  state.mistral.page = await state.mistral.context.newPage()
+  state.mistral.page = state.mistral.context.pages().find((page) => !page.isClosed())
+    || await state.mistral.context.newPage()
   state.mistral.headless = headless
 }
 
@@ -1746,7 +1863,7 @@ async function chatMistral({ model, prompt, web_search = false }) {
   const page = state.mistral.page
   if (!page) throw new Error('Mistral Playwright not initialized')
 
-  const template = await captureMistralTemplate(true)
+  const template = await captureMistralTemplate(false)
   const headers = { ...template.headers }
   const prepared = buildTemplateBody(template, prompt, model)
 
@@ -1814,7 +1931,8 @@ async function initZai({ runtime_dir, headless, browser }) {
   await state.zai.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
-  state.zai.page = await state.zai.context.newPage()
+  state.zai.page = state.zai.context.pages().find((page) => !page.isClosed())
+    || await state.zai.context.newPage()
   state.zai.headless = headless
 }
 
@@ -1978,7 +2096,7 @@ async function chatZai({ model, prompt, web_search = false }) {
   const page = state.zai.page
   if (!page) throw new Error('Z.AI Playwright not initialized')
 
-  const template = await captureZaiTemplate(true)
+  const template = await captureZaiTemplate(false)
   const headers = { ...template.headers }
   const prepared = buildTemplateBody(template, prompt, ensureSessionText(model, 'glm-5.2'))
 
@@ -2053,7 +2171,8 @@ async function initMeta({ runtime_dir, headless, browser }) {
   await state.meta.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
-  state.meta.page = await state.meta.context.newPage()
+  state.meta.page = state.meta.context.pages().find((page) => !page.isClosed())
+    || await state.meta.context.newPage()
   state.meta.headless = headless
 }
 
@@ -2213,7 +2332,7 @@ async function chatMeta({ model, prompt, web_search = false }) {
   const page = state.meta.page
   if (!page) throw new Error('Meta AI Playwright not initialized')
 
-  const template = await captureMetaTemplate(true)
+  const template = await captureMetaTemplate(false)
   const headers = { ...template.headers }
   const prepared = buildTemplateBody(template, prompt, ensureSessionText(model, 'meta-ai-web-session'))
 
@@ -2289,7 +2408,8 @@ async function initKimi({ runtime_dir, headless, browser }) {
   await state.kimi.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
-  state.kimi.page = await state.kimi.context.newPage()
+  state.kimi.page = state.kimi.context.pages().find((page) => !page.isClosed())
+    || await state.kimi.context.newPage()
   state.kimi.headless = headless
 }
 
@@ -2435,7 +2555,8 @@ async function initQwen({ runtime_dir, headless, browser, account_id = null }) {
   await slot.context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined })
   })
-  slot.page = await slot.context.newPage()
+  slot.page = slot.context.pages().find((page) => !page.isClosed())
+    || await slot.context.newPage()
   slot.headless = headless
   if (!account_id) {
     await attemptQwenAutoLogin(null)
@@ -2686,7 +2807,9 @@ async function handle(method, provider, params, emitStream = null) {
     case 'chatgpt:basic_headers':
       return getChatGPTBasicHeaders()
     case 'chatgpt:manual_login':
-      return openChatGPTLogin({ ...(params || {}), oauth: true, web: true })
+      // Browser-session login uses the persistent ChatGPT profile directly.
+      // Codex OAuth is a separate explicit lane below.
+      return openChatGPTLogin({ ...(params || {}), oauth: false, web: true })
     case 'chatgpt:list_models':
       return listChatGPTHybridModels(params)
     case 'chatgpt:chat':

@@ -1,4 +1,16 @@
 const TEXT_FIELDS = new Set(['content', 'output_text', 'parts', 'text'])
+const REASONING_FIELDS = new Set(['reasoning', 'reasoning_content', 'summary', 'thoughts'])
+
+function assistantMessages(payload) {
+  if (!payload || typeof payload !== 'object') return []
+  const mapping = payload.mapping && typeof payload.mapping === 'object' ? Object.values(payload.mapping) : []
+  return [
+    ...(payload.message?.author?.role === 'assistant' ? [payload.message] : []),
+    ...mapping.map(entry => entry?.message),
+  ]
+    .filter((message, index, all) => message?.author?.role === 'assistant' && all.indexOf(message) === index)
+    .sort((left, right) => (left?.create_time || 0) - (right?.create_time || 0))
+}
 
 function collectAssistantText(value, output = [], acceptsText = false, depth = 0) {
   if (depth > 12 || value == null) return output
@@ -18,15 +30,26 @@ function collectAssistantText(value, output = [], acceptsText = false, depth = 0
   return output
 }
 
+function collectNamedText(value, fields, output = [], acceptsText = false, depth = 0) {
+  if (depth > 12 || value == null) return output
+  if (typeof value === 'string') {
+    if (acceptsText && value.trim()) output.push(value)
+    return output
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectNamedText(item, fields, output, acceptsText, depth + 1)
+    return output
+  }
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      collectNamedText(child, fields, output, acceptsText || fields.has(key), depth + 1)
+    }
+  }
+  return output
+}
+
 export function extractChatGPTAssistantText(payload, submittedPrompt = '') {
-  if (!payload || typeof payload !== 'object') return ''
-  const mapping = payload.mapping && typeof payload.mapping === 'object' ? Object.values(payload.mapping) : []
-  const messages = [
-    ...(payload.message?.author?.role === 'assistant' ? [payload.message] : []),
-    ...mapping.map(entry => entry?.message),
-  ]
-    .filter((message, index, all) => message?.author?.role === 'assistant' && all.indexOf(message) === index)
-    .sort((left, right) => (left?.create_time || 0) - (right?.create_time || 0))
+  const messages = assistantMessages(payload)
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const text = cleanChatGPTUiAssistantText(
@@ -36,6 +59,33 @@ export function extractChatGPTAssistantText(payload, submittedPrompt = '') {
     if (text) return text
   }
 
+  return ''
+}
+
+export function extractChatGPTAssistantModel(payload) {
+  for (const message of assistantMessages(payload).reverse()) {
+    for (const candidate of [
+      message?.metadata?.model_slug,
+      message?.metadata?.model,
+      message?.content?.model_slug,
+      message?.content?.model,
+      message?.model_slug,
+      message?.model,
+    ]) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+    }
+  }
+  for (const candidate of [payload?.metadata?.model_slug, payload?.metadata?.model, payload?.model_slug, payload?.model]) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+  }
+  return ''
+}
+
+export function extractChatGPTAssistantReasoning(payload) {
+  for (const message of assistantMessages(payload).reverse()) {
+    const reasoning = collectNamedText(message?.content, REASONING_FIELDS).join('\n').trim()
+    if (reasoning) return reasoning
+  }
   return ''
 }
 
