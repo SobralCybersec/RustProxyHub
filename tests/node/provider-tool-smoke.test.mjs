@@ -77,14 +77,24 @@ function startTemporaryHub() {
         )
         return
       }
-      response.end(
-        [
-          `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `call_${provider}`, type: 'function', function: { name: 'report_smoke_target', arguments: JSON.stringify({ provider, model }) } }] }, finish_reason: 'tool_calls' }] })}`,
-          '',
-          'data: [DONE]',
-          '',
-        ].join('\n')
-      )
+      const toolCallResponse = JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: `call_${provider}`,
+                  type: 'function',
+                  function: { name: 'report_smoke_target', arguments: JSON.stringify({ provider, model }) },
+                },
+              ],
+            },
+            finish_reason: 'tool_calls',
+          },
+        ],
+      })
+      response.end([`data: ${toolCallResponse}`, '', 'data: [DONE]', ''].join('\n'))
       return
     }
     if (url.pathname === '/v1/messages') {

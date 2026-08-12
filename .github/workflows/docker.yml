@@ -41,7 +41,7 @@ jobs:
       packages: write
       security-events: write
     steps:
-      - uses: actions/checkout@v6.1.0 # v6.1.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
@@ -141,6 +141,6 @@ jobs:
       # earlier one and auto-closes the stale library alerts it had filed.
       - name: Upload Trivy SARIF
         if: github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4
         with:
           sarif_file: trivy-results.sarif
