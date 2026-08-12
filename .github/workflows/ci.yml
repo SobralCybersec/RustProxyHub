@@ -22,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.1.0 # v6.1.0
+        uses: actions/checkout@v7.0.1 # v6.1.0
 
       - name: Install Tauri Linux system dependencies
         run: |
@@ -38,12 +38,12 @@ jobs:
             build-essential
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6.0.9 # v6.0.9
+        uses: pnpm/action-setup@v6.0.10 # v6.0.9
         with:
           version: 11
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6.4.0 # v6.4.0
+        uses: actions/setup-node@v7.0.0 # v6.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -55,7 +55,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Rust
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@a45951ff880207c249adf57334cf2e9bd81d6e1e # v2
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
