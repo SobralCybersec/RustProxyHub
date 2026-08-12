@@ -210,8 +210,25 @@ pnpm release:windows
 pnpm verify
 # = eslint · vue-tsc type-check · vitest · Node bridge tests · frontend build
 #   · cargo audit · pnpm audit
-#   · cargo test · cargo clippy --all-targets -D warnings
+#   · jscpd duplication gate · cargo test · cargo clippy --all-targets -D warnings
 ```
+
+### Duplication metrics
+
+```bash
+# Repository-wide gate: max 5% duplication, with reports under metrics/jscpd/
+pnpm quality:duplication
+
+# Custom report options
+node scripts/jscpd.mjs src tests \
+  --reporters console,markdown \
+  --output metrics/jscpd-custom \
+  --metrics metrics/jscpd-custom/summary.json \
+  --min-lines 10 \
+  --threshold 3
+```
+
+The wrapper always requests jscpd's JSON reporter, then writes a compact summary metrics file for CI or local review. Generated `metrics/` output is ignored by Git.
 
 ### Cargo Features
 

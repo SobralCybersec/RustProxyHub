@@ -12,6 +12,7 @@ runtime-test
 research/
 target-baseline
 artifacts/*
+metrics/
 
 front-end-example
 node_modules

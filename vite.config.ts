@@ -1,10 +1,13 @@
 import vue from '@vitejs/plugin-vue'
+import { createRequire } from 'node:module'
 import { fileURLToPath, URL } from 'node:url'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { defineConfig } from 'vite'
 import vueDevTools from 'vite-plugin-vue-devtools'
-import { version as pkgVersion } from './package.json' with { type: 'json' }
+
+const require = createRequire(import.meta.url)
+const { version: pkgVersion } = require('./package.json')
 
 const HOST = process.env.TAURI_DEV_HOST
 const PLATFORM = process.env.TAURI_ENV_PLATFORM

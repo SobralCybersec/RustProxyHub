@@ -1,7 +1,9 @@
+import { createRequire } from 'node:module'
 import { fileURLToPath, URL } from 'node:url'
 import { mergeConfig } from 'vite'
 import { defineConfig } from 'vitest/config'
-import { version as pkgVersion } from './package.json' with { type: 'json' }
+const require = createRequire(import.meta.url)
+const { version: pkgVersion } = require('./package.json')
 import viteConfig from './vite.config.ts'
 
 process.env.VITE_APP_VERSION = pkgVersion
