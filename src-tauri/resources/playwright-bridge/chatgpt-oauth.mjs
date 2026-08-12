@@ -17,6 +17,8 @@ const REDIRECT_URI = `http://${REDIRECT_HOST}:${REDIRECT_PORT}/auth/callback`
 const REFRESH_EXPIRY_MARGIN_MS = 5 * 60 * 1000
 const REFRESH_INTERVAL_MS = 55 * 60 * 1000
 const MODEL_CACHE_MS = 5 * 60 * 1000
+const TRANSIENT_FETCH_ATTEMPTS = 3
+const TRANSIENT_FETCH_BACKOFF_MS = 400
 
 let cachedCodexClientVersion = null
 let cachedCodexClientVersionExpiresAt = 0
@@ -24,6 +26,24 @@ let codexClientVersionPromise = null
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isTransientFetchError(error) {
+  const message = String(error?.cause?.message || error?.message || error || '').toLowerCase()
+  return /econnreset|socket connection was closed|connection reset|connection closed|broken pipe|fetch failed|network error/.test(message)
+}
+
+async function fetchWithTransientRetry(fetchImpl, url, init = {}, attempts = TRANSIENT_FETCH_ATTEMPTS) {
+  const method = String(init.method || 'GET').toUpperCase()
+  const retryAllowed = ['GET', 'HEAD', 'OPTIONS'].includes(method)
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fetchImpl(url, init)
+    } catch (error) {
+      if (!retryAllowed || !isTransientFetchError(error) || attempt + 1 >= attempts) throw error
+      await new Promise(resolve => setTimeout(resolve, TRANSIENT_FETCH_BACKOFF_MS * 2 ** attempt))
+    }
+  }
 }
 
 function semanticVersion(value) {
@@ -487,7 +507,7 @@ export class ChatGptOAuthClient {
       if (!headers.has('accept')) headers.set('accept', 'application/json')
       if (!headers.has('x-client-request-id')) headers.set('x-client-request-id', randomUUID())
       if (session.isFedRamp) headers.set('x-openai-fedramp', 'true')
-      return this.fetch(`${CODEX_BASE_URL}${endpoint}`, { ...init, headers })
+      return fetchWithTransientRetry(this.fetch, `${CODEX_BASE_URL}${endpoint}`, { ...init, headers })
     }
 
     const session = await this.loadSession()

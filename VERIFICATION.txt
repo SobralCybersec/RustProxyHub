@@ -1,0 +1,43 @@
+Changed branch/field:
+- Reqwest streaming clients: added TCP keepalive, shorter stale-pool reuse, long total deadline, and read-stall timeout.
+- Qwen transport errors: ECONNRESET/connection-reset failures are marked retryable and use existing bounded backoff retry loop.
+- ChatGPT Codex fetch: transient socket failures on safe GET/HEAD/OPTIONS requests retry 3 times with exponential backoff; POST bodies are not replayed.
+
+Artifacts:
+- MODIFIED_FILE: src-tauri/src/runtime/providers/qwen/mod.rs
+- DIFF_FILE: DIFF_FILE.patch
+- VERIFICATION.txt: VERIFICATION.txt
+- ROLLBACK.sh: ROLLBACK.sh
+
+BASELINE:
+- Command: cargo test --manifest-path src-tauri/Cargo.toml
+- Input: workspace before connection patch
+- Literal result: 198 passed; 0 failed
+- Exit status: 0
+- Command: node --test --test-concurrency=1 tests/node/chatgpt-oauth.test.mjs
+- Input: workspace before connection patch
+- Literal result: 14 passed; 0 failed
+- Exit status: 0
+
+MODIFIED:
+- Command: cargo test --manifest-path src-tauri/Cargo.toml
+- Input: connection keepalive, transport classification, and retry changes
+- Literal result: 199 passed; 0 failed
+- Exit status: 0
+- Command: node --test --test-concurrency=1 tests/node/chatgpt-oauth.test.mjs
+- Input: transient socket retry regression test
+- Literal result: 15 passed; 0 failed
+- Exit status: 0
+- Command: cargo check --manifest-path src-tauri/Cargo.toml
+- Literal result: Finished dev profile
+- Exit status: 0
+- Command: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+- Literal result: cargo clippy: No issues found
+- Exit status: 0
+
+ROLLBACK:
+- Command: ./ROLLBACK.sh /tmp/rustproxyhub-connection-transaction/qwen.mod.rollback-test.rs /tmp/rustproxyhub-connection-transaction/qwen.mod.original.rs
+- Input: modified Qwen provider copy
+- Literal result: 26f7609ad2b0616f9fb8a98f6625b4e79f3886655a69aee4c42016dd752eaae9
+- Exit status: 0
+- Restored behavior/status: rollback copy restored original source hash; MODIFIED_FILE remains changed.

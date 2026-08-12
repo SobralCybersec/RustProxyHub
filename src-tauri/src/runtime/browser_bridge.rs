@@ -97,7 +97,18 @@ pub struct BridgeStream {
 
 impl BridgeStream {
     pub async fn next_event(&mut self) -> Option<Result<BridgeStreamEvent>> {
-        self.events.recv().await
+        match tokio::time::timeout(self.timeout, self.events.recv()).await {
+            Ok(event) => event,
+            Err(_) => {
+                if let Ok(mut pending) = self.pending.try_lock() {
+                    pending.remove(&self.request_id);
+                }
+                Some(Err(anyhow!(
+                    "helper stream produced no event for {}ms",
+                    self.timeout.as_millis()
+                )))
+            }
+        }
     }
 
     pub async fn finish<R: DeserializeOwned>(self) -> Result<R> {
@@ -197,7 +208,7 @@ impl PlaywrightBridge {
             std::env::var("RUST_PROXY_HUB_BRIDGE_TIMEOUT_MS")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or(120_000),
+                .unwrap_or(300_000),
         );
 
         Ok(Self {

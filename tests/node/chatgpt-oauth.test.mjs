@@ -185,6 +185,26 @@ test('loads local credentials and applies Codex auth headers', async t => {
   assert.equal(captured.headers.get('chatgpt-account-id'), 'acct_local')
 })
 
+test('retries transient Codex socket resets before surfacing failure', async t => {
+  const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rustproxyhub-oauth-reset-'))
+  t.after(() => fs.rm(runtimeDir, { recursive: true, force: true }))
+  const accessToken = jwt({ exp: Math.floor(Date.now() / 1000) + 3600 })
+  await fs.writeFile(
+    path.join(runtimeDir, 'chatgpt_oauth.json'),
+    JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: accessToken, account_id: 'acct_reset' } })
+  )
+  let attempts = 0
+  const client = new ChatGptOAuthClient(runtimeDir, async () => {
+    attempts += 1
+    if (attempts < 3) throw new Error('Connection reset by server')
+    return Response.json({ ok: true })
+  })
+
+  const response = await client.authenticatedFetch('/probe')
+  assert.equal(response.status, 200)
+  assert.equal(attempts, 3)
+})
+
 test('refreshes OAuth session after a Codex 401 before retrying', async t => {
   const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rustproxyhub-oauth-retry-'))
   t.after(() => fs.rm(runtimeDir, { recursive: true, force: true }))

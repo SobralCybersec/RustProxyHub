@@ -1,0 +1,984 @@
+diff --git i/src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs w/src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs
+index 095d78c..e4174f2 100644
+--- i/src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs
++++ w/src-tauri/resources/playwright-bridge/chatgpt-oauth.mjs
+@@ -17,6 +17,8 @@ const REDIRECT_URI = `http://${REDIRECT_HOST}:${REDIRECT_PORT}/auth/callback`
+ const REFRESH_EXPIRY_MARGIN_MS = 5 * 60 * 1000
+ const REFRESH_INTERVAL_MS = 55 * 60 * 1000
+ const MODEL_CACHE_MS = 5 * 60 * 1000
++const TRANSIENT_FETCH_ATTEMPTS = 3
++const TRANSIENT_FETCH_BACKOFF_MS = 400
+ 
+ let cachedCodexClientVersion = null
+ let cachedCodexClientVersionExpiresAt = 0
+@@ -26,6 +28,24 @@ function isRecord(value) {
+   return value !== null && typeof value === 'object' && !Array.isArray(value)
+ }
+ 
++function isTransientFetchError(error) {
++  const message = String(error?.cause?.message || error?.message || error || '').toLowerCase()
++  return /econnreset|socket connection was closed|connection reset|connection closed|broken pipe|fetch failed|network error/.test(message)
++}
++
++async function fetchWithTransientRetry(fetchImpl, url, init = {}, attempts = TRANSIENT_FETCH_ATTEMPTS) {
++  const method = String(init.method || 'GET').toUpperCase()
++  const retryAllowed = ['GET', 'HEAD', 'OPTIONS'].includes(method)
++  for (let attempt = 0; ; attempt += 1) {
++    try {
++      return await fetchImpl(url, init)
++    } catch (error) {
++      if (!retryAllowed || !isTransientFetchError(error) || attempt + 1 >= attempts) throw error
++      await new Promise(resolve => setTimeout(resolve, TRANSIENT_FETCH_BACKOFF_MS * 2 ** attempt))
++    }
++  }
++}
++
+ function semanticVersion(value) {
+   const match = typeof value === 'string' ? value.trim().match(/\b\d+\.\d+\.\d+\b/) : null
+   return match?.[0] || null
+@@ -487,7 +507,7 @@ export class ChatGptOAuthClient {
+       if (!headers.has('accept')) headers.set('accept', 'application/json')
+       if (!headers.has('x-client-request-id')) headers.set('x-client-request-id', randomUUID())
+       if (session.isFedRamp) headers.set('x-openai-fedramp', 'true')
+-      return this.fetch(`${CODEX_BASE_URL}${endpoint}`, { ...init, headers })
++      return fetchWithTransientRetry(this.fetch, `${CODEX_BASE_URL}${endpoint}`, { ...init, headers })
+     }
+ 
+     const session = await this.loadSession()
+diff --git i/src-tauri/src/runtime/hub/mod.rs w/src-tauri/src/runtime/hub/mod.rs
+index c4caed3..8308f28 100644
+--- i/src-tauri/src/runtime/hub/mod.rs
++++ w/src-tauri/src/runtime/hub/mod.rs
+@@ -137,10 +137,12 @@ async fn run_server(config: AppConfig) -> Result<()> {
+     let state = AppState {
+         client: reqwest::Client::builder()
+             .connect_timeout(Duration::from_secs(10))
++            .timeout(Duration::from_secs(6 * 60 * 60))
+             .tcp_nodelay(true)
+-            .pool_idle_timeout(Duration::from_secs(90))
++            .read_timeout(Duration::from_secs(120))
++            .tcp_keepalive(Duration::from_secs(30))
++            .pool_idle_timeout(Duration::from_secs(30))
+             .pool_max_idle_per_host(16)
+-            .timeout(Duration::from_secs(120))
+             .build()?,
+         config: config.clone(),
+         models_cache: Arc::new(tokio::sync::RwLock::new(None)),
+@@ -1256,271 +1258,4 @@ fn openapi_document(config: &AppConfig) -> Value {
+ }
+ 
+ #[cfg(test)]
+-mod tests {
+-    use super::{
+-        infer_provider, normalize_json_model, normalize_prefixed_model, openapi_document,
+-        tag_provider_models, AppConfig, ProviderConfig, ProviderName,
+-    };
+-    use serde_json::{json, Value};
+-
+-    fn test_config() -> AppConfig {
+-        let provider = || ProviderConfig::new("http://127.0.0.1:1", None);
+-        AppConfig {
+-            host: "127.0.0.1".to_owned(),
+-            port: 3100,
+-            api_key: None,
+-            deepseek: provider(),
+-            kimi: provider(),
+-            qwen: provider(),
+-            chatgpt: provider(),
+-            gemini: provider(),
+-            mistral: provider(),
+-            zai: provider(),
+-            meta: provider(),
+-        }
+-    }
+-
+-    #[test]
+-    fn openapi_advertises_provider_logs_route() {
+-        let document = openapi_document(&test_config());
+-        assert_eq!(
+-            document["paths"]["/providers/{provider}/logs"]["get"]["summary"],
+-            "Read recent provider bridge log entries"
+-        );
+-    }
+-
+-    #[test]
+-    fn routes_prefixed_mistral_models_to_mistral() {
+-        let routed = normalize_prefixed_model("mistral:mistral-large-latest");
+-        assert_eq!(routed.provider, ProviderName::Mistral);
+-        assert_eq!(routed.model, "mistral-large-latest");
+-    }
+-
+-    #[test]
+-    fn routes_prefixed_zai_models_to_zai() {
+-        let routed = normalize_prefixed_model("zai:glm-5.2");
+-        assert_eq!(routed.provider, ProviderName::Zai);
+-        assert_eq!(routed.model, "glm-5.2");
+-    }
+-
+-    #[test]
+-    fn routes_prefixed_meta_models_to_meta() {
+-        let routed = normalize_prefixed_model("meta:meta-ai-web-session");
+-        assert_eq!(routed.provider, ProviderName::Meta);
+-        assert_eq!(routed.model, "meta-ai-web-session");
+-    }
+-
+-    #[test]
+-    fn infers_mistral_family_models() {
+-        assert_eq!(infer_provider("mistral-medium"), ProviderName::Mistral);
+-        assert_eq!(infer_provider("magistral-medium"), ProviderName::Mistral);
+-        assert_eq!(infer_provider("codestral-latest"), ProviderName::Mistral);
+-    }
+-
+-    #[test]
+-    fn infers_glm_family_models_to_zai() {
+-        assert_eq!(infer_provider("glm-5.2"), ProviderName::Zai);
+-        assert_eq!(infer_provider("autoglm-agent"), ProviderName::Zai);
+-    }
+-
+-    #[test]
+-    fn infers_meta_family_models() {
+-        assert_eq!(infer_provider("meta-ai-web-session"), ProviderName::Meta);
+-        assert_eq!(infer_provider("llama-4"), ProviderName::Meta);
+-    }
+-
+-    #[test]
+-    fn infers_claude_family_models_to_browser_provider() {
+-        assert_eq!(infer_provider("claude-sonnet-4-5"), ProviderName::Chatgpt);
+-        assert_eq!(
+-            infer_provider("anthropic.claude-sonnet-4"),
+-            ProviderName::Chatgpt
+-        );
+-    }
+-
+-    #[test]
+-    fn normalizes_prefixed_json_model_payloads() {
+-        let routed = normalize_json_model(json!({
+-            "model": "mistral:mistral-large-latest",
+-            "input": "hello"
+-        }));
+-
+-        assert_eq!(routed.provider, ProviderName::Mistral);
+-        assert_eq!(
+-            routed.original_model.as_deref(),
+-            Some("mistral:mistral-large-latest")
+-        );
+-        assert_eq!(
+-            routed.payload.get("model").and_then(Value::as_str),
+-            Some("mistral-large-latest")
+-        );
+-    }
+-
+-    #[test]
+-    fn infers_kimi_k2_family_models() {
+-        assert_eq!(infer_provider("k2d6"), ProviderName::Kimi);
+-        assert_eq!(infer_provider("k2d6-thinking"), ProviderName::Kimi);
+-        assert_eq!(infer_provider("kimi-k2.6"), ProviderName::Kimi);
+-        assert_eq!(infer_provider("kimi-k2.6-thinking"), ProviderName::Kimi);
+-    }
+-
+-    #[test]
+-    fn infers_kimi_k3_family_models() {
+-        assert_eq!(infer_provider("k3"), ProviderName::Kimi);
+-        assert_eq!(infer_provider("kimi-k3"), ProviderName::Kimi);
+-        assert_eq!(infer_provider("kimi-k3-thinking"), ProviderName::Kimi);
+-        assert_eq!(infer_provider("kimi-latest"), ProviderName::Kimi);
+-    }
+-
+-    #[test]
+-    fn routes_prefixed_kimi_models() {
+-        let routed = normalize_prefixed_model("kimi:kimi-k3");
+-        assert_eq!(routed.provider, ProviderName::Kimi);
+-        assert_eq!(routed.model, "kimi-k3");
+-    }
+-
+-    #[test]
+-    fn chatgpt_codex_models_get_kilo_capability_metadata() {
+-        let tagged = tag_provider_models(
+-            vec![json!({ "id": "gpt-5.3-codex" })],
+-            ProviderName::Chatgpt,
+-        );
+-        let item = &tagged[0];
+-
+-        assert_eq!(
+-            item["description"],
+-            "Uses Codex OAuth Responses API; usage is billed/limited as Codex usage."
+-        );
+-        assert_eq!(item["api"], "codex_responses");
+-        assert_eq!(item["billing"], "Codex billing usage");
+-        assert_eq!(item["tool_call"], true);
+-        assert_eq!(item["supportsNativeTools"], true);
+-    }
+-
+-    #[test]
+-    fn chatgpt_web_models_get_completions_metadata() {
+-        let tagged = tag_provider_models(vec![json!({ "id": "gpt-5-3" })], ProviderName::Chatgpt);
+-        let item = &tagged[0];
+-
+-        assert_eq!(
+-            item["description"],
+-            "Uses Chat Completions API compatibility through the ChatGPT web session."
+-        );
+-        assert_eq!(item["api"], "chat_completions");
+-        assert_eq!(item["billing"], "ChatGPT subscription/web-session usage");
+-        assert_eq!(item["tool_call"], true);
+-        assert_eq!(item["supports_function_calling"], true);
+-    }
+-
+-    #[test]
+-    fn deepseek_reasoner_models_disable_native_tool_metadata() {
+-        let tagged =
+-            tag_provider_models(vec![json!({ "id": "deepseek-r1" })], ProviderName::Deepseek);
+-        let item = &tagged[0];
+-
+-        assert_eq!(item["tool_call"], false);
+-        assert_eq!(item["supportsNativeTools"], false);
+-        assert_eq!(item["supports_function_calling"], false);
+-    }
+-
+-    #[test]
+-    fn model_merge_tags_provider_and_skips_invalid_items() {
+-        let items = vec![
+-            json!({ "id": "mistral-web-session" }),
+-            Value::String("bad".to_owned()),
+-        ];
+-
+-        let tagged = tag_provider_models(items, ProviderName::Mistral);
+-
+-        assert_eq!(tagged.len(), 1);
+-        assert_eq!(
+-            tagged[0].get("provider").and_then(Value::as_str),
+-            Some("mistral")
+-        );
+-        assert_eq!(
+-            tagged[0].get("id").and_then(Value::as_str),
+-            Some("mistral-web-session")
+-        );
+-    }
+-
+-    #[test]
+-    fn infers_deepseek_family_models() {
+-        assert_eq!(infer_provider("deepseek-v4-flash"), ProviderName::Deepseek);
+-        assert_eq!(infer_provider("deepseek-v4-pro"), ProviderName::Deepseek);
+-        assert_eq!(
+-            infer_provider("deepseek-v4-flash-thinking"),
+-            ProviderName::Deepseek
+-        );
+-        assert_eq!(infer_provider("deepseek-instant"), ProviderName::Deepseek);
+-    }
+-
+-    #[test]
+-    fn infers_gemini_family_models() {
+-        assert_eq!(infer_provider("gemini-2.5-pro"), ProviderName::Gemini);
+-        assert_eq!(infer_provider("gemini-flash"), ProviderName::Gemini);
+-        assert_eq!(infer_provider("gemini-exp-1206"), ProviderName::Gemini);
+-    }
+-
+-    #[test]
+-    fn infers_chatgpt_gpt_series() {
+-        assert_eq!(infer_provider("gpt-4o"), ProviderName::Chatgpt);
+-        assert_eq!(infer_provider("gpt-4o-mini"), ProviderName::Chatgpt);
+-        assert_eq!(infer_provider("o3"), ProviderName::Chatgpt);
+-        assert_eq!(infer_provider("o4-mini"), ProviderName::Chatgpt);
+-        assert_eq!(infer_provider("o1-preview"), ProviderName::Chatgpt);
+-        assert_eq!(infer_provider("chatgpt-web-session"), ProviderName::Chatgpt);
+-    }
+-
+-    #[test]
+-    fn infers_qwen_as_default_fallback() {
+-        assert_eq!(infer_provider("qwen3-30b-a3b"), ProviderName::Qwen);
+-        assert_eq!(infer_provider("qwq-32b-preview"), ProviderName::Qwen);
+-        // Anything unrecognised lands on Qwen
+-        assert_eq!(
+-            infer_provider("unknown-future-model-xyz"),
+-            ProviderName::Qwen
+-        );
+-    }
+-
+-    #[test]
+-    fn routes_prefixed_deepseek_model() {
+-        let routed = normalize_prefixed_model("deepseek:deepseek-v4-flash");
+-        assert_eq!(routed.provider, ProviderName::Deepseek);
+-        assert_eq!(routed.model, "deepseek-v4-flash");
+-    }
+-
+-    #[test]
+-    fn routes_prefixed_gemini_model() {
+-        let routed = normalize_prefixed_model("gemini:gemini-2.5-pro");
+-        assert_eq!(routed.provider, ProviderName::Gemini);
+-        assert_eq!(routed.model, "gemini-2.5-pro");
+-    }
+-
+-    #[test]
+-    fn routes_prefixed_qwen_model() {
+-        let routed = normalize_prefixed_model("qwen:qwen3-30b-a3b");
+-        assert_eq!(routed.provider, ProviderName::Qwen);
+-        assert_eq!(routed.model, "qwen3-30b-a3b");
+-    }
+-
+-    #[test]
+-    fn model_without_prefix_infers_provider() {
+-        // bare model names route by infer_provider (no colon)
+-        let routed = normalize_prefixed_model("deepseek-v4-flash");
+-        assert_eq!(routed.provider, ProviderName::Deepseek);
+-        assert_eq!(routed.model, "deepseek-v4-flash");
+-    }
+-
+-    #[test]
+-    fn tag_provider_models_empty_input() {
+-        let tagged = tag_provider_models(vec![], ProviderName::Kimi);
+-        assert!(tagged.is_empty());
+-    }
+-
+-    #[test]
+-    fn tag_provider_models_all_invalid() {
+-        let items = vec![Value::Bool(true), json!(null)];
+-        let tagged = tag_provider_models(items, ProviderName::Kimi);
+-        assert!(tagged.is_empty());
+-    }
+-}
++mod tests;
+diff --git i/src-tauri/src/runtime/providers/deepseek/mod.rs w/src-tauri/src/runtime/providers/deepseek/mod.rs
+index f56a038..bc66746 100644
+--- i/src-tauri/src/runtime/providers/deepseek/mod.rs
++++ w/src-tauri/src/runtime/providers/deepseek/mod.rs
+@@ -315,10 +315,12 @@ async fn run_server(bridge: Arc<PlaywrightBridge>, config: AppConfig) -> Result<
+         bridge,
+         client: reqwest::Client::builder()
+             .connect_timeout(Duration::from_secs(10))
++            .timeout(Duration::from_secs(6 * 60 * 60))
+             .tcp_nodelay(true)
+-            .pool_idle_timeout(Duration::from_secs(90))
++            .read_timeout(Duration::from_secs(120))
++            .tcp_keepalive(Duration::from_secs(30))
++            .pool_idle_timeout(Duration::from_secs(30))
+             .pool_max_idle_per_host(16)
+-            .timeout(Duration::from_secs(120))
+             .build()?,
+         config: config.clone(),
+         session_parents: SessionStore::open(config.runtime_dir.join("provider-sessions.db"))?,
+@@ -847,7 +849,14 @@ fn deepen_tool_prompt(base_prompt: String, body: &OpenAIRequest) -> String {
+         "DEEPSEEK TOOL MODE\n\
+ These tools are real and executable in this session.\n\
+ If user asks to test tools, inspect workspace/files, read code, write code, grep, glob, run commands, or understand repository state, do not answer in prose.\n\
+-You must respond with one or more <tool_call>...</tool_call> blocks only.\n\
++You must respond with one or more DSML tool-call blocks only.\n\
++Use this exact format:\n\
++<｜DSML｜tool_calls>\n\
++<｜DSML｜invoke name=\"tool_name\">\n\
++<｜DSML｜parameter name=\"param\" string=\"true\">value</｜DSML｜parameter>\n\
++</｜DSML｜invoke>\n\
++</｜DSML｜tool_calls>\n\
++Use string=\"true\" for string arguments and string=\"false\" for JSON numbers, booleans, arrays, or objects.\n\
+ Never say tools are unavailable, pasted text, unsupported, or not accessible from this session.\n",
+     );
+ 
+@@ -1079,242 +1088,4 @@ where
+ }
+ 
+ #[cfg(test)]
+-mod tests {
+-    use super::{
+-        collect_fragment_events, deepseek_mode_flags, DeepSeekParseState, DeepseekPayload,
+-        ParsedEvent,
+-    };
+-    use crate::ids::{ParentMessageId, SessionId};
+-    use crate::proxy_core::StreamingToolParser;
+-    use serde_json::json;
+-
+-    #[test]
+-    fn fragment_arrays_keep_reasoning_and_visible_text_separate() {
+-        let mut state = DeepSeekParseState::default();
+-        let mut parser = None::<StreamingToolParser>;
+-        let events = collect_fragment_events(
+-            &[
+-                json!({ "type": "THINK", "content": "internal" }),
+-                json!({ "type": "TEXT", "content": "visible" }),
+-            ],
+-            &mut state,
+-            &mut parser,
+-        );
+-
+-        assert_eq!(state.reasoning, "internal");
+-        assert_eq!(
+-            events
+-                .into_iter()
+-                .filter_map(|event| match event {
+-                    ParsedEvent::Text(text) => Some(text),
+-                    _ => None,
+-                })
+-                .collect::<String>(),
+-            "visible"
+-        );
+-    }
+-
+-    #[test]
+-    fn deepseek_payload_reuses_template_and_syncs_direct_events() {
+-        let payload = DeepseekPayload::new("READY", &SessionId::new("session-1"))
+-            .template(Some(json!({
+-                "events": [
+-                    { "event": "switchModelType", "params": "default" },
+-                    { "event": "thinkingSwitchToggled", "params": false }
+-                ],
+-                "unused": true
+-            })))
+-            .parent(Some(ParentMessageId::from(42)))
+-            .pro(true)
+-            .thinking(true)
+-            .build();
+-
+-        assert_eq!(payload["chat_session_id"], "session-1");
+-        assert_eq!(payload["parent_message_id"], 42);
+-        assert_eq!(payload["model_type"], "expert");
+-        assert_eq!(payload["prompt"], "READY");
+-        assert_eq!(payload["thinking_enabled"], true);
+-        assert_eq!(payload["search_enabled"], false);
+-        assert_eq!(payload["unused"], true);
+-        assert_eq!(payload["events"][0]["params"], "expert");
+-        assert_eq!(payload["events"][1]["params"], true);
+-    }
+-
+-    #[test]
+-    fn deepseek_payload_syncs_nested_event_groups() {
+-        let payload = DeepseekPayload::new("READY", &SessionId::new("session-2"))
+-            .template(Some(json!({
+-                "events": [
+-                    {
+-                        "events": [
+-                            { "event": "switchModelType", "params": "expert" }
+-                        ]
+-                    }
+-                ]
+-            })))
+-            .search(true)
+-            .build();
+-
+-        assert_eq!(payload["model_type"], "default");
+-        assert_eq!(payload["events"][0]["events"][0]["params"], "default");
+-        assert_eq!(
+-            payload["events"][0]["events"][1]["event"],
+-            "thinkingSwitchToggled"
+-        );
+-        assert_eq!(payload["events"][0]["events"][1]["params"], false);
+-    }
+-
+-    #[test]
+-    fn deepseek_mode_flags_support_instant_expert_and_deepthink_aliases() {
+-        assert_eq!(
+-            deepseek_mode_flags("deepseek-v4-flash"),
+-            (false, false, false)
+-        );
+-        assert_eq!(deepseek_mode_flags("deepseek-v4-pro"), (true, false, false));
+-        assert_eq!(
+-            deepseek_mode_flags("deepseek-v4-flash-thinking"),
+-            (false, true, false)
+-        );
+-        assert_eq!(
+-            deepseek_mode_flags("deepseek-v4-pro-thinking"),
+-            (true, true, false)
+-        );
+-        assert_eq!(
+-            deepseek_mode_flags("deepseek-instant"),
+-            (false, false, false)
+-        );
+-        assert_eq!(deepseek_mode_flags("deepseek-expert"), (true, false, false));
+-        assert_eq!(
+-            deepseek_mode_flags("deepseek-instant-deepthink"),
+-            (false, true, false)
+-        );
+-        assert_eq!(
+-            deepseek_mode_flags("deepseek-expert-deepthink"),
+-            (true, true, false)
+-        );
+-    }
+-
+-    #[test]
+-    fn deepseek_v4_pro_payload_uses_expert_model_type() {
+-        let (is_pro, is_thinking, is_vision) = deepseek_mode_flags("deepseek-v4-pro");
+-        let payload = DeepseekPayload::new("READY", &SessionId::new("session-v4-pro"))
+-            .pro(is_pro)
+-            .thinking(is_thinking)
+-            .vision(is_vision)
+-            .build();
+-
+-        assert_eq!(payload["model_type"], "expert");
+-        assert_eq!(payload["thinking_enabled"], false);
+-    }
+-
+-    #[test]
+-    fn deepseek_v4_vision_payload_uses_vision_model_type() {
+-        let (is_pro, is_thinking, is_vision) = deepseek_mode_flags("deepseek-v4-vision");
+-        assert_eq!((is_pro, is_thinking, is_vision), (false, false, true));
+-        let payload =
+-            DeepseekPayload::new("describe this image", &SessionId::new("session-v4-vision"))
+-                .pro(is_pro)
+-                .thinking(is_thinking)
+-                .vision(is_vision)
+-                .build();
+-
+-        assert_eq!(payload["model_type"], "vision");
+-        assert_eq!(payload["thinking_enabled"], false);
+-        assert_eq!(payload["events"][0]["params"], "vision");
+-    }
+-
+-    #[test]
+-    fn deepseek_vision_wins_over_pro_and_thinking_aliases() {
+-        // A greedy id should still land in vision, never expert/thinking.
+-        assert_eq!(
+-            deepseek_mode_flags("deepseek-v4-pro-vision-thinking"),
+-            (false, false, true)
+-        );
+-    }
+-
+-    #[test]
+-    fn deepseek_mode_flags_plain_model_is_not_pro_not_thinking() {
+-        assert_eq!(deepseek_mode_flags("deepseek-chat"), (false, false, false));
+-        assert_eq!(deepseek_mode_flags("deepseek-v3"), (false, false, false));
+-    }
+-
+-    #[test]
+-    fn deepseek_mode_flags_case_insensitive() {
+-        assert_eq!(deepseek_mode_flags("DeepSeek-Expert"), (true, false, false));
+-        assert_eq!(
+-            deepseek_mode_flags("DEEPSEEK-DEEPTHINK"),
+-            (false, true, false)
+-        );
+-        assert_eq!(
+-            deepseek_mode_flags("DeepSeek-V4-VISION"),
+-            (false, false, true)
+-        );
+-    }
+-
+-    #[test]
+-    fn deepseek_mode_flags_whitespace_trimmed() {
+-        assert_eq!(
+-            deepseek_mode_flags("  deepseek-expert  "),
+-            (true, false, false)
+-        );
+-    }
+-
+-    #[test]
+-    fn fragment_events_with_only_think_blocks_produce_no_text() {
+-        let mut state = DeepSeekParseState::default();
+-        let mut parser = None::<StreamingToolParser>;
+-        let events = collect_fragment_events(
+-            &[
+-                json!({ "type": "THINK", "content": "internal A" }),
+-                json!({ "type": "THINK", "content": " internal B" }),
+-            ],
+-            &mut state,
+-            &mut parser,
+-        );
+-
+-        assert_eq!(state.reasoning, "internal A internal B");
+-        // No TEXT events → no visible text output
+-        let visible: String = events
+-            .into_iter()
+-            .filter_map(|e| match e {
+-                ParsedEvent::Text(t) => Some(t),
+-                _ => None,
+-            })
+-            .collect();
+-        assert!(visible.is_empty());
+-    }
+-
+-    #[test]
+-    fn fragment_events_empty_array_produces_no_events() {
+-        let mut state = DeepSeekParseState::default();
+-        let mut parser = None::<StreamingToolParser>;
+-        let events = collect_fragment_events(&[], &mut state, &mut parser);
+-        assert!(events.is_empty());
+-    }
+-
+-    #[test]
+-    fn deepseek_payload_without_template_creates_events_array() {
+-        let payload = DeepseekPayload::new("hello", &SessionId::new("sess")).build();
+-        assert!(payload.get("events").is_some());
+-        assert_eq!(payload["prompt"], "hello");
+-        assert_eq!(payload["model_type"], "default");
+-        assert_eq!(payload["thinking_enabled"], false);
+-        assert_eq!(payload["search_enabled"], false);
+-    }
+-
+-    #[test]
+-    fn deepseek_payload_parent_message_id_included_when_some() {
+-        let payload = DeepseekPayload::new("p", &SessionId::new("s"))
+-            .parent(Some(ParentMessageId::from(99)))
+-            .build();
+-        assert_eq!(payload["parent_message_id"], 99);
+-    }
+-
+-    #[test]
+-    fn deepseek_payload_web_search_flag_set() {
+-        let payload = DeepseekPayload::new("q", &SessionId::new("s"))
+-            .search(true)
+-            .build();
+-        assert_eq!(payload["search_enabled"], true);
+-    }
+-}
++mod tests;
+diff --git i/src-tauri/src/runtime/providers/qwen/mod.rs w/src-tauri/src/runtime/providers/qwen/mod.rs
+index 8f9a311..73b9a89 100644
+--- i/src-tauri/src/runtime/providers/qwen/mod.rs
++++ w/src-tauri/src/runtime/providers/qwen/mod.rs
+@@ -124,6 +124,7 @@ struct QwenRequestError {
+     upstream_code: Option<String>,
+     upstream_status: Option<u16>,
+     retry_after_ms: Option<u64>,
++    retryable: bool,
+ }
+ 
+ impl std::fmt::Display for QwenRequestError {
+@@ -134,6 +135,20 @@ impl std::fmt::Display for QwenRequestError {
+ 
+ impl std::error::Error for QwenRequestError {}
+ 
++fn is_retryable_transport_message(message: &str) -> bool {
++    let lower = message.to_ascii_lowercase();
++    [
++        "connection reset",
++        "connection closed",
++        "broken pipe",
++        "connection aborted",
++        "econnreset",
++        "eof",
++    ]
++    .iter()
++    .any(|needle| lower.contains(needle))
++}
++
+ #[derive(Deserialize)]
+ struct StopRequest {
+     #[serde(default)]
+@@ -177,10 +192,11 @@ async fn run_server(
+         bridge,
+         client: reqwest::Client::builder()
+             .connect_timeout(Duration::from_secs(10))
+-            .timeout(config.chat_timeout)
++            .read_timeout(config.chat_timeout)
+             .redirect(reqwest::redirect::Policy::none())
+             .tcp_nodelay(true)
+-            .pool_idle_timeout(Duration::from_secs(90))
++            .tcp_keepalive(Duration::from_secs(30))
++            .pool_idle_timeout(Duration::from_secs(30))
+             .pool_max_idle_per_host(16)
+             .build()?,
+         config: config.clone(),
+@@ -939,7 +955,8 @@ async fn handle_chat(state: AppState, body: OpenAIRequest) -> Result<Response> {
+                         break;
+                     }
+ 
+-                    let retryable = err.retry_after_ms.is_some()
++                    let retryable = err.retryable
++                        || err.retry_after_ms.is_some()
+                         || err.message.contains("chat is in progress")
+                         || err.message.contains("Bad_Request");
+                     if retryable && retries > 0 {
+@@ -1461,6 +1478,7 @@ async fn request_qwen_chat(
+             upstream_code: None,
+             upstream_status: Some(413),
+             retry_after_ms: None,
++            retryable: false,
+         });
+     }
+ 
+@@ -1505,11 +1523,17 @@ async fn request_qwen_chat(
+         .body(payload_json)
+         .send()
+         .await
+-        .map_err(|err| QwenRequestError {
+-            message: err.to_string(),
+-            upstream_code: None,
+-            upstream_status: Some(502),
+-            retry_after_ms: None,
++        .map_err(|err| {
++            let message = err.to_string();
++            QwenRequestError {
++                retryable: err.is_connect()
++                    || err.is_timeout()
++                    || is_retryable_transport_message(&message),
++                message,
++                upstream_code: None,
++                upstream_status: Some(502),
++                retry_after_ms: None,
++            }
+         })?;
+ 
+     let content_type = response
+@@ -1558,6 +1582,7 @@ async fn request_qwen_chat(
+                     upstream_code: code,
+                     upstream_status: Some(if status == 0 { 502 } else { status }),
+                     retry_after_ms,
++                    retryable: false,
+                 });
+             }
+         }
+@@ -1567,6 +1592,7 @@ async fn request_qwen_chat(
+             upstream_code: None,
+             upstream_status: Some(status.max(502)),
+             retry_after_ms: None,
++            retryable: false,
+         });
+     }
+ 
+@@ -2056,229 +2082,4 @@ pub async fn serve_embedded(
+ }
+ 
+ #[cfg(test)]
+-mod tests {
+-    use super::{
+-        collect_qwen_events, extract_qwen_api_error, extract_qwen_chat_id, live_qwen_model_data,
+-        qwen_session_key, qwen_sse_data, QwenEvent, QwenParseState, StreamRegistry,
+-    };
+-    use serde_json::json;
+-
+-    #[test]
+-    fn session_key_defaults_and_trims_client_identity() {
+-        assert_eq!(qwen_session_key(None), "default");
+-        assert_eq!(qwen_session_key(Some("  ")), "default");
+-        assert_eq!(qwen_session_key(Some("  client-1 ")), "client-1");
+-    }
+-
+-    #[test]
+-    fn accepts_qwen_sse_data_with_or_without_a_space() {
+-        assert_eq!(
+-            qwen_sse_data("data:{\"answer\":\"ok\"}"),
+-            Some("{\"answer\":\"ok\"}")
+-        );
+-        assert_eq!(
+-            qwen_sse_data("data: {\"answer\":\"ok\"}"),
+-            Some("{\"answer\":\"ok\"}")
+-        );
+-        assert_eq!(qwen_sse_data("event: message"), None);
+-    }
+-
+-    #[test]
+-    fn extracts_nested_chat_id_variants() {
+-        assert_eq!(
+-            extract_qwen_chat_id(&json!({ "data": { "id": "chat-123" } })),
+-            Some("chat-123")
+-        );
+-        assert_eq!(
+-            extract_qwen_chat_id(&json!({ "data": { "chat_id": "chat-456" } })),
+-            Some("chat-456")
+-        );
+-        assert_eq!(
+-            extract_qwen_chat_id(&json!({ "id": "chat-789" })),
+-            Some("chat-789")
+-        );
+-        assert_eq!(
+-            extract_qwen_chat_id(&json!({ "data": { "chat": { "id": "chat-987" } } })),
+-            Some("chat-987")
+-        );
+-    }
+-
+-    #[test]
+-    fn extracts_qwen_api_error_message() {
+-        assert_eq!(
+-            extract_qwen_api_error(&json!({
+-                "success": false,
+-                "data": {
+-                    "code": "Unauthorized",
+-                    "details": "login required"
+-                }
+-            })),
+-            Some("Unauthorized: login required".to_owned())
+-        );
+-    }
+-
+-    #[test]
+-    fn expands_live_qwen_catalog_with_thinking_variants() {
+-        let payload = live_qwen_model_data(&json!({
+-            "data": [{ "id": "qwen-live", "info": { "created_at": 1 } }]
+-        }))
+-        .unwrap();
+-        let ids = payload["data"]
+-            .as_array()
+-            .unwrap()
+-            .iter()
+-            .filter_map(|model| model["id"].as_str())
+-            .collect::<Vec<_>>();
+-        assert_eq!(
+-            ids,
+-            ["qwen-live", "qwen-live-thinking", "qwen-live-no-thinking"]
+-        );
+-        assert_eq!(payload["discovery"]["live"], true);
+-    }
+-
+-    #[tokio::test]
+-    async fn surfaces_qwen_stream_error_payloads() {
+-        let registry = StreamRegistry::new();
+-        let mut state = QwenParseState::default();
+-        let mut parser = None;
+-        let result = collect_qwen_events(
+-            &json!({
+-                "success": false,
+-                "data": { "code": "Bad_Request", "details": "model unavailable" }
+-            })
+-            .to_string(),
+-            "chatcmpl-test",
+-            &registry,
+-            &mut state,
+-            &mut parser,
+-        )
+-        .await;
+-        assert!(result.is_err());
+-        let error = result.err().unwrap();
+-        assert!(error.to_string().contains("Bad_Request: model unavailable"));
+-    }
+-
+-    #[tokio::test]
+-    async fn parses_answer_content_without_phase() {
+-        let registry = StreamRegistry::new();
+-        let mut state = QwenParseState::default();
+-        let mut parser = None;
+-        let data = json!({
+-            "response_id": "resp-1",
+-            "choices": [{
+-                "delta": {
+-                    "content": "visible answer"
+-                }
+-            }]
+-        })
+-        .to_string();
+-
+-        let events =
+-            collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+-                .await
+-                .unwrap();
+-
+-        assert!(matches!(
+-            events.as_slice(),
+-            [QwenEvent::Text(text)] if text == "visible answer"
+-        ));
+-        assert_eq!(state.last_full_content, "visible answer");
+-    }
+-
+-    #[tokio::test]
+-    async fn maps_thinking_summary_to_reasoning() {
+-        let registry = StreamRegistry::new();
+-        let mut state = QwenParseState::default();
+-        let mut parser = None;
+-        let data = json!({
+-            "response_id": "resp-1",
+-            "choices": [{
+-                "delta": {
+-                    "phase": "thinking_summary",
+-                    "extra": {
+-                        "summary_thought": {
+-                            "content": ["first thought"]
+-                        }
+-                    }
+-                }
+-            }]
+-        })
+-        .to_string();
+-
+-        let events =
+-            collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+-                .await
+-                .unwrap();
+-
+-        assert!(matches!(
+-            events.as_slice(),
+-            [QwenEvent::Reasoning(text)] if text == "first thought"
+-        ));
+-        assert_eq!(state.reasoning, "first thought");
+-        assert!(state.last_full_content.is_empty());
+-    }
+-
+-    #[tokio::test]
+-    async fn parses_answer_content_array_shape() {
+-        let registry = StreamRegistry::new();
+-        let mut state = QwenParseState::default();
+-        let mut parser = None;
+-        let data = json!({
+-            "response_id": "resp-1",
+-            "choices": [{
+-                "delta": {
+-                    "content": [
+-                        { "type": "text", "text": "visible " },
+-                        { "type": "text", "content": "answer" }
+-                    ]
+-                }
+-            }]
+-        })
+-        .to_string();
+-
+-        let events =
+-            collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+-                .await
+-                .unwrap();
+-
+-        assert!(matches!(
+-            events.as_slice(),
+-            [QwenEvent::Text(text)] if text == "visible answer"
+-        ));
+-        assert_eq!(state.last_full_content, "visible answer");
+-    }
+-
+-    #[tokio::test]
+-    async fn parses_nested_answer_content_object() {
+-        let registry = StreamRegistry::new();
+-        let mut state = QwenParseState::default();
+-        let mut parser = None;
+-        let data = json!({
+-            "response_id": "resp-1",
+-            "choices": [{
+-                "delta": {
+-                    "content": {
+-                        "answer": {
+-                            "parts": [
+-                                { "text": "nested " },
+-                                { "value": "answer" }
+-                            ]
+-                        }
+-                    }
+-                }
+-            }]
+-        })
+-        .to_string();
+-
+-        let events =
+-            collect_qwen_events(&data, "chatcmpl-test", &registry, &mut state, &mut parser)
+-                .await
+-                .unwrap();
+-
+-        assert!(matches!(
+-            events.as_slice(),
+-            [QwenEvent::Text(text)] if text == "nested answer"
+-        ));
+-        assert_eq!(state.last_full_content, "nested answer");
+-    }
+-}
++mod tests;
+diff --git i/tests/node/chatgpt-oauth.test.mjs w/tests/node/chatgpt-oauth.test.mjs
+index 63cf1e8..e4c9544 100644
+--- i/tests/node/chatgpt-oauth.test.mjs
++++ w/tests/node/chatgpt-oauth.test.mjs
+@@ -185,6 +185,26 @@ test('loads local credentials and applies Codex auth headers', async t => {
+   assert.equal(captured.headers.get('chatgpt-account-id'), 'acct_local')
+ })
+ 
++test('retries transient Codex socket resets before surfacing failure', async t => {
++  const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rustproxyhub-oauth-reset-'))
++  t.after(() => fs.rm(runtimeDir, { recursive: true, force: true }))
++  const accessToken = jwt({ exp: Math.floor(Date.now() / 1000) + 3600 })
++  await fs.writeFile(
++    path.join(runtimeDir, 'chatgpt_oauth.json'),
++    JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: accessToken, account_id: 'acct_reset' } })
++  )
++  let attempts = 0
++  const client = new ChatGptOAuthClient(runtimeDir, async () => {
++    attempts += 1
++    if (attempts < 3) throw new Error('Connection reset by server')
++    return Response.json({ ok: true })
++  })
++
++  const response = await client.authenticatedFetch('/probe')
++  assert.equal(response.status, 200)
++  assert.equal(attempts, 3)
++})
++
+ test('refreshes OAuth session after a Codex 401 before retrying', async t => {
+   const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rustproxyhub-oauth-retry-'))
+   t.after(() => fs.rm(runtimeDir, { recursive: true, force: true }))

@@ -1044,7 +1044,7 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
     )
     const requestResult = await page.evaluate(async ({ headers, payload, submittedPrompt, stream }) => {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 75000)
+      const timer = setTimeout(() => controller.abort(), 240000)
       const response = await fetch('https://chatgpt.com/backend-api/f/conversation', {
         method: 'POST',
         credentials: 'include',
@@ -1158,42 +1158,42 @@ async function chatChatGPTWeb({ model, prompt, system_prompt, web_search = false
       }
 
       if (reader) {
-        const deadline = Date.now() + 70000
-        while (Date.now() < deadline) {
-          let chunk
-          try {
-            chunk = await Promise.race([
-              reader.read(),
-              new Promise(resolve => setTimeout(() => resolve({ done: true, value: null, timedOut: true }), 8000)),
-            ])
-          } catch (error) {
-            if (conversationId) break
-            throw error
-          }
-          const { done, value, timedOut } = chunk
-          if (done || timedOut) break
-          const decoded = decoder.decode(value, { stream: true })
-          raw = `${raw}${decoded}`.slice(-16_384)
-          lineBuffer += decoded
-          const lines = lineBuffer.split('\n')
-          lineBuffer = lines.pop() || ''
-          for (const line of lines) {
-            const trimmed = line.trim()
-            if (!trimmed.startsWith('data:')) continue
-            const chunk = trimmed.slice(5).trim()
-            if (!chunk || chunk === '[DONE]') continue
+        try {
+          while (true) {
+            let chunk
             try {
-              const parsed = JSON.parse(chunk)
-              conversationId =
-                parsed.conversation_id ||
-                parsed.token?.conversation_id ||
-                parsed.options?.[0]?.conversation_id ||
-                conversationId
-              streamedModel = assistantModel(parsed) || streamedModel
-              await emitReasoning(parsed)
-              await emitDelta(parsed)
-            } catch {}
+              chunk = await reader.read()
+            } catch (error) {
+              if (conversationId) break
+              throw error
+            }
+            const { done, value } = chunk
+            if (done) break
+            const decoded = decoder.decode(value, { stream: true })
+            raw = `${raw}${decoded}`.slice(-16_384)
+            lineBuffer += decoded
+            const lines = lineBuffer.split('\n')
+            lineBuffer = lines.pop() || ''
+            for (const line of lines) {
+              const trimmed = line.trim()
+              if (!trimmed.startsWith('data:')) continue
+              const chunk = trimmed.slice(5).trim()
+              if (!chunk || chunk === '[DONE]') continue
+              try {
+                const parsed = JSON.parse(chunk)
+                conversationId =
+                  parsed.conversation_id ||
+                  parsed.token?.conversation_id ||
+                  parsed.options?.[0]?.conversation_id ||
+                  conversationId
+                streamedModel = assistantModel(parsed) || streamedModel
+                await emitReasoning(parsed)
+                await emitDelta(parsed)
+              } catch {}
+            }
           }
+        } finally {
+          await reader.cancel().catch(() => {})
         }
       }
 
