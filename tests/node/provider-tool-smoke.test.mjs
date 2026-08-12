@@ -173,11 +173,7 @@ function runSmokeCli(env) {
 test('sorts tagged provider models and prefixes hub routing ids', () => {
   assert.deepEqual(
     selectProviderModels({
-      data: [
-        { id: 'gpt-test', provider: 'chatgpt' },
-        { id: 'deepseek-chat', provider: 'deepseek' },
-        { id: 'ignored' },
-      ],
+      data: [{ id: 'gpt-test', provider: 'chatgpt' }, { id: 'deepseek-chat', provider: 'deepseek' }, { id: 'ignored' }],
     }),
     [
       { id: 'gpt-test', provider: 'chatgpt' },
@@ -307,14 +303,11 @@ test('runs every discovered model and includes advertised provider logs', async 
         ],
       })
 
-      return new Response(
-        [`data: ${toolCallResponse}`, '', 'data: [DONE]', ''].join('\n'),
-        {
-          headers: {
-            'content-type': 'text/event-stream',
-          },
-        }
-      )
+      return new Response([`data: ${toolCallResponse}`, '', 'data: [DONE]', ''].join('\n'), {
+        headers: {
+          'content-type': 'text/event-stream',
+        },
+      })
     }
 
     if (requestUrl.pathname.endsWith('/logs')) {
@@ -351,14 +344,8 @@ test('runs every discovered model and includes advertised provider logs', async 
   assert.equal(report.results[1].request.headers.authorization, '[redacted]')
   assert.equal(JSON.parse(report.results[1].request.body).model, 'qwen:qwen3')
   assert.match(report.results[1].response.body, /call_qwen/)
-  assert.equal(
-    requests.find(request => request.path === '/v1/models').headers.get('authorization'),
-    'Bearer test-key'
-  )
-  assert.equal(
-    requests.filter(request => request.path === '/v1/chat/completions').length,
-    2
-  )
+  assert.equal(requests.find(request => request.path === '/v1/models').headers.get('authorization'), 'Bearer test-key')
+  assert.equal(requests.filter(request => request.path === '/v1/chat/completions').length, 2)
 })
 
 test('uses an OpenAPI provider-log endpoint and validates CLI values', () => {
@@ -377,30 +364,16 @@ test('uses an OpenAPI provider-log endpoint and validates CLI values', () => {
     }
   )
 
-  assert.deepEqual(
-    parseCliArgs(
-      [
-        '--hub',
-        'http://localhost:3100/',
-        '--api-key',
-        'key',
-      ],
-      {}
-    ),
-    {
-      apiKey: 'key',
-      hubUrl: 'http://localhost:3100',
-    }
-  )
+  assert.deepEqual(parseCliArgs(['--hub', 'http://localhost:3100/', '--api-key', 'key'], {}), {
+    apiKey: 'key',
+    hubUrl: 'http://localhost:3100',
+  })
 
   assert.deepEqual(parseCliArgs(['--', '--help'], {}), {
     help: true,
   })
 
-  assert.throws(
-    () => parseCliArgs(['--hub', 'file:///tmp/hub'], {}),
-    /http or https/
-  )
+  assert.throws(() => parseCliArgs(['--hub', 'file:///tmp/hub'], {}), /http or https/)
 })
 
 test('CLI creates an isolated provider test environment and verifies every provider response and log', async () => {
@@ -429,41 +402,24 @@ test('CLI creates an isolated provider test environment and verifies every provi
       worked_providers: 8,
     })
 
-    assert.deepEqual(
-      Object.keys(report.provider_logs).sort(),
-      ALL_PROVIDERS.map(([provider]) => provider).sort()
-    )
+    assert.deepEqual(Object.keys(report.provider_logs).sort(), ALL_PROVIDERS.map(([provider]) => provider).sort())
 
     for (const [provider] of ALL_PROVIDERS) {
-      assert.deepEqual(
-        report.provider_logs[provider].entries,
-        [`${provider} tool-call recorded`]
-      )
+      assert.deepEqual(report.provider_logs[provider].entries, [`${provider} tool-call recorded`])
     }
 
-    const chats = hub.requests.filter(
-      request => request.path === '/v1/chat/completions'
-    )
+    const chats = hub.requests.filter(request => request.path === '/v1/chat/completions')
 
     assert.equal(chats.length, ALL_PROVIDERS.length)
 
     for (const request of chats) {
       const payload = JSON.parse(request.body)
 
-      assert.equal(
-        request.headers.authorization,
-        'Bearer temporary-test-key'
-      )
+      assert.equal(request.headers.authorization, 'Bearer temporary-test-key')
 
       assert.equal(payload.stream, true)
-      assert.equal(
-        payload.tools[0].function.name,
-        'report_smoke_target'
-      )
-      assert.equal(
-        payload.tool_choice.function.name,
-        'report_smoke_target'
-      )
+      assert.equal(payload.tools[0].function.name, 'report_smoke_target')
+      assert.equal(payload.tool_choice.function.name, 'report_smoke_target')
     }
   } finally {
     await hub.close()
@@ -474,13 +430,10 @@ test('CLI checks prompt and tool-result interactions for Kilo, Claude, Pi, and O
   const hub = await startTemporaryHub()
 
   try {
-    const result = await runCli(
-      'client-interaction-smoke.mjs',
-      {
-        RUST_PROXY_HUB_API_KEY: 'temporary-test-key',
-        RUST_PROXY_HUB_URL: hub.url,
-      }
-    )
+    const result = await runCli('client-interaction-smoke.mjs', {
+      RUST_PROXY_HUB_API_KEY: 'temporary-test-key',
+      RUST_PROXY_HUB_URL: hub.url,
+    })
 
     assert.equal(result.code, 0, result.stderr)
 
@@ -495,59 +448,33 @@ test('CLI checks prompt and tool-result interactions for Kilo, Claude, Pi, and O
       scheduled_models: 8,
     })
 
-    assert.deepEqual(
-      Object.keys(report.clients).sort(),
-      ['claude', 'kilo', 'opencode', 'pi']
-    )
+    assert.deepEqual(Object.keys(report.clients).sort(), ['claude', 'kilo', 'opencode', 'pi'])
 
-    assert.equal(
-      report.clients.kilo.configuration.provider_api,
-      'OpenAI Compatible'
-    )
+    assert.equal(report.clients.kilo.configuration.provider_api, 'OpenAI Compatible')
 
-    assert.equal(
-      report.clients.pi.configuration.models_json.providers.rust_proxy_hub.api,
-      'openai-completions'
-    )
+    assert.equal(report.clients.pi.configuration.models_json.providers.rust_proxy_hub.api, 'openai-completions')
 
     assert.equal(
       report.clients.opencode.configuration.opencode_json.provider.rust_proxy_hub.npm,
       '@ai-sdk/openai-compatible'
     )
 
-    assert.equal(
-      report.clients.claude.configuration.protocol,
-      'anthropic-messages'
-    )
+    assert.equal(report.clients.claude.configuration.protocol, 'anthropic-messages')
 
     const chatInteractions = hub.requests.filter(
       request =>
         request.path === '/v1/chat/completions' &&
-        JSON.parse(request.body).messages.some(
-          message => message.role === 'tool'
-        )
+        JSON.parse(request.body).messages.some(message => message.role === 'tool')
     )
 
-    const anthropicInteractions = hub.requests.filter(
-      request => request.path === '/v1/messages'
-    )
+    const anthropicInteractions = hub.requests.filter(request => request.path === '/v1/messages')
 
-    assert.equal(
-      chatInteractions.length,
-      ALL_PROVIDERS.length
-    )
+    assert.equal(chatInteractions.length, ALL_PROVIDERS.length)
 
-    assert.equal(
-      anthropicInteractions.length,
-      ALL_PROVIDERS.length
-    )
+    assert.equal(anthropicInteractions.length, ALL_PROVIDERS.length)
 
     assert.ok(
-      anthropicInteractions.every(
-        request =>
-          JSON.parse(request.body).messages.at(-1).content[0].type ===
-          'tool_result'
-      )
+      anthropicInteractions.every(request => JSON.parse(request.body).messages.at(-1).content[0].type === 'tool_result')
     )
   } finally {
     await hub.close()
@@ -557,12 +484,7 @@ test('CLI checks prompt and tool-result interactions for Kilo, Claude, Pi, and O
 test('benchmark records every provider/model conversation in append-only JSONL and Markdown history', async () => {
   const hub = await startTemporaryHub()
 
-  const historyDir = await mkdtemp(
-    join(
-      tmpdir(),
-      'rust-proxy-hub-benchmark-'
-    )
-  )
+  const historyDir = await mkdtemp(join(tmpdir(), 'rust-proxy-hub-benchmark-'))
 
   try {
     const result = await runCli(
@@ -571,10 +493,7 @@ test('benchmark records every provider/model conversation in append-only JSONL a
         RUST_PROXY_HUB_API_KEY: 'temporary-test-key',
         RUST_PROXY_HUB_URL: hub.url,
       },
-      [
-        '--history-dir',
-        historyDir,
-      ]
+      ['--history-dir', historyDir]
     )
 
     assert.equal(result.code, 0, result.stderr)
@@ -601,43 +520,19 @@ test('benchmark records every provider/model conversation in append-only JSONL a
         RUST_PROXY_HUB_API_KEY: 'temporary-test-key',
         RUST_PROXY_HUB_URL: hub.url,
       },
-      [
-        '--history-dir',
-        historyDir,
-      ]
+      ['--history-dir', historyDir]
     )
 
     assert.equal(repeat.code, 0, repeat.stderr)
-    assert.equal(
-      JSON.parse(repeat.stdout).history.runs,
-      2
-    )
+    assert.equal(JSON.parse(repeat.stdout).history.runs, 2)
 
-    const jsonl = await readFile(
-      join(
-        historyDir,
-        'provider-model-history.jsonl'
-      ),
-      'utf8'
-    )
+    const jsonl = await readFile(join(historyDir, 'provider-model-history.jsonl'), 'utf8')
 
-    const markdown = await readFile(
-      join(
-        historyDir,
-        'provider-model-history.md'
-      ),
-      'utf8'
-    )
+    const markdown = await readFile(join(historyDir, 'provider-model-history.md'), 'utf8')
 
-    assert.equal(
-      jsonl.trim().split('\n').length,
-      2
-    )
+    assert.equal(jsonl.trim().split('\n').length, 2)
 
-    assert.match(
-      jsonl,
-      /forced_tool_call \+ prompt_tool_result_interaction:v1/
-    )
+    assert.match(jsonl, /forced_tool_call \+ prompt_tool_result_interaction:v1/)
 
     assert.match(jsonl, /\"request\"/)
     assert.match(jsonl, /\"response\"/)
@@ -645,19 +540,13 @@ test('benchmark records every provider/model conversation in append-only JSONL a
     assert.match(markdown, /Latest conversation results/)
     assert.match(markdown, /qwen:qwen3/)
     assert.match(markdown, /anthropic-messages/)
-    assert.match(
-      markdown,
-      /RUST_PROXY_HUB_INTERACTION_CONFIRMED/
-    )
+    assert.match(markdown, /RUST_PROXY_HUB_INTERACTION_CONFIRMED/)
   } finally {
     await hub.close()
 
-    await rm(
-      historyDir,
-      {
-        force: true,
-        recursive: true,
-      }
-    )
+    await rm(historyDir, {
+      force: true,
+      recursive: true,
+    })
   }
 })
