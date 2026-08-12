@@ -1,663 +1,371 @@
-import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import http from 'node:http'
-import { once } from 'node:events'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+#!/usr/bin/env node
 import { fileURLToPath } from 'node:url'
-import test from 'node:test'
-import {
-  buildToolRequest,
-  discoverProviderLogsEndpoint,
-  limitModelsPerProvider,
-  parseCliArgs,
-  parseSse,
-  runProviderToolSmoke,
-  selectProviderModels,
-  summarizeSse,
-} from '../../scripts/provider-tool-smoke.mjs'
-import { INTERACTION_TEXT } from '../../scripts/client-interaction-smoke.mjs'
+import { performance } from 'node:perf_hooks'
 
-const ALL_PROVIDERS = [
-  ['chatgpt', 'gpt-test'],
-  ['deepseek', 'deepseek-chat'],
-  ['gemini', 'gemini-test'],
-  ['kimi', 'kimi-k2'],
-  ['meta', 'llama-test'],
-  ['mistral', 'mistral-test'],
-  ['qwen', 'qwen3'],
-  ['zai', 'glm-test'],
-]
+const TOOL_NAME = 'report_smoke_target'
+const DEFAULT_HUB_URL = 'http://127.0.0.1:3100'
 
-function startTemporaryHub() {
-  const requests = []
-  const server = http.createServer(async (request, response) => {
-    const url = new URL(request.url, 'http://hub.test')
-    const body = await new Promise((resolve, reject) => {
-      let text = ''
-      request.setEncoding('utf8')
-      request.on('data', chunk => {
-        text += chunk
-      })
-      request.on('end', () => resolve(text))
-      request.on('error', reject)
-    })
-    requests.push({ body, headers: request.headers, path: url.pathname })
-
-    if (url.pathname === '/') {
-      response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify({ routes: { provider_logs: '/providers/{provider}/logs' } }))
-      return
-    }
-    if (url.pathname === '/openapi.json') {
-      response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify({ paths: {} }))
-      return
-    }
-    if (url.pathname === '/v1/models') {
-      response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify({ data: ALL_PROVIDERS.map(([provider, id]) => ({ id, provider })) }))
-      return
-    }
-    if (url.pathname === '/v1/chat/completions') {
-      const payload = JSON.parse(body)
-      const [provider, model] = payload.model.split(':')
-      response.writeHead(200, { 'content-type': 'text/event-stream' })
-
-      if (payload.messages.some(message => message.role === 'tool')) {
-        response.end(
-          [
-            `data: ${JSON.stringify({ choices: [{ delta: { content: INTERACTION_TEXT } }] })}`,
-            '',
-            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}`,
-            '',
-            'data: [DONE]',
-            '',
-          ].join('\n')
-        )
-        return
-      }
-
-      const toolCallResponse = JSON.stringify({
-        choices: [
-          {
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: `call_${provider}`,
-                  type: 'function',
-                  function: {
-                    name: 'report_smoke_target',
-                    arguments: JSON.stringify({ provider, model }),
-                  },
-                },
-              ],
-            },
-            finish_reason: 'tool_calls',
-          },
-        ],
-      })
-
-      response.end([`data: ${toolCallResponse}`, '', 'data: [DONE]', ''].join('\n'))
-      return
-    }
-
-    if (url.pathname === '/v1/messages') {
-      response.writeHead(200, { 'content-type': 'text/event-stream' })
-      response.end(
-        [
-          'event: content_block_delta',
-          `data: ${JSON.stringify({ delta: { text: INTERACTION_TEXT } })}`,
-          '',
-          'event: message_stop',
-          'data: {}',
-          '',
-        ].join('\n')
-      )
-      return
-    }
-
-    if (/^\/providers\/[^/]+\/logs$/.test(url.pathname)) {
-      const provider = url.pathname.split('/')[2]
-      response.setHeader('content-type', 'application/json')
-      response.end(JSON.stringify({ entries: [`${provider} tool-call recorded`] }))
-      return
-    }
-
-    response.writeHead(404).end()
-  })
-
-  return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address()
-      resolve({
-        close: () => new Promise(closeResolve => server.close(closeResolve)),
-        requests,
-        url: `http://127.0.0.1:${address.port}`,
-      })
-    })
-  })
+function trimTrailingSlash(value) {
+  return String(value).replace(/\/+$/, '')
 }
 
-function runCli(scriptName, env, args = []) {
-  const script = fileURLToPath(new URL(`../../scripts/${scriptName}`, import.meta.url))
-  const child = spawn(process.execPath, [script, ...args], {
-    env: { ...process.env, ...env },
-  })
+export function parseCliArgs(argv, env = process.env) {
+  const options = {
+    apiKey: env.RUST_PROXY_HUB_API_KEY || '',
+    hubUrl: env.RUST_PROXY_HUB_URL || DEFAULT_HUB_URL,
+  }
 
-  let stdout = ''
-  let stderr = ''
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]
+    if (argument === '--' && index === 0) continue
+    if (argument === '--help' || argument === '-h') return { help: true }
+    if (argument === '--hub' || argument === '--api-key') {
+      const value = argv[index + 1]
+      if (!value) throw new Error(`${argument} requires a value`)
+      options[argument === '--hub' ? 'hubUrl' : 'apiKey'] = value
+      index += 1
+      continue
+    }
+    throw new Error(`Unknown argument: ${argument}`)
+  }
 
-  child.stdout.setEncoding('utf8').on('data', chunk => {
-    stdout += chunk
-  })
-
-  child.stderr.setEncoding('utf8').on('data', chunk => {
-    stderr += chunk
-  })
-
-  return once(child, 'close').then(([code]) => ({
-    code,
-    stderr,
-    stdout,
-  }))
+  const url = new URL(options.hubUrl)
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new Error('--hub must use http or https')
+  }
+  options.hubUrl = trimTrailingSlash(url.toString())
+  return options
 }
 
-function runSmokeCli(env) {
-  return runCli('provider-tool-smoke.mjs', env)
+export function buildAuthHeaders(apiKey, headers = {}) {
+  return {
+    accept: 'application/json, text/event-stream',
+    ...headers,
+    ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+  }
 }
 
-test('sorts tagged provider models and prefixes hub routing ids', () => {
-  assert.deepEqual(
-    selectProviderModels({
-      data: [
-        { id: 'gpt-test', provider: 'chatgpt' },
-        { id: 'deepseek-chat', provider: 'deepseek' },
-        { id: 'ignored' },
-      ],
-    }),
-    [
-      { id: 'gpt-test', provider: 'chatgpt' },
-      { id: 'deepseek-chat', provider: 'deepseek' },
-      { id: 'ignored', provider: 'unknown' },
-    ]
-  )
+function captureHeaders(headers) {
+  return Object.fromEntries(new Headers(headers).entries())
+}
 
-  assert.equal(buildToolRequest('deepseek', 'deepseek-chat').model, 'deepseek:deepseek-chat')
-})
+export function captureRequest(url, init = {}) {
+  const headers = captureHeaders(init.headers)
+  if (headers.authorization) headers.authorization = '[redacted]'
+  return {
+    body: typeof init.body === 'string' ? init.body : null,
+    headers,
+    method: init.method || 'GET',
+    url: String(url),
+  }
+}
 
-test('caps scheduled benchmark models per provider without changing discovery', () => {
-  const models = selectProviderModels({
-    data: [
-      { id: 'gpt-a', provider: 'chatgpt' },
-      { id: 'gpt-b', provider: 'chatgpt' },
-      { id: 'qwen-a', provider: 'qwen' },
-      { id: 'qwen-b', provider: 'qwen' },
+export function captureResponse(response, body) {
+  return {
+    body,
+    headers: captureHeaders(response.headers),
+    status: response.status,
+  }
+}
+
+export function selectProviderModels(payload) {
+  if (!Array.isArray(payload?.data)) throw new Error('GET /v1/models returned no data array')
+
+  return payload.data
+    .filter(item => typeof item?.id === 'string' && item.id.trim())
+    .map(item => ({
+      id: item.id.trim(),
+      provider: typeof item.provider === 'string' && item.provider.trim() ? item.provider.trim() : 'unknown',
+    }))
+    .sort((left, right) => left.provider.localeCompare(right.provider) || left.id.localeCompare(right.id))
+}
+
+export function limitModelsPerProvider(models, maxModelsPerProvider = Infinity) {
+  if (maxModelsPerProvider !== Infinity && (!Number.isSafeInteger(maxModelsPerProvider) || maxModelsPerProvider < 1)) {
+    throw new Error('maxModelsPerProvider must be a positive integer or Infinity')
+  }
+  const selected = []
+  const counts = new Map()
+  for (const model of models) {
+    const count = counts.get(model.provider) || 0
+    if (count >= maxModelsPerProvider) continue
+    counts.set(model.provider, count + 1)
+    selected.push(model)
+  }
+  return selected
+}
+
+export function routedModelId(provider, model) {
+  return provider !== 'unknown' && !model.includes(':') ? `${provider}:${model}` : model
+}
+
+export function buildToolRequest(provider, model) {
+  return {
+    model: routedModelId(provider, model),
+    stream: true,
+    messages: [
+      {
+        role: 'user',
+        content: `Call ${TOOL_NAME} once with provider ${JSON.stringify(provider)} and model ${JSON.stringify(model)}. Do not add text.`,
+      },
     ],
-  })
-
-  assert.deepEqual(limitModelsPerProvider(models, 1), [
-    { id: 'gpt-a', provider: 'chatgpt' },
-    { id: 'qwen-a', provider: 'qwen' },
-  ])
-
-  assert.throws(() => limitModelsPerProvider(models, 0), /positive integer/)
-})
-
-test('parses streamed OpenAI tool-call deltas and done marker', () => {
-  const sse = summarizeSse(
-    parseSse(
-      [
-        ': keep-alive',
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"report_smoke_target","arguments":"{\\"provider\\":\\"qwen\\""}}]}}]}',
-        '',
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":",\\"model\\":\\"qwen3\\"}"}}]},"finish_reason":"tool_calls"}]}',
-        '',
-        'data: [DONE]',
-        '',
-      ].join('\n')
-    )
-  )
-
-  assert.equal(sse.done, true)
-  assert.deepEqual(sse.finish_reasons, ['tool_calls'])
-  assert.deepEqual(sse.tool_calls, [
-    {
-      id: 'call_1',
-      type: 'function',
-      name: 'report_smoke_target',
-      arguments: '{"provider":"qwen","model":"qwen3"}',
-      arguments_json: {
-        provider: 'qwen',
-        model: 'qwen3',
-      },
-    },
-  ])
-})
-
-test('runs every discovered model and includes advertised provider logs', async () => {
-  const requests = []
-
-  const fetchImpl = async (url, init = {}) => {
-    const requestUrl = new URL(url)
-
-    requests.push({
-      path: requestUrl.pathname,
-      headers: new Headers(init.headers),
-      body: init.body,
-    })
-
-    if (requestUrl.pathname === '/') {
-      return Response.json({
-        routes: {
-          provider_logs: '/providers/{provider}/logs',
-        },
-      })
-    }
-
-    if (requestUrl.pathname === '/openapi.json') {
-      return Response.json({
-        paths: {},
-      })
-    }
-
-    if (requestUrl.pathname === '/v1/models') {
-      return Response.json({
-        data: [
-          {
-            id: 'gpt-test',
-            provider: 'chatgpt',
-          },
-          {
-            id: 'qwen3',
-            provider: 'qwen',
-          },
-        ],
-      })
-    }
-
-    if (requestUrl.pathname === '/v1/chat/completions') {
-      const payload = JSON.parse(init.body)
-      const [provider, model] = payload.model.split(':')
-
-      const toolCallResponse = JSON.stringify({
-        choices: [
-          {
-            delta: {
-              tool_calls: [
-                {
-                  index: 0,
-                  id: `call_${provider}`,
-                  type: 'function',
-                  function: {
-                    name: 'report_smoke_target',
-                    arguments: JSON.stringify({
-                      provider,
-                      model,
-                    }),
-                  },
-                },
-              ],
+    tools: [
+      {
+        type: 'function',
+        function: {
+          name: TOOL_NAME,
+          description: 'Report which provider model handled this deterministic smoke request.',
+          parameters: {
+            type: 'object',
+            properties: {
+              provider: { type: 'string' },
+              model: { type: 'string' },
             },
-            finish_reason: 'tool_calls',
+            required: ['provider', 'model'],
+            additionalProperties: false,
           },
-        ],
-      })
-
-      return new Response(
-        [`data: ${toolCallResponse}`, '', 'data: [DONE]', ''].join('\n'),
-        {
-          headers: {
-            'content-type': 'text/event-stream',
-          },
-        }
-      )
-    }
-
-    if (requestUrl.pathname.endsWith('/logs')) {
-      return Response.json({
-        entries: [`${requestUrl.pathname} log`],
-      })
-    }
-
-    throw new Error(`Unexpected request: ${url}`)
-  }
-
-  const report = await runProviderToolSmoke({
-    apiKey: 'test-key',
-    fetchImpl,
-    hubUrl: 'http://hub.test',
-  })
-
-  assert.deepEqual(report.summary, {
-    failed: 0,
-    fetched_models: 2,
-    fetched_providers: 2,
-    models: 2,
-    passed: 2,
-    providers: 2,
-    scheduled_models: 2,
-    scheduled_providers: 2,
-    worked_models: 2,
-    worked_providers: 2,
-  })
-
-  assert.deepEqual(report.provider_logs.chatgpt.entries, ['/providers/chatgpt/logs log'])
-  assert.equal(report.results[0].routed_model, 'chatgpt:gpt-test')
-  assert.equal(report.results[1].routed_model, 'qwen:qwen3')
-  assert.equal(report.results[1].request.headers.authorization, '[redacted]')
-  assert.equal(JSON.parse(report.results[1].request.body).model, 'qwen:qwen3')
-  assert.match(report.results[1].response.body, /call_qwen/)
-  assert.equal(
-    requests.find(request => request.path === '/v1/models').headers.get('authorization'),
-    'Bearer test-key'
-  )
-  assert.equal(
-    requests.filter(request => request.path === '/v1/chat/completions').length,
-    2
-  )
-})
-
-test('uses an OpenAPI provider-log endpoint and validates CLI values', () => {
-  assert.deepEqual(
-    discoverProviderLogsEndpoint(
-      {},
-      {
-        paths: {
-          '/providers/{provider}/logs': {},
         },
+      },
+    ],
+    tool_choice: { type: 'function', function: { name: TOOL_NAME } },
+  }
+}
+
+export function parseSse(text) {
+  const events = []
+  let event = 'message'
+  let data = []
+
+  const flush = () => {
+    if (data.length === 0) return
+    const body = data.join('\n')
+    const parsed = body === '[DONE]' ? { value: null, error: null } : tryParseJson(body)
+    events.push({ event, data: body, json: parsed.value, parseError: parsed.error })
+    event = 'message'
+    data = []
+  }
+
+  for (const line of String(text).replace(/\r\n?/g, '\n').split('\n')) {
+    if (line === '') {
+      flush()
+    } else if (line.startsWith('event:')) {
+      event = line.slice(6).trim() || 'message'
+    } else if (line.startsWith('data:')) {
+      data.push(line.slice(5).replace(/^ /, ''))
+    }
+  }
+  flush()
+  return events
+}
+
+function tryParseJson(value) {
+  try {
+    return { value: JSON.parse(value), error: null }
+  } catch {
+    return { value: null, error: value ? 'invalid_json' : null }
+  }
+}
+
+export function summarizeSse(events) {
+  const calls = new Map()
+  const finishReasons = []
+  let contentChars = 0
+  let done = false
+  let parsedEvents = 0
+  let malformedEvents = 0
+
+  for (const event of events) {
+    if (event.data === '[DONE]') {
+      done = true
+      continue
+    }
+    if (event.parseError) {
+      malformedEvents += 1
+      continue
+    }
+    if (!event.json) continue
+    parsedEvents += 1
+
+    for (const choice of event.json.choices || []) {
+      const delta = choice.delta || {}
+      if (typeof delta.content === 'string') contentChars += delta.content.length
+      if (choice.finish_reason) finishReasons.push(choice.finish_reason)
+      for (const toolCall of delta.tool_calls || []) {
+        const key = toolCall.index ?? toolCall.id ?? calls.size
+        const current = calls.get(key) || { id: null, type: null, name: null, arguments: '' }
+        current.id ||= toolCall.id || null
+        current.type ||= toolCall.type || null
+        current.name ||= toolCall.function?.name || null
+        current.arguments += toolCall.function?.arguments || ''
+        calls.set(key, current)
       }
-    ),
-    {
-      path: '/providers/{provider}/logs',
-      source: 'openapi',
     }
-  )
+  }
 
-  assert.deepEqual(
-    parseCliArgs(
-      [
-        '--hub',
-        'http://localhost:3100/',
-        '--api-key',
-        'key',
-      ],
-      {}
-    ),
-    {
-      apiKey: 'key',
-      hubUrl: 'http://localhost:3100',
+  const toolCalls = [...calls.values()].map(toolCall => ({
+    ...toolCall,
+    arguments_json: tryParseJson(toolCall.arguments).value,
+  }))
+  return {
+    content_chars: contentChars,
+    done,
+    events: events.length,
+    finish_reasons: finishReasons,
+    malformed_events: malformedEvents,
+    parsed_events: parsedEvents,
+    tool_calls: toolCalls,
+  }
+}
+
+export function discoverProviderLogsEndpoint(root, openApi) {
+  const routes = root?.routes && typeof root.routes === 'object' ? root.routes : {}
+  for (const [name, path] of Object.entries(routes)) {
+    if (/logs?/i.test(name) && typeof path === 'string' && path.startsWith('/')) {
+      return { path, source: 'root.routes' }
     }
-  )
+  }
 
-  assert.deepEqual(parseCliArgs(['--', '--help'], {}), {
-    help: true,
+  for (const path of Object.keys(openApi?.paths || {})) {
+    if (/provider.*logs|logs.*provider/i.test(path)) return { path, source: 'openapi' }
+  }
+  return null
+}
+
+export function providerLogsUrl(hubUrl, endpoint, provider) {
+  const path = endpoint.path.includes('{provider}')
+    ? endpoint.path.replaceAll('{provider}', encodeURIComponent(provider))
+    : `${endpoint.path}${endpoint.path.includes('?') ? '&' : '?'}provider=${encodeURIComponent(provider)}`
+  return new URL(path, `${trimTrailingSlash(hubUrl)}/`).toString()
+}
+
+async function fetchText(fetchImpl, url, init) {
+  const response = await fetchImpl(url, init)
+  return { response, text: await response.text() }
+}
+
+async function fetchJson(fetchImpl, url, init) {
+  const { response, text } = await fetchText(fetchImpl, url, init)
+  const parsed = tryParseJson(text)
+  return { ok: response.ok, status: response.status, value: parsed.value, error: parsed.error }
+}
+
+async function optionalJson(fetchImpl, url, init) {
+  try {
+    return await fetchJson(fetchImpl, url, init)
+  } catch (error) {
+    return { ok: false, status: null, value: null, error: error.message }
+  }
+}
+
+export async function runProviderToolSmoke({ apiKey = '', fetchImpl = fetch, hubUrl = DEFAULT_HUB_URL, maxModelsPerProvider = Infinity } = {}) {
+  const headers = buildAuthHeaders(apiKey)
+  const rootUrl = new URL('/', `${trimTrailingSlash(hubUrl)}/`).toString()
+  const openApiUrl = new URL('/openapi.json', `${trimTrailingSlash(hubUrl)}/`).toString()
+  const modelsUrl = new URL('/v1/models', `${trimTrailingSlash(hubUrl)}/`).toString()
+  const root = await optionalJson(fetchImpl, rootUrl, { headers })
+  const openApi = await optionalJson(fetchImpl, openApiUrl, { headers })
+  const modelsResponse = await fetchJson(fetchImpl, modelsUrl, { headers })
+  if (!modelsResponse.ok) {
+    throw new Error(`GET /v1/models failed with status ${modelsResponse.status}`)
+  }
+
+  const endpoint = discoverProviderLogsEndpoint(root.value, openApi.value)
+  const fetchedModels = selectProviderModels(modelsResponse.value)
+  const models = limitModelsPerProvider(fetchedModels, maxModelsPerProvider)
+  const results = []
+
+  for (const { provider, id } of models) {
+    const request = buildToolRequest(provider, id)
+    const init = {
+      method: 'POST',
+      headers: buildAuthHeaders(apiKey, { 'content-type': 'application/json' }),
+      body: JSON.stringify(request),
+    }
+    const requestCapture = captureRequest(new URL('/v1/chat/completions', `${trimTrailingSlash(hubUrl)}/`).toString(), init)
+    const started = performance.now()
+    try {
+      const { response, text } = await fetchText(fetchImpl, requestCapture.url, init)
+      const sse = summarizeSse(parseSse(text))
+      const toolCallDetected = sse.tool_calls.some(toolCall => toolCall.name === TOOL_NAME)
+      results.push({
+        provider,
+        model: id,
+        routed_model: request.model,
+        status: response.status,
+        latency_ms: Number((performance.now() - started).toFixed(3)),
+        content_type: response.headers.get('content-type'),
+        result: response.ok && sse.done && toolCallDetected ? 'passed' : 'failed',
+        request: requestCapture,
+        response: captureResponse(response, text),
+        tool_call_detected: toolCallDetected,
+        sse,
+      })
+    } catch (error) {
+      results.push({
+        provider,
+        model: id,
+        routed_model: request.model,
+        request: requestCapture,
+        response: null,
+        result: 'failed',
+        latency_ms: Number((performance.now() - started).toFixed(3)),
+        error: error.message,
+      })
+    }
+  }
+
+  const fetchedProviders = [...new Set(fetchedModels.map(model => model.provider))]
+  const providers = [...new Set(models.map(model => model.provider))]
+  const providerLogs = {}
+  for (const provider of providers) {
+    if (!endpoint) {
+      providerLogs[provider] = { available: false }
+      continue
+    }
+    const logs = await optionalJson(fetchImpl, providerLogsUrl(hubUrl, endpoint, provider), { headers })
+    providerLogs[provider] = logs.ok
+      ? { available: true, endpoint: endpoint.path, status: logs.status, entries: logs.value?.entries ?? logs.value }
+      : { available: true, endpoint: endpoint.path, status: logs.status, error: logs.error }
+  }
+
+  return {
+    hub: trimTrailingSlash(hubUrl),
+    logs_endpoint: endpoint,
+    provider_logs: providerLogs,
+    results,
+    summary: {
+      failed: results.filter(result => result.result !== 'passed').length,
+      fetched_models: fetchedModels.length,
+      fetched_providers: fetchedProviders.length,
+      models: results.length,
+      passed: results.filter(result => result.result === 'passed').length,
+      providers: providers.length,
+      scheduled_models: models.length,
+      scheduled_providers: providers.length,
+      worked_models: results.filter(result => result.result === 'passed').length,
+      worked_providers: new Set(results.filter(result => result.result === 'passed').map(result => result.provider)).size,
+    },
+  }
+}
+
+export function helpText() {
+  return `Usage: node scripts/provider-tool-smoke.mjs [--hub URL] [--api-key KEY]\n\nEnvironment: RUST_PROXY_HUB_URL, RUST_PROXY_HUB_API_KEY`
+}
+
+export async function main(argv = process.argv.slice(2), env = process.env) {
+  const options = parseCliArgs(argv, env)
+  if (options.help) {
+    console.log(helpText())
+    return 0
+  }
+  const report = await runProviderToolSmoke(options)
+  console.log(JSON.stringify(report, null, 2))
+  return report.summary.failed === 0 ? 0 : 1
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().then(code => process.exitCode = code).catch(error => {
+    console.error(error.message)
+    process.exitCode = 1
   })
-
-  assert.throws(
-    () => parseCliArgs(['--hub', 'file:///tmp/hub'], {}),
-    /http or https/
-  )
-})
-
-test('CLI creates an isolated provider test environment and verifies every provider response and log', async () => {
-  const hub = await startTemporaryHub()
-
-  try {
-    const result = await runSmokeCli({
-      RUST_PROXY_HUB_API_KEY: 'temporary-test-key',
-      RUST_PROXY_HUB_URL: hub.url,
-    })
-
-    assert.equal(result.code, 0, result.stderr)
-
-    const report = JSON.parse(result.stdout)
-
-    assert.deepEqual(report.summary, {
-      failed: 0,
-      fetched_models: 8,
-      fetched_providers: 8,
-      models: 8,
-      passed: 8,
-      providers: 8,
-      scheduled_models: 8,
-      scheduled_providers: 8,
-      worked_models: 8,
-      worked_providers: 8,
-    })
-
-    assert.deepEqual(
-      Object.keys(report.provider_logs).sort(),
-      ALL_PROVIDERS.map(([provider]) => provider).sort()
-    )
-
-    for (const [provider] of ALL_PROVIDERS) {
-      assert.deepEqual(
-        report.provider_logs[provider].entries,
-        [`${provider} tool-call recorded`]
-      )
-    }
-
-    const chats = hub.requests.filter(
-      request => request.path === '/v1/chat/completions'
-    )
-
-    assert.equal(chats.length, ALL_PROVIDERS.length)
-
-    for (const request of chats) {
-      const payload = JSON.parse(request.body)
-
-      assert.equal(
-        request.headers.authorization,
-        'Bearer temporary-test-key'
-      )
-
-      assert.equal(payload.stream, true)
-      assert.equal(
-        payload.tools[0].function.name,
-        'report_smoke_target'
-      )
-      assert.equal(
-        payload.tool_choice.function.name,
-        'report_smoke_target'
-      )
-    }
-  } finally {
-    await hub.close()
-  }
-})
-
-test('CLI checks prompt and tool-result interactions for Kilo, Claude, Pi, and OpenCode', async () => {
-  const hub = await startTemporaryHub()
-
-  try {
-    const result = await runCli(
-      'client-interaction-smoke.mjs',
-      {
-        RUST_PROXY_HUB_API_KEY: 'temporary-test-key',
-        RUST_PROXY_HUB_URL: hub.url,
-      }
-    )
-
-    assert.equal(result.code, 0, result.stderr)
-
-    const report = JSON.parse(result.stdout)
-
-    assert.deepEqual(report.summary, {
-      failed: 0,
-      fetched_models: 8,
-      models: 8,
-      passed: 16,
-      protocols: 2,
-      scheduled_models: 8,
-    })
-
-    assert.deepEqual(
-      Object.keys(report.clients).sort(),
-      ['claude', 'kilo', 'opencode', 'pi']
-    )
-
-    assert.equal(
-      report.clients.kilo.configuration.provider_api,
-      'OpenAI Compatible'
-    )
-
-    assert.equal(
-      report.clients.pi.configuration.models_json.providers.rust_proxy_hub.api,
-      'openai-completions'
-    )
-
-    assert.equal(
-      report.clients.opencode.configuration.opencode_json.provider.rust_proxy_hub.npm,
-      '@ai-sdk/openai-compatible'
-    )
-
-    assert.equal(
-      report.clients.claude.configuration.protocol,
-      'anthropic-messages'
-    )
-
-    const chatInteractions = hub.requests.filter(
-      request =>
-        request.path === '/v1/chat/completions' &&
-        JSON.parse(request.body).messages.some(
-          message => message.role === 'tool'
-        )
-    )
-
-    const anthropicInteractions = hub.requests.filter(
-      request => request.path === '/v1/messages'
-    )
-
-    assert.equal(
-      chatInteractions.length,
-      ALL_PROVIDERS.length
-    )
-
-    assert.equal(
-      anthropicInteractions.length,
-      ALL_PROVIDERS.length
-    )
-
-    assert.ok(
-      anthropicInteractions.every(
-        request =>
-          JSON.parse(request.body).messages.at(-1).content[0].type ===
-          'tool_result'
-      )
-    )
-  } finally {
-    await hub.close()
-  }
-})
-
-test('benchmark records every provider/model conversation in append-only JSONL and Markdown history', async () => {
-  const hub = await startTemporaryHub()
-
-  const historyDir = await mkdtemp(
-    join(
-      tmpdir(),
-      'rust-proxy-hub-benchmark-'
-    )
-  )
-
-  try {
-    const result = await runCli(
-      'benchmark-provider-interactions.mjs',
-      {
-        RUST_PROXY_HUB_API_KEY: 'temporary-test-key',
-        RUST_PROXY_HUB_URL: hub.url,
-      },
-      [
-        '--history-dir',
-        historyDir,
-      ]
-    )
-
-    assert.equal(result.code, 0, result.stderr)
-
-    const report = JSON.parse(result.stdout)
-
-    assert.equal(report.summary.failed, 0)
-    assert.equal(report.summary.models_fetched, 8)
-    assert.equal(report.summary.models_scheduled, 8)
-    assert.equal(report.summary.models_worked, 8)
-    assert.equal(report.summary.providers_fetched, 8)
-    assert.equal(report.summary.providers_scheduled, 8)
-    assert.equal(report.summary.providers_worked, 8)
-    assert.equal(report.summary.requests, 24)
-    assert.equal(report.summary.passed, 24)
-    assert.equal(report.summary.logs_fetched, 8)
-    assert.ok(report.summary.log_entries >= 8)
-    assert.ok(report.summary.latency_ms.total > 0)
-    assert.equal(report.history.runs, 1)
-
-    const repeat = await runCli(
-      'benchmark-provider-interactions.mjs',
-      {
-        RUST_PROXY_HUB_API_KEY: 'temporary-test-key',
-        RUST_PROXY_HUB_URL: hub.url,
-      },
-      [
-        '--history-dir',
-        historyDir,
-      ]
-    )
-
-    assert.equal(repeat.code, 0, repeat.stderr)
-    assert.equal(
-      JSON.parse(repeat.stdout).history.runs,
-      2
-    )
-
-    const jsonl = await readFile(
-      join(
-        historyDir,
-        'provider-model-history.jsonl'
-      ),
-      'utf8'
-    )
-
-    const markdown = await readFile(
-      join(
-        historyDir,
-        'provider-model-history.md'
-      ),
-      'utf8'
-    )
-
-    assert.equal(
-      jsonl.trim().split('\n').length,
-      2
-    )
-
-    assert.match(
-      jsonl,
-      /forced_tool_call \+ prompt_tool_result_interaction:v1/
-    )
-
-    assert.match(jsonl, /\"request\"/)
-    assert.match(jsonl, /\"response\"/)
-    assert.match(jsonl, /\[redacted\]/)
-    assert.match(markdown, /Latest conversation results/)
-    assert.match(markdown, /qwen:qwen3/)
-    assert.match(markdown, /anthropic-messages/)
-    assert.match(
-      markdown,
-      /RUST_PROXY_HUB_INTERACTION_CONFIRMED/
-    )
-  } finally {
-    await hub.close()
-
-    await rm(
-      historyDir,
-      {
-        force: true,
-        recursive: true,
-      }
-    )
-  }
-})
+}
