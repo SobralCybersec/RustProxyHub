@@ -46,20 +46,22 @@ jobs:
     name: actionlint (workflow YAML)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+
       - name: Install actionlint v1.7.12
+        shell: bash
         run: |
-          curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
-            --output actionlint.tar.gz \
-            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
-          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum --check
-          tar -xzf actionlint.tar.gz actionlint
-          sudo mv actionlint /usr/local/bin/actionlint
-          actionlint --version
-      - run: actionlint -color .github/workflows/*.yml
+          set -euo pipefail
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -version
+
+      - name: Lint GitHub Actions workflows
+        shell: bash
+        run: ./actionlint -color
 
   format:
     name: Prettier (format:check)
