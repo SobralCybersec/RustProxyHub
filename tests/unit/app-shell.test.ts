@@ -135,4 +135,18 @@ describe('app shell', () => {
     expect(windowControls.toggleMaximize).toHaveBeenCalledTimes(1)
     expect(windowControls.close).toHaveBeenCalledTimes(1)
   })
+
+  it('closes provider drawer with Escape keybind', async () => {
+    const wrapper = mountApp()
+    await flushPromises()
+    const store = useStore()
+    store.activeDrawer = 'chatgpt'
+
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    document.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(true)
+    expect(store.activeDrawer).toBeNull()
+    wrapper.unmount()
+  })
 })

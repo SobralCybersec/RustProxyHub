@@ -143,6 +143,24 @@ function firstExisting(paths) {
   return paths.find((candidate) => fs.existsSync(candidate))
 }
 
+const BROWSER_PATH_NAMES = {
+  msedge: ['msedge', 'microsoft-edge', 'microsoft-edge-stable'],
+  chrome: ['chrome', 'google-chrome', 'google-chrome-stable'],
+  chromium: ['chromium', 'chromium-browser'],
+}
+
+function firstOnPath(names) {
+  return String(process.env.PATH || '')
+    .split(path.delimiter)
+    .filter(Boolean)
+    .flatMap((directory) => names.map((name) => path.join(directory, name)))
+    .find((candidate) => fs.existsSync(candidate))
+}
+
+function browserExecutablePath(browser) {
+  return firstExisting(BROWSER_PATHS[browser] ?? []) || firstOnPath(BROWSER_PATH_NAMES[browser] ?? [])
+}
+
 // Resolve a Chromium launch config. If the requested channel's real
 // distribution is installed, drive it via `channel` (Playwright applies the
 // right profile flags). Otherwise point `executablePath` at whatever
@@ -156,7 +174,7 @@ function resolveChromium(preferredChannel) {
     ? [preferredChannel, 'msedge', 'chrome', 'chromium']
     : ['chromium', 'chrome', 'msedge']
   for (const key of order) {
-    const executablePath = firstExisting(BROWSER_PATHS[key] ?? [])
+    const executablePath = browserExecutablePath(key)
     if (executablePath) {
       return { engine: chromium, executablePath }
     }
@@ -188,6 +206,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function bridgeDebug(message) {
+  process.stderr.write(`[bridge] ${message}\n`)
+}
+
 function send(id, result = null, error = null) {
   process.stdout.write(`${JSON.stringify({ id, result, error })}\n`)
 }
@@ -212,6 +234,8 @@ const state = {
     lastHeadersTime: 0,
     streamEmitter: null,
     streamLock: Promise.resolve(),
+    initPromiseKey: null,
+    browser: null,
     runtimeDir: null,
     webSessions: new Map(),
   },
@@ -621,7 +645,10 @@ async function openDeepSeekLogin({ runtime_dir, browser }) {
 }
 
 async function initChatGPTOnce({ runtime_dir, headless, browser }) {
-  process.chdir(runtime_dir)
+  const runtimeDir = path.resolve(runtime_dir || process.cwd())
+  const selectedBrowser = String(browser || 'chromium').trim().toLowerCase()
+  process.chdir(runtimeDir)
+  bridgeDebug(`chatgpt init headless=${Boolean(headless)} browser=${selectedBrowser}`)
   if (state.chatgpt.runtimeDir !== process.cwd()) {
     state.chatgpt.runtimeDir = process.cwd()
     state.chatgpt.webSessions = loadChatGPTWebSessions(state.chatgpt.runtimeDir)
@@ -630,7 +657,33 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     await state.chatgpt.oauth?.close()
     state.chatgpt.oauth = new ChatGptOAuthClient(process.cwd())
   }
-  if (state.chatgpt.context && state.chatgpt.headless === headless) return
+  if (
+    state.chatgpt.context &&
+    state.chatgpt.headless === headless &&
+    state.chatgpt.browser === selectedBrowser &&
+    state.chatgpt.runtimeDir === process.cwd()
+  ) {
+    try {
+      if (!state.chatgpt.page || state.chatgpt.page.isClosed()) {
+        state.chatgpt.page =
+          state.chatgpt.context.pages().find((candidate) => !candidate.isClosed()) ||
+          (await state.chatgpt.context.newPage())
+        await state.chatgpt.page.exposeBinding('__rustProxyHubStream', (_source, event) => {
+          if (state.chatgpt.streamEmitter && event && typeof event === 'object') {
+            state.chatgpt.streamEmitter(event)
+          }
+        })
+      }
+      await state.chatgpt.page.bringToFront().catch(() => {})
+      return
+    } catch (error) {
+      bridgeDebug(`chatgpt stale page reset: ${error instanceof Error ? error.message : String(error)}`)
+      await closeContext(state.chatgpt.context)
+      state.chatgpt.context = null
+      state.chatgpt.page = null
+      state.chatgpt.browser = null
+    }
+  }
   if (state.chatgpt.context) {
     await closeContext(state.chatgpt.context)
     state.chatgpt.context = null
@@ -638,6 +691,7 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     state.chatgpt.cachedHeaders = null
     state.chatgpt.lastHeadersTime = 0
     state.chatgpt.streamEmitter = null
+    state.chatgpt.browser = null
   }
   ensureDir(path.resolve('chatgpt_profile'))
   const { engine, channel, executablePath } = resolveEngine(browser)
@@ -645,10 +699,6 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     headless,
     channel,
     executablePath,
-    // Chrome Stable Linux 150.0.7871.186 (2026-07-23). Keep this aligned with
-    // the selected browser release so it matches the browser's Client Hints.
-    userAgent:
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.186 Safari/537.36',
     viewport: null,
     ignoreDefaultArgs: ['--enable-automation'],
     args: [
@@ -669,6 +719,8 @@ async function initChatGPTOnce({ runtime_dir, headless, browser }) {
     }
   })
   state.chatgpt.headless = headless
+  state.chatgpt.browser = selectedBrowser
+  bridgeDebug(`chatgpt context ready headless=${Boolean(headless)} browser=${selectedBrowser}`)
 }
 
 function persistChatGPTWebSessions() {
@@ -676,14 +728,28 @@ function persistChatGPTWebSessions() {
   saveChatGPTWebSessions(state.chatgpt.runtimeDir, state.chatgpt.webSessions)
 }
 
-async function initChatGPT(params) {
+function chatGPTInitKey(params = {}) {
+  return JSON.stringify({
+    runtime_dir: path.resolve(params.runtime_dir || process.cwd()),
+    headless: Boolean(params.headless),
+    browser: String(params.browser || 'chromium').trim().toLowerCase(),
+  })
+}
+
+async function initChatGPT(params = {}) {
+  const key = chatGPTInitKey(params)
+  while (state.chatgpt.initPromise && state.chatgpt.initPromiseKey !== key) {
+    await state.chatgpt.initPromise.catch(() => {})
+  }
   if (state.chatgpt.initPromise) return state.chatgpt.initPromise
   const promise = initChatGPTOnce(params)
   state.chatgpt.initPromise = promise
+  state.chatgpt.initPromiseKey = key
   try {
     return await promise
   } finally {
     if (state.chatgpt.initPromise === promise) state.chatgpt.initPromise = null
+    if (state.chatgpt.initPromise === null) state.chatgpt.initPromiseKey = null
   }
 }
 
@@ -700,7 +766,8 @@ async function captureChatGPTTemplate(forceNew = false) {
   }
 
   const inputSelector = 'textarea:visible, #prompt-textarea:visible, div[contenteditable="true"]:visible'
-  await page.waitForSelector(inputSelector, { timeout: 30000 }).catch(() => {
+  const input = page.locator(inputSelector).first()
+  await input.waitFor({ state: 'visible', timeout: 30000 }).catch(() => {
     throw new Error('Timeout waiting for ChatGPT input. Are you logged in?')
   })
 
@@ -756,13 +823,20 @@ async function captureChatGPTTemplate(forceNew = false) {
       resolve(state.chatgpt.cachedHeaders)
     }
 
-    page.route('**/backend-api/f/conversation*', routeHandler).then(async () => {
-      await page.focus(inputSelector)
-      await page.fill(inputSelector, '')
-      await page.type(inputSelector, 'a', { delay: 50 })
-      await sleep(1500)
-      await page.keyboard.press('Enter')
-    })
+    page
+      .route('**/backend-api/f/conversation*', routeHandler)
+      .then(async () => {
+        try {
+          await input.fill('a')
+          await sleep(1500)
+          await input.press('Enter')
+        } catch (error) {
+          clearTimeout(timeout)
+          await page.unroute('**/backend-api/f/conversation*', routeHandler).catch(() => {})
+          reject(error)
+        }
+      })
+      .catch(reject)
   })
 }
 
@@ -1366,6 +1440,7 @@ async function chatChatGPT({ model, prompt, system_prompt, web_search = false, c
 }
 
 async function openChatGPTLogin({ runtime_dir, browser, oauth = false, web = true } = {}) {
+  bridgeDebug(`chatgpt manual login start oauth=${Boolean(oauth)} browser=${browser || 'chromium'}`)
   await initChatGPT({ runtime_dir, headless: false, browser })
   if (oauth) {
     const oauthPage = state.chatgpt.context
@@ -1374,9 +1449,14 @@ async function openChatGPTLogin({ runtime_dir, browser, oauth = false, web = tru
     if (!oauthPage || !state.chatgpt.oauth) {
       throw new Error('ChatGPT OAuth login page could not be opened')
     }
+    await oauthPage.bringToFront().catch(() => {})
     await state.chatgpt.oauth.startLogin(oauthPage)
   }
-  if (web) await state.chatgpt.page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
+  if (web) {
+    await state.chatgpt.page.bringToFront().catch(() => {})
+    await state.chatgpt.page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded' })
+  }
+  bridgeDebug(`chatgpt manual login ready url=${state.chatgpt.page.url()}`)
 }
 
 async function initGemini({ runtime_dir, headless, browser }) {
@@ -2784,7 +2864,10 @@ async function closeAll() {
         state[key].headless = null
         state[key].cachedHeaders = null
         state[key].lastHeadersTime = 0
-        if (key === 'chatgpt') state.chatgpt.streamEmitter = null
+        if (key === 'chatgpt') {
+          state.chatgpt.streamEmitter = null
+          state.chatgpt.browser = null
+        }
       }
     }
   }

@@ -24,14 +24,14 @@ function loadLocale(): UiLocale {
 }
 
 const defaultBrowserPrefs: BrowserPrefs = {
-  qwen: 'msedge',
-  deepseek: 'msedge',
-  kimi: 'msedge',
-  chatgpt: 'msedge',
-  gemini: 'msedge',
-  mistral: 'msedge',
-  zai: 'msedge',
-  meta: 'msedge',
+  qwen: 'chromium',
+  deepseek: 'chromium',
+  kimi: 'chromium',
+  chatgpt: 'chromium',
+  gemini: 'chromium',
+  mistral: 'chromium',
+  zai: 'chromium',
+  meta: 'chromium',
 }
 
 type BusyMap = Record<string, boolean>

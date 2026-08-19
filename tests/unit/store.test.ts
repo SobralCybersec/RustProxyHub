@@ -33,14 +33,14 @@ describe('store runtime flow', () => {
 
     expect(providerOrder).toEqual(['qwen', 'deepseek', 'kimi', 'chatgpt', 'gemini', 'mistral', 'zai', 'meta'])
     expect(store.browserPrefs).toEqual({
-      qwen: 'msedge',
-      deepseek: 'msedge',
-      kimi: 'msedge',
-      chatgpt: 'msedge',
-      gemini: 'msedge',
-      mistral: 'msedge',
-      zai: 'msedge',
-      meta: 'msedge',
+      qwen: 'chromium',
+      deepseek: 'chromium',
+      kimi: 'chromium',
+      chatgpt: 'chromium',
+      gemini: 'chromium',
+      mistral: 'chromium',
+      zai: 'chromium',
+      meta: 'chromium',
     })
   })
 
@@ -72,7 +72,7 @@ describe('store runtime flow', () => {
       await store.stopProviderLogin(provider)
 
       expect(mockedInvoke).toHaveBeenCalledWith('start_provider_login_session', {
-        request: { provider, browser: 'msedge' },
+        request: { provider, browser: 'chromium' },
       })
       expect(mockedInvoke).toHaveBeenCalledWith('stop_provider_login_session', { provider })
       expect(store.isBusy(`login:start:${provider}`)).toBe(false)

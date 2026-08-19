@@ -171,9 +171,9 @@ async function addQwenAccount() {
           :value="store.browserPrefs[p.name]"
           @change="setBrowser(p.name, ($event.target as HTMLSelectElement).value)"
         >
-          <option value="msedge">msedge</option>
-          <option value="chrome">chrome</option>
           <option value="chromium">chromium</option>
+          <option value="chrome">chrome</option>
+          <option value="msedge">msedge</option>
         </select>
       </div>
 

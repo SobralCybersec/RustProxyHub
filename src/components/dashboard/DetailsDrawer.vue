@@ -18,7 +18,9 @@ function dotMod(overview: ProviderOverview): string {
 }
 
 function onEscape(e: KeyboardEvent) {
-  if (e.key === 'Escape') store.closeProviderDrawer()
+  if (e.key !== 'Escape' || !store.activeDrawer) return
+  e.preventDefault()
+  store.closeProviderDrawer()
 }
 
 onMounted(() => document.addEventListener('keydown', onEscape))

@@ -617,6 +617,13 @@ impl PlaywrightBridge {
 #[async_trait]
 impl BrowserBridge for PlaywrightBridge {
     async fn init(&self, params: InitParams) -> Result<()> {
+        append_bridge_log(
+            self.log_path.as_ref(),
+            format!(
+                "init provider={} headless={} browser={} runtime_dir={}",
+                self.provider, params.headless, params.browser, params.runtime_dir
+            ),
+        );
         if self.is_initialized_with(&params).await {
             return Ok(());
         }
@@ -642,6 +649,13 @@ impl BrowserBridge for PlaywrightBridge {
     }
 
     async fn manual_login(&self, params: ManualLoginParams) -> Result<()> {
+        append_bridge_log(
+            self.log_path.as_ref(),
+            format!(
+                "manual_login provider={} browser={} runtime_dir={}",
+                self.provider, params.browser, params.runtime_dir
+            ),
+        );
         self.request::<_, Value>("manual_login", params)
             .await
             .map(|_| ())
